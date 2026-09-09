@@ -158,6 +158,125 @@ class VoiceCallRuntimeTest {
         runtime.close()
     }
 
+    @Test
+    fun failedPlatformDisconnectKeepsTheLegUntilTelecomReallyEnds() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway().apply { disconnectFailure = IllegalStateException("Telecom still owns it") }
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+
+        runtime.placeCall("+34600000008")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.hangup(token)
+        runCurrent()
+
+        assertEquals(token, runtime.snapshot.value.legToken)
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        assertTrue(gateway.scopeActive)
+
+        gateway.disconnectFailure = null
+        runtime.hangup(token)
+        runCurrent()
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        assertFalse(gateway.scopeActive)
+        runtime.close()
+    }
+
+    @Test
+    fun successfulDisconnectStillWaitsForTheTelecomScopeToFinish() = runTest(UnconfinedTestDispatcher()) {
+        val gateway = FakeGateway(completeOnDisconnect = false)
+        val runtime = runtime(FakeVoiceEngine(), gateway, FakeLegacyAudio())
+
+        runtime.placeCall("+34600000009")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.hangup(token)
+        runCurrent()
+
+        assertEquals(token, runtime.snapshot.value.legToken)
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        gateway.finish()
+        runCurrent()
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun incomingCallWithoutMicrophonePermissionIsStillAdmittedOrRejectedByTelecom() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine().apply { microphonePermission = false }
+        val gateway = FakeGateway(failure = IllegalStateException("native call conflict"))
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "incoming-without-microphone"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000010", legToken = token))
+        runCurrent()
+
+        assertTrue(engine.commands.contains("reject:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        assertTrue(runtime.snapshot.value.voice.detail.contains("native call conflict"))
+        runtime.close()
+    }
+
+    @Test
+    fun telecomAnswerWithoutMicrophonePermissionRejectsTheExactIncomingLeg() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine().apply { microphonePermission = false }
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "incoming-system-answer-without-microphone"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000011", legToken = token))
+        runCurrent()
+        assertTrue(runtime.snapshot.value.telecomManaged)
+        assertTrue(runtime.snapshot.value.microphonePermissionRequired)
+        gateway.callbacks.onAnswer()
+        runCurrent()
+
+        assertTrue(engine.commands.contains("reject:$token"))
+        assertEquals(1, gateway.disconnectCount)
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun lateSipActiveEventCannotUndoTelecomInactiveState() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "incoming-inactive-generation"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000012", legToken = token))
+        runCurrent()
+        gateway.callbacks.onAnswer()
+        gateway.callbacks.onSetInactive()
+        runtime.onVoiceEvent(VoiceEngineEvent("active", peer = "+34600000012", legToken = token))
+        runCurrent()
+
+        assertEquals(VoiceCallPhase.INACTIVE, runtime.snapshot.value.phase)
+        assertEquals(0, gateway.setActiveCount)
+        assertEquals("inactive:$token:true", engine.commands.last())
+        runtime.close()
+    }
+
+    @Test
+    fun failedSipActivationClosesTelecomBeforeForgettingTheLeg() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway().apply { setActiveFailure = IllegalStateException("activation denied") }
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+
+        runtime.placeCall("+34600000013")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onVoiceEvent(VoiceEngineEvent("active", peer = "+34600000013", legToken = token))
+        runCurrent()
+
+        assertEquals(1, gateway.setActiveCount)
+        assertEquals(1, gateway.disconnectCount)
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        assertFalse(gateway.scopeActive)
+        runtime.close()
+    }
+
     private fun kotlinx.coroutines.test.TestScope.runtime(
         engine: FakeVoiceEngine,
         gateway: PlatformCallGateway?,
@@ -195,19 +314,28 @@ class VoiceCallRuntimeTest {
     private class FakeGateway(
         private val deferAdmission: Boolean = false,
         private val failure: Throwable? = null,
+        private val completeOnDisconnect: Boolean = true,
     ) : PlatformCallGateway {
         var disconnectCount = 0
+        var setActiveCount = 0
+        var disconnectFailure: Throwable? = null
+        var setActiveFailure: Throwable? = null
+        var scopeActive = false
         lateinit var callbacks: PlatformCallCallbacks
         private var ready: ((PlatformCallControl) -> Unit)? = null
         private val admission = CompletableDeferred<Unit>()
         private var lifetime = CompletableDeferred<Unit>()
         private val control = object : PlatformCallControl {
             override suspend fun answer() = Unit
-            override suspend fun setActive() = Unit
+            override suspend fun setActive() {
+                setActiveCount += 1
+                setActiveFailure?.let { throw it }
+            }
             override suspend fun setInactive() = Unit
             override suspend fun disconnect(rejected: Boolean) {
                 disconnectCount += 1
-                lifetime.complete(Unit)
+                disconnectFailure?.let { throw it }
+                if (completeOnDisconnect) lifetime.complete(Unit)
             }
             override suspend fun requestEndpoint(endpointId: String) = Unit
         }
@@ -217,16 +345,21 @@ class VoiceCallRuntimeTest {
             callbacks: PlatformCallCallbacks,
             onReady: (PlatformCallControl) -> Unit,
         ) {
-            failure?.let { throw it }
-            lifetime = CompletableDeferred()
-            this.callbacks = callbacks
-            if (deferAdmission) {
-                ready = onReady
-                admission.await()
-            } else {
-                onReady(control)
+            scopeActive = true
+            try {
+                failure?.let { throw it }
+                lifetime = CompletableDeferred()
+                this.callbacks = callbacks
+                if (deferAdmission) {
+                    ready = onReady
+                    admission.await()
+                } else {
+                    onReady(control)
+                }
+                lifetime.await()
+            } finally {
+                scopeActive = false
             }
-            lifetime.await()
         }
 
         fun admit() {

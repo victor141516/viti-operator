@@ -1,7 +1,9 @@
 package com.viti.operator.voice
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
@@ -10,6 +12,7 @@ import android.media.session.PlaybackState
 import android.os.Handler
 import android.os.Looper
 import android.view.KeyEvent
+import androidx.core.content.ContextCompat
 
 /** Capability fallback for devices where self-managed Telecom is unavailable. */
 @Suppress("DEPRECATION")
@@ -20,13 +23,15 @@ class LegacyCallAudioController(
     private val onAnswer: () -> Unit,
     private val onHangup: () -> Unit,
 ) : LegacyAudioControl {
-    private val audioManager = context.applicationContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val handler = Handler(Looper.getMainLooper())
     private var active = false
     private var incoming = false
     private var previousMode = AudioManager.MODE_NORMAL
     private var focusOwned = false
     private var selectedEndpointId = ""
+    private var scoConnected = false
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_GAIN -> onInactiveChanged(false)
@@ -39,6 +44,25 @@ class LegacyCallAudioController(
     private val deviceCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) = publishAudioState()
         override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) = publishAudioState()
+    }
+    private val scoReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action != AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED) return
+            when (intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR)) {
+                AudioManager.SCO_AUDIO_STATE_CONNECTED -> {
+                    scoConnected = true
+                    audioManager.isBluetoothScoOn = true
+                }
+                AudioManager.SCO_AUDIO_STATE_DISCONNECTED,
+                AudioManager.SCO_AUDIO_STATE_ERROR,
+                -> {
+                    scoConnected = false
+                    audioManager.isBluetoothScoOn = false
+                }
+                else -> return
+            }
+            publishAudioState()
+        }
     }
     private val mediaSession = MediaSession(context.applicationContext, "VitiLegacyCall").apply {
         setFlags(MediaSession.FLAG_HANDLES_MEDIA_BUTTONS or MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS)
@@ -71,6 +95,12 @@ class LegacyCallAudioController(
 
     init {
         audioManager.registerAudioDeviceCallback(deviceCallback, handler)
+        ContextCompat.registerReceiver(
+            appContext,
+            scoReceiver,
+            IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
     }
 
     override fun begin(direction: VoiceCallDirection) {
@@ -101,13 +131,14 @@ class LegacyCallAudioController(
             }
             VoiceAudioEndpointType.BLUETOOTH -> {
                 audioManager.isSpeakerphoneOn = false
+                scoConnected = false
                 audioManager.startBluetoothSco()
-                audioManager.isBluetoothScoOn = true
             }
             else -> {
                 audioManager.isSpeakerphoneOn = false
                 audioManager.stopBluetoothSco()
                 audioManager.isBluetoothScoOn = false
+                scoConnected = false
             }
         }
         publishAudioState()
@@ -125,6 +156,7 @@ class LegacyCallAudioController(
     override fun close() {
         end()
         audioManager.unregisterAudioDeviceCallback(deviceCallback)
+        appContext.unregisterReceiver(scoReceiver)
         mediaSession.release()
     }
 
@@ -145,6 +177,7 @@ class LegacyCallAudioController(
         focusOwned = false
         audioManager.stopBluetoothSco()
         audioManager.isBluetoothScoOn = false
+        scoConnected = false
         audioManager.isSpeakerphoneOn = false
         if (audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) audioManager.mode = previousMode
     }
@@ -167,14 +200,11 @@ class LegacyCallAudioController(
         if (selectedEndpointId.isNotBlank() && available.none { it.id == selectedEndpointId }) {
             selectedEndpointId = ""
         }
-        val current = available.firstOrNull {
-            audioManager.isSpeakerphoneOn && it.type == VoiceAudioEndpointType.SPEAKER
-        } ?: available.firstOrNull {
-            audioManager.isBluetoothScoOn && it.type == VoiceAudioEndpointType.BLUETOOTH
-        } ?: available.firstOrNull { it.id == selectedEndpointId }
-            ?: available.firstOrNull { it.type == VoiceAudioEndpointType.WIRED_HEADSET }
-            ?: available.firstOrNull { it.type == VoiceAudioEndpointType.EARPIECE }
-            ?: available.firstOrNull()
+        val current = selectLegacyCurrentEndpoint(
+            available = available,
+            speakerphoneOn = audioManager.isSpeakerphoneOn,
+            bluetoothScoConnected = scoConnected,
+        )
         onAudioState(PlatformAudioState(current = current, available = available))
     }
 
@@ -194,3 +224,16 @@ class LegacyCallAudioController(
         val BLUETOOTH_TYPES = setOf(AudioDeviceInfo.TYPE_BLUETOOTH_SCO)
     }
 }
+
+internal fun selectLegacyCurrentEndpoint(
+    available: List<VoiceAudioEndpoint>,
+    speakerphoneOn: Boolean,
+    bluetoothScoConnected: Boolean,
+): VoiceAudioEndpoint? = available.firstOrNull {
+    speakerphoneOn && it.type == VoiceAudioEndpointType.SPEAKER
+} ?: available.firstOrNull {
+    bluetoothScoConnected && it.type == VoiceAudioEndpointType.BLUETOOTH
+} ?: available.firstOrNull { it.type == VoiceAudioEndpointType.WIRED_HEADSET }
+    ?: available.firstOrNull { it.type == VoiceAudioEndpointType.EARPIECE }
+    ?: available.firstOrNull { it.type == VoiceAudioEndpointType.SPEAKER }
+    ?: available.firstOrNull()

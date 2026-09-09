@@ -6,9 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
@@ -44,6 +46,8 @@ class VoiceCallService : Service() {
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
     private val ringer by lazy { IncomingCallRinger(applicationContext, CALL_CHANNEL_ID) }
     private val claimedParticipants = mutableSetOf<String>()
+    private val callActionIntents = mutableSetOf<PendingIntent>()
+    private var callActionToken = ""
 
     lateinit var runtime: VoiceCallRuntime
         private set
@@ -58,7 +62,13 @@ class VoiceCallService : Service() {
         showIdleForegroundNotification()
         val identity = vitiClientIdentity()
         lateinit var runtimeReference: VoiceCallRuntime
-        val telecom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        val telecom = if (
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            supportsCoreTelecom(
+                Build.VERSION.SDK_INT,
+                packageManager.hasSystemFeature(PackageManager.FEATURE_TELECOM),
+            )
+        ) {
             CoreTelecomGateway(applicationContext)
         } else {
             null
@@ -122,6 +132,7 @@ class VoiceCallService : Service() {
 
     override fun onDestroy() {
         ringer.stop()
+        invalidateCallActions("")
         notificationManager.cancel(CALL_NOTIFICATION_ID)
         runtime.close()
         serviceScope.cancel()
@@ -152,6 +163,7 @@ class VoiceCallService : Service() {
     private fun onSnapshot(snapshot: VoiceCallSnapshot) {
         if (snapshot.legToken.isBlank()) {
             ringer.stop()
+            invalidateCallActions("")
             showIdleForegroundNotification()
             return
         }
@@ -165,7 +177,7 @@ class VoiceCallService : Service() {
             startForeground(
                 CALL_NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(CALL_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
@@ -176,6 +188,7 @@ class VoiceCallService : Service() {
 
     private fun callNotification(snapshot: VoiceCallSnapshot): Notification {
         val token = snapshot.legToken
+        invalidateCallActions(token)
         val peer = snapshot.displayName.ifBlank { snapshot.peer }.ifBlank { "Private number" }
         val person = Person.Builder().setName(peer).setImportant(true).build()
         val openApp = PendingIntent.getActivity(
@@ -192,10 +205,11 @@ class VoiceCallService : Service() {
                 ANSWER_REQUEST,
                 Intent(this, MainActivity::class.java)
                     .setAction(MainActivity.ACTION_ANSWER_CALL)
+                    .setData(Uri.parse(callActionData(MainActivity.ACTION_ANSWER_CALL, token)))
                     .putExtra(EXTRA_LEG_TOKEN, token)
                     .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            )
+            ).also(callActionIntents::add)
         } else {
             serviceAction(ACTION_ANSWER, token, ANSWER_REQUEST)
         }
@@ -220,9 +234,19 @@ class VoiceCallService : Service() {
     private fun serviceAction(action: String, token: String, requestCode: Int) = PendingIntent.getService(
         this,
         requestCode,
-        Intent(this, VoiceCallService::class.java).setAction(action).putExtra(EXTRA_LEG_TOKEN, token),
+        Intent(this, VoiceCallService::class.java)
+            .setAction(action)
+            .setData(Uri.parse(callActionData(action, token)))
+            .putExtra(EXTRA_LEG_TOKEN, token),
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-    )
+    ).also(callActionIntents::add)
+
+    private fun invalidateCallActions(nextToken: String) {
+        if (callActionToken == nextToken) return
+        callActionIntents.forEach(PendingIntent::cancel)
+        callActionIntents.clear()
+        callActionToken = nextToken
+    }
 
     private fun showIdleForegroundNotification() {
         val openApp = PendingIntent.getActivity(
@@ -245,8 +269,10 @@ class VoiceCallService : Service() {
             startForeground(
                 CALL_NOTIFICATION_ID,
                 notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_REMOTE_MESSAGING,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
+        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(CALL_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE)
         } else {
             startForeground(CALL_NOTIFICATION_ID, notification)
         }

@@ -5,6 +5,7 @@ import com.viti.operator.data.VoiceUiState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -53,8 +54,12 @@ class VoiceCallRuntime(
         var platformJob: Job? = null,
         var sipStarted: Boolean = false,
         var platformActive: Boolean = false,
+        var platformActivating: Boolean = false,
+        var platformInactive: Boolean = false,
         var platformDisconnecting: Boolean = false,
         var pendingAnswer: Boolean = false,
+        var terminalDetail: String? = null,
+        var terminalFailed: Boolean = false,
         var audio: PlatformAudioState = PlatformAudioState(),
     )
 
@@ -105,13 +110,12 @@ class VoiceCallRuntime(
         if (current.direction != VoiceCallDirection.INCOMING) return
         if (!voiceClient.hasMicrophonePermission()) {
             current.pendingAnswer = true
-            publish(permissionRequired = true)
+            publish()
             return
         }
         if (telecomGateway != null && current.control == null) {
             current.pendingAnswer = true
-            publish(permissionRequired = false)
-            if (current.platformJob == null) beginTelecomAdmission(current)
+            publish()
             return
         }
         scope.launch { runUserAction("answer", current.token) { answer(current.token, fromPlatform = false) } }
@@ -246,9 +250,8 @@ class VoiceCallRuntime(
         )
         leg = created
         voice = VoiceUiState(state = "incoming", peer = event.peer, detail = "Incoming call from ${event.peer}")
-        val needsPermission = !voiceClient.hasMicrophonePermission()
-        publish(permissionRequired = needsPermission)
-        if (!needsPermission) beginAdmission(created)
+        publish()
+        beginAdmission(created)
     }
 
     private fun beginAdmission(current: Leg) {
@@ -288,10 +291,10 @@ class VoiceCallRuntime(
                         scope.launch { answer(live.token, fromPlatform = false) }
                     }
                 }
-                val live = leg
-                if (live?.token == current.token && live.phase != VoiceCallPhase.ENDING) {
+                val live = leg?.takeIf { it.token == current.token }
+                if (live != null && live.terminalDetail == null) {
                     if (live.sipStarted) runCatching { voiceClient.hangup(live.token) }
-                    failAndClear(live.token, "Android ended its call scope")
+                    markTerminal(live, "Android ended its call scope", failed = true)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -299,20 +302,40 @@ class VoiceCallRuntime(
                 val live = leg
                 if (live?.token != current.token) return@launch
                 onDiagnostic("telecom.add-call-failed", mapOf("ready" to ready, "error" to error.toString()))
-                if (live.sipStarted) runCatching { voiceClient.reject(live.token) }
-                failAndClear(live.token, error.message ?: "Android rejected the call")
+                if (live.terminalDetail == null) {
+                    if (live.sipStarted) {
+                        runCatching {
+                            if (live.direction == VoiceCallDirection.INCOMING) voiceClient.reject(live.token)
+                            else voiceClient.hangup(live.token)
+                        }
+                    }
+                    markTerminal(live, error.message ?: "Android rejected the call", failed = true)
+                }
+            } finally {
+                val live = leg?.takeIf { it.token == current.token }
+                if (live != null) {
+                    val detail = live.terminalDetail ?: "Android ended its call scope"
+                    clearLeg(current.token, detail, failed = live.terminalFailed || live.terminalDetail == null, platformScopeFinished = true)
+                }
             }
         }
     }
 
     private fun callbacksFor(token: String) = object : PlatformCallCallbacks {
-        override suspend fun onAnswer() = answer(token, fromPlatform = true)
+        override suspend fun onAnswer() {
+            if (!voiceClient.hasMicrophonePermission()) {
+                rejectPlatformAnswerWithoutMicrophone(token)
+            } else {
+                answer(token, fromPlatform = true)
+            }
+        }
 
         override suspend fun onDisconnect(rejected: Boolean) = leave(token, rejected, fromPlatform = true)
 
         override suspend fun onSetActive() {
             val current = requireCurrent(token)
             voiceClient.setSystemInactive(token, false)
+            current.platformInactive = false
             current.phase = VoiceCallPhase.ACTIVE
             current.platformActive = true
             publish()
@@ -321,6 +344,7 @@ class VoiceCallRuntime(
         override suspend fun onSetInactive() {
             val current = requireCurrent(token)
             voiceClient.setSystemInactive(token, true)
+            current.platformInactive = true
             current.phase = VoiceCallPhase.INACTIVE
             current.platformActive = false
             publish()
@@ -346,9 +370,7 @@ class VoiceCallRuntime(
             publish()
         } catch (error: Throwable) {
             current.phase = VoiceCallPhase.ENDING
-            val control = current.control
-            failAndClear(token, error.message ?: "Could not place the call")
-            control?.let { runCatching { it.disconnect() } }
+            terminateAfterEngineFailure(current, error.message ?: "Could not place the call")
         }
     }
 
@@ -361,6 +383,7 @@ class VoiceCallRuntime(
             voiceClient.answer(token)
             if (!fromPlatform) current.control?.answer()
             current.pendingAnswer = false
+            current.platformInactive = false
             current.platformActive = true
             current.phase = VoiceCallPhase.ACTIVE
             if (telecomGateway == null) legacyAudio.setActive(true)
@@ -368,18 +391,29 @@ class VoiceCallRuntime(
             publish()
         } catch (error: Throwable) {
             runCatching { voiceClient.hangup(token) }
-            current.phase = VoiceCallPhase.ENDING
-            val control = current.control
-            failAndClear(token, error.message ?: "Could not answer the call")
-            if (!fromPlatform) runCatching { control?.disconnect() }
+            markTerminal(current, error.message ?: "Could not answer the call", failed = true)
+            if (telecomGateway == null) {
+                clearLeg(token, current.terminalDetail.orEmpty(), failed = true)
+            } else if (fromPlatform) {
+                current.platformDisconnecting = true
+                runCatching { current.control?.disconnect(rejected = true) }
+                    .onFailure {
+                        current.platformDisconnecting = false
+                        onDiagnostic(
+                            "telecom.answer-rollback-failed",
+                            mapOf("leg_token" to token, "error" to it.toString()),
+                        )
+                    }
+            } else if (!fromPlatform) {
+                disconnectPlatformAndAwait(current)
+            }
             throw error
         }
     }
 
     private suspend fun leave(token: String, rejected: Boolean, fromPlatform: Boolean) {
         val current = requireCurrent(token)
-        current.phase = VoiceCallPhase.ENDING
-        publish()
+        markTerminal(current, if (rejected) "Call rejected" else "You left the call", failed = false)
         var failure: Throwable? = null
         try {
             if (rejected && current.direction == VoiceCallDirection.INCOMING) voiceClient.reject(token) else voiceClient.hangup(token)
@@ -387,14 +421,25 @@ class VoiceCallRuntime(
             failure = error
         }
         if (!fromPlatform) {
-            current.platformDisconnecting = true
             try {
-                current.control?.disconnect(rejected)
+                if (telecomGateway == null) {
+                    clearLeg(token, current.terminalDetail.orEmpty(), failed = failure != null)
+                } else {
+                    disconnectPlatformAndAwait(current, rejected)
+                }
             } catch (error: Throwable) {
                 failure?.addSuppressed(error) ?: run { failure = error }
             }
+        } else {
+            current.platformDisconnecting = true
+            if (telecomGateway == null) {
+                clearLeg(token, current.terminalDetail.orEmpty(), failed = failure != null)
+            }
         }
-        clearLeg(token, if (rejected) "Call rejected" else "You left the call", failed = failure != null)
+        if (failure != null && leg?.token == token) {
+            current.terminalFailed = true
+            publishNotice(failure.message ?: "The call could not be closed cleanly")
+        }
         failure?.let { throw it }
     }
 
@@ -405,23 +450,29 @@ class VoiceCallRuntime(
                 "telecom.user-action-failed",
                 mapOf("action" to action, "leg_token" to token, "error" to error.toString()),
             )
-            if (leg?.token == token) failAndClear(token, error.message ?: "The call action failed")
+            if (leg?.token == token) publishNotice(error.message ?: "The call action failed")
         }
     }
 
     private fun activateFromSip(event: VoiceEngineEvent) {
         val current = leg ?: return
-        current.phase = VoiceCallPhase.ACTIVE
+        current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
         if (telecomGateway == null) legacyAudio.setActive(true)
         voice = voice.copy(state = "active", peer = event.peer.ifBlank { current.peer }, detail = "Call in progress")
         publish()
-        if (current.control != null && !current.platformActive) {
+        if (current.control != null && !current.platformActive && !current.platformActivating && !current.platformInactive) {
+            current.platformActivating = true
             scope.launch {
                 runCatching { current.control?.setActive() }
-                    .onSuccess { current.platformActive = true; publish() }
+                    .onSuccess {
+                        current.platformActivating = false
+                        if (!current.platformInactive) current.platformActive = true
+                        publish()
+                    }
                     .onFailure {
+                        current.platformActivating = false
                         runCatching { voiceClient.hangup(current.token) }
-                        failAndClear(current.token, it.message ?: "Android could not activate the call")
+                        terminateAfterEngineFailure(current, it.message ?: "Android could not activate the call")
                     }
             }
         }
@@ -443,11 +494,16 @@ class VoiceCallRuntime(
         val current = leg ?: return
         val token = current.token
         scope.launch {
-            if (!current.platformDisconnecting) {
-                current.platformDisconnecting = true
-                runCatching { current.control?.disconnect() }
+            markTerminal(current, if (event.type == "failed") event.cause.ifBlank { "The call failed" } else "Call ended", event.type == "failed")
+            if (telecomGateway == null) {
+                clearLeg(token, current.terminalDetail.orEmpty(), failed = current.terminalFailed)
+            } else if (!current.platformDisconnecting) {
+                runCatching { disconnectPlatformAndAwait(current) }
+                    .onFailure {
+                        current.terminalFailed = true
+                        publishNotice(it.message ?: "Android could not close the call")
+                    }
             }
-            clearLeg(token, if (event.type == "failed") event.cause.ifBlank { "The call failed" } else "Call ended")
         }
     }
 
@@ -463,15 +519,68 @@ class VoiceCallRuntime(
     private fun requireCurrent(token: String): Leg = leg?.takeIf { it.token == token }
         ?: throw VoiceCommandException("This call leg is no longer current")
 
-    private fun failAndClear(token: String, detail: String) {
-        clearLeg(token, "The call failed: $detail", failed = true)
+    private suspend fun rejectPlatformAnswerWithoutMicrophone(token: String) {
+        val current = requireCurrent(token)
+        markTerminal(current, "Microphone access is required to answer", failed = true)
+        runCatching { voiceClient.reject(token) }
+            .onFailure { onDiagnostic("telecom.permission-reject-failed", mapOf("leg_token" to token, "error" to it.toString())) }
+        current.platformDisconnecting = true
+        try {
+            current.control?.disconnect(rejected = true)
+        } catch (error: Throwable) {
+            current.platformDisconnecting = false
+            throw error
+        }
     }
 
-    private fun clearLeg(token: String, detail: String, failed: Boolean = false) {
+    private suspend fun terminateAfterEngineFailure(current: Leg, detail: String) {
+        markTerminal(current, detail, failed = true)
+        if (telecomGateway == null) {
+            clearLeg(current.token, detail, failed = true)
+            return
+        }
+        runCatching { disconnectPlatformAndAwait(current) }
+            .onFailure {
+                current.terminalFailed = true
+                publishNotice(it.message ?: "Android could not close the failed call")
+            }
+    }
+
+    private suspend fun disconnectPlatformAndAwait(current: Leg, rejected: Boolean = false) {
+        current.platformDisconnecting = true
+        val job = current.platformJob
+        val control = current.control
+        try {
+            if (control != null) {
+                control.disconnect(rejected)
+                job?.join()
+            } else {
+                job?.cancelAndJoin()
+            }
+        } catch (error: Throwable) {
+            current.platformDisconnecting = false
+            throw error
+        }
+    }
+
+    private fun markTerminal(current: Leg, detail: String, failed: Boolean) {
+        current.phase = VoiceCallPhase.ENDING
+        current.terminalDetail = detail
+        current.terminalFailed = current.terminalFailed || failed
+        voice = voice.copy(detail = detail)
+        publish()
+    }
+
+    private fun clearLeg(
+        token: String,
+        detail: String,
+        failed: Boolean = false,
+        platformScopeFinished: Boolean = false,
+    ) {
         val current = leg?.takeIf { it.token == token } ?: return
-        // A Core-Telecom addCall coroutine owns the platform scope and returns
-        // naturally after disconnect. Cancelling it here may cancel the very
-        // callback that is completing this teardown.
+        check(telecomGateway == null || platformScopeFinished) {
+            "Cannot forget a call before its Android Telecom scope has ended"
+        }
         leg = null
         if (telecomGateway == null) legacyAudio.end()
         voice = VoiceUiState(state = "registered", detail = detail)
@@ -483,7 +592,7 @@ class VoiceCallRuntime(
         onDiagnostic("telecom.call-cleared", mapOf("leg_token" to token, "failed" to failed, "detail" to detail))
     }
 
-    private fun publish(permissionRequired: Boolean = false) {
+    private fun publish() {
         val current = leg
         val value = VoiceCallSnapshot(
             voice = voice,
@@ -494,7 +603,8 @@ class VoiceCallRuntime(
             displayName = current?.displayName.orEmpty(),
             platformReady = current?.control != null || (current != null && telecomGateway == null),
             telecomManaged = current?.control != null,
-            microphonePermissionRequired = permissionRequired,
+            microphonePermissionRequired = current?.direction == VoiceCallDirection.INCOMING &&
+                !voiceClient.hasMicrophonePermission(),
             audio = current?.audio ?: PlatformAudioState(),
         )
         _snapshot.value = value
@@ -503,6 +613,6 @@ class VoiceCallRuntime(
 
     private fun publishNotice(detail: String) {
         voice = voice.copy(detail = detail)
-        publish(permissionRequired = leg != null && !voiceClient.hasMicrophonePermission())
+        publish()
     }
 }
