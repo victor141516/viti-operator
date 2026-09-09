@@ -370,6 +370,54 @@ class VoiceCallRuntimeTest {
     }
 
     @Test
+    fun lateLegacyFocusLossSuccessCannotOverwriteACompleteFocusGain() = runTest(UnconfinedTestDispatcher()) {
+        val lossGate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { inactiveTrueGate = lossGate }
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+
+        runtime.placeCall("+34600000022")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onLegacyInactiveChanged(true)
+        runCurrent()
+        runtime.onLegacyInactiveChanged(false)
+        runCurrent()
+        lossGate.complete(Unit)
+        runCurrent()
+
+        assertEquals(listOf("inactive:$token:true", "inactive:$token:false"), engine.commands.filter { it.startsWith("inactive:") })
+        assertEquals(VoiceCallPhase.ACTIVE, runtime.snapshot.value.phase)
+        assertEquals(token, runtime.snapshot.value.legToken)
+        runtime.close()
+    }
+
+    @Test
+    fun lateLegacyFocusLossFailureCannotEndTheCallAfterFocusReturns() = runTest(UnconfinedTestDispatcher()) {
+        val lossGate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply {
+            inactiveTrueGate = lossGate
+            inactiveFailure = IllegalStateException("obsolete suppression failure")
+        }
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+
+        runtime.placeCall("+34600000023")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onLegacyInactiveChanged(true)
+        runCurrent()
+        runtime.onLegacyInactiveChanged(false)
+        runCurrent()
+        lossGate.complete(Unit)
+        runCurrent()
+
+        assertFalse(engine.commands.contains("hangup:$token"))
+        assertEquals(listOf("inactive:$token:false"), engine.commands.filter { it.startsWith("inactive:") })
+        assertEquals(VoiceCallPhase.ACTIVE, runtime.snapshot.value.phase)
+        assertEquals(token, runtime.snapshot.value.legToken)
+        runtime.close()
+    }
+
+    @Test
     fun answerCompletionCannotUndoInactiveCallbackThatArrivedWhileItWasPending() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
         val engine = FakeVoiceEngine().apply { answerGate = gate }
@@ -505,6 +553,7 @@ class VoiceCallRuntimeTest {
         var answerGate: CompletableDeferred<Unit>? = null
         var answerFailure: Throwable? = null
         var inactiveFailure: Throwable? = null
+        var inactiveTrueGate: CompletableDeferred<Unit>? = null
 
         override fun hasMicrophonePermission() = microphonePermission
         override fun start(provisioning: VoiceProvisioning) { starts += provisioning }
@@ -523,6 +572,7 @@ class VoiceCallRuntimeTest {
         override suspend fun setMuted(legToken: String, muted: Boolean) { commands += "mute:$legToken:$muted" }
         override suspend fun setTelecomMuted(legToken: String, muted: Boolean) { commands += "telecom-mute:$legToken:$muted" }
         override suspend fun setSystemInactive(legToken: String, inactive: Boolean) {
+            if (inactive) inactiveTrueGate?.await()
             inactiveFailure?.takeIf { inactive }?.let { throw it }
             commands += "inactive:$legToken:$inactive"
         }

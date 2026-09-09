@@ -9,6 +9,8 @@ import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeout
 import java.util.UUID
 
@@ -63,12 +65,14 @@ class VoiceCallRuntime(
         var terminalDetail: String? = null,
         var terminalFailed: Boolean = false,
         var terminalRejected: Boolean = false,
+        var legacyFocusGeneration: Long = 0,
         var audio: PlatformAudioState = PlatformAudioState(),
     )
 
     private var leg: Leg? = null
     private var voice = VoiceUiState()
     private var deferredProvisioning: VoiceProvisioning? = null
+    private val legacyFocusMutex = Mutex()
     private val _snapshot = MutableStateFlow(VoiceCallSnapshot())
     val snapshot = _snapshot.asStateFlow()
 
@@ -191,6 +195,8 @@ class VoiceCallRuntime(
         if (telecomGateway != null) return
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
+        current.legacyFocusGeneration += 1
+        val generation = current.legacyFocusGeneration
         if (inactive) {
             current.platformInactive = true
             current.platformActive = false
@@ -198,22 +204,25 @@ class VoiceCallRuntime(
             publish()
         }
         scope.launch {
-            try {
-                voiceClient.setSystemInactive(current.token, inactive)
-                if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@launch
-                current.platformInactive = inactive
-                current.phase = if (inactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
-                publish()
-            } catch (error: Throwable) {
-                if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@launch
-                if (inactive) {
-                    // Audio focus has already been lost. If the WebRTC leg
-                    // cannot be suppressed, retaining it would leak call audio
-                    // into a native call, so terminate this local branch.
-                    runCatching { voiceClient.hangup(current.token) }
-                    terminateAfterEngineFailure(current, error.message ?: "Could not suppress call audio")
-                } else {
-                    publishNotice(error.message ?: "Could not restore call audio focus")
+            legacyFocusMutex.withLock {
+                if (!isCurrentLegacyFocus(current, generation)) return@withLock
+                try {
+                    voiceClient.setSystemInactive(current.token, inactive)
+                    if (!isCurrentLegacyFocus(current, generation)) return@withLock
+                    current.platformInactive = inactive
+                    current.phase = if (inactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
+                    publish()
+                } catch (error: Throwable) {
+                    if (!isCurrentLegacyFocus(current, generation)) return@withLock
+                    if (inactive) {
+                        // Audio focus has already been lost. If the WebRTC leg
+                        // cannot be suppressed, retaining it would leak call
+                        // audio into a native call, so terminate this branch.
+                        runCatching { voiceClient.hangup(current.token) }
+                        terminateAfterEngineFailure(current, error.message ?: "Could not suppress call audio")
+                    } else {
+                        publishNotice(error.message ?: "Could not restore call audio focus")
+                    }
                 }
             }
         }
@@ -582,6 +591,11 @@ class VoiceCallRuntime(
 
     private fun requireCurrent(token: String): Leg = leg?.takeIf { it.token == token }
         ?: throw VoiceCommandException("This call leg is no longer current")
+
+    private fun isCurrentLegacyFocus(current: Leg, generation: Long): Boolean =
+        leg === current &&
+            current.phase != VoiceCallPhase.ENDING &&
+            current.legacyFocusGeneration == generation
 
     private fun schedulePlatformCleanup(token: String, rejected: Boolean, detail: String) {
         val current = leg?.takeIf { it.token == token } ?: return
