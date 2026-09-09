@@ -638,7 +638,7 @@ private fun CallsScreen(
     var recordingCall by remember { mutableStateOf<Call?>(null) }
     val activeServerCall = ui.calls.firstOrNull { it.endedAt.isBlank() && it.state in setOf("ringing", "dialing", "active") }
     val serverCallActive = activeServerCall != null
-    val anotherClientOwnsCall = serverCallActive && !ui.voice.incoming && !ui.voice.inCall
+    val anotherClientOwnsCall = serverCallActive && !ui.voice.incoming && !ui.voice.inCall && !ui.voice.ending
     val canJoinCall = anotherClientOwnsCall && activeServerCall?.state == "active" && activeServerCall.peer != "*43"
     val filteredCalls = remember(ui.calls, ui.contacts, query) {
         ui.calls.filter {
@@ -672,7 +672,7 @@ private fun CallsScreen(
                         ) { Text(label) }
                     }
                 }
-                if (ui.voice.incoming || ui.voice.inCall || anotherClientOwnsCall) {
+                if (ui.voice.incoming || ui.voice.inCall || ui.voice.ending || anotherClientOwnsCall) {
                     Spacer(Modifier.height(14.dp))
                     ActiveCallPanel(
                         ui = ui,
@@ -736,10 +736,12 @@ private fun CallsScreen(
                 }
             }
         }
-        FloatingActionButton(
-            onClick = { dialerOpen = true },
-            modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
-        ) { Icon(Icons.Default.Dialpad, "Open dial pad") }
+        if (!ui.voice.ending) {
+            FloatingActionButton(
+                onClick = { dialerOpen = true },
+                modifier = Modifier.align(Alignment.BottomEnd).padding(20.dp),
+            ) { Icon(Icons.Default.Dialpad, "Open dial pad") }
+        }
     }
     if (dialerOpen) {
         DialerSheet(
@@ -804,6 +806,14 @@ private fun ActiveCallPanel(
                 if (ui.voice.inCall) IconButton(onClick = onOpenKeypad) { Icon(Icons.Default.Dialpad, "Dial pad") }
             }
             when {
+                ui.voice.ending -> Button(
+                    onClick = if (callSnapshot.endingRejected) onReject else onHangup,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Icon(Icons.Default.CallEnd, null)
+                    Spacer(Modifier.width(6.dp))
+                    Text(if (callSnapshot.endingRejected) "Retry reject" else "Retry hang up")
+                }
                 ui.voice.incoming -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = onAnswer, modifier = Modifier.weight(1f)) { Icon(Icons.AutoMirrored.Filled.CallReceived, null); Spacer(Modifier.width(6.dp)); Text("Answer") }
                     OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f)) { Icon(Icons.Default.CallEnd, null); Spacer(Modifier.width(6.dp)); Text("Reject") }
@@ -1113,13 +1123,22 @@ private fun DialerSheet(
     onSelectAudioEndpoint: (String) -> Unit,
 ) {
     var number by rememberSaveable(initialNumber) { mutableStateOf(initialNumber) }
+    val ending = ui.voice.ending || callSnapshot.phase == com.viti.operator.voice.VoiceCallPhase.ENDING
     val dialRows = if (ui.voice.inCall) listOf("123", "456", "789", "*0#") else listOf("123", "456", "789", "+0⌫")
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
             Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            Text(if (ui.voice.inCall) ui.voice.peer.ifBlank { "Call in progress" } else "Dial pad", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Text(
+                when {
+                    ending -> "Ending call"
+                    ui.voice.inCall -> ui.voice.peer.ifBlank { "Call in progress" }
+                    else -> "Dial pad"
+                },
+                style = MaterialTheme.typography.headlineSmall,
+                fontWeight = FontWeight.Bold,
+            )
             Spacer(Modifier.height(12.dp))
             OutlinedTextField(
                 value = number,
@@ -1127,7 +1146,7 @@ private fun DialerSheet(
                 modifier = Modifier.fillMaxWidth(),
                 placeholder = { Text(if (ui.voice.inCall) "DTMF tones" else "+34…") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                readOnly = ui.voice.inCall,
+                readOnly = ui.voice.inCall || ending,
                 singleLine = true,
             )
             Spacer(Modifier.height(12.dp))
@@ -1135,6 +1154,7 @@ private fun DialerSheet(
                 Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
                     row.forEach { key ->
                         TextButton(
+                            enabled = !ending,
                             onClick = {
                                 if (ui.voice.inCall) onSendDtmf(key)
                                 else {
@@ -1153,6 +1173,14 @@ private fun DialerSheet(
                 Spacer(Modifier.height(12.dp))
             }
             when {
+                ending -> Button(
+                    onClick = if (callSnapshot.endingRejected) onReject else onHangup,
+                    modifier = Modifier.fillMaxWidth().height(52.dp),
+                ) {
+                    Icon(Icons.Default.CallEnd, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text(if (callSnapshot.endingRejected) "Retry reject" else "Retry hang up")
+                }
                 ui.voice.incoming -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = onAnswer, modifier = Modifier.weight(1f).height(52.dp)) { Text("Answer") }
                     OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f).height(52.dp)) { Text("Reject") }

@@ -174,6 +174,7 @@ data class VoiceUiState(
 ) {
     val registered: Boolean get() = state == "registered"
     val incoming: Boolean get() = state == "incoming"
+    val ending: Boolean get() = state == "ending"
     val inCall: Boolean get() = state in setOf("calling", "ringing", "active", "media")
 }
 

@@ -22,6 +22,7 @@ data class VoiceCallSnapshot(
     val platformReady: Boolean = false,
     val telecomManaged: Boolean = false,
     val microphonePermissionRequired: Boolean = false,
+    val endingRejected: Boolean = false,
     val audio: PlatformAudioState = PlatformAudioState(),
 )
 
@@ -61,6 +62,7 @@ class VoiceCallRuntime(
         var pendingAnswer: Boolean = false,
         var terminalDetail: String? = null,
         var terminalFailed: Boolean = false,
+        var terminalRejected: Boolean = false,
         var audio: PlatformAudioState = PlatformAudioState(),
     )
 
@@ -189,10 +191,17 @@ class VoiceCallRuntime(
         if (telecomGateway != null) return
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
+        if (inactive) {
+            current.platformInactive = true
+            current.platformActive = false
+            current.phase = VoiceCallPhase.INACTIVE
+            publish()
+        }
         scope.launch {
             runCatching { voiceClient.setSystemInactive(current.token, inactive) }
                 .onSuccess {
                     if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@onSuccess
+                    current.platformInactive = inactive
                     current.phase = if (inactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
                     publish()
                 }
@@ -407,6 +416,7 @@ class VoiceCallRuntime(
             current.phase = VoiceCallPhase.DIALING
             publish()
         } catch (error: Throwable) {
+            if (leg !== current || current.phase == VoiceCallPhase.ENDING) return
             current.phase = VoiceCallPhase.ENDING
             terminateAfterEngineFailure(current, error.message ?: "Could not place the call")
         }
@@ -429,6 +439,7 @@ class VoiceCallRuntime(
             voice = voice.copy(state = "active", detail = "Call in progress")
             publish()
         } catch (error: Throwable) {
+            if (leg !== current || current.phase == VoiceCallPhase.ENDING) throw error
             if (fromPlatform) throw error
             runCatching { voiceClient.hangup(token) }
             markTerminal(current, error.message ?: "Could not answer the call", failed = true)
@@ -443,7 +454,12 @@ class VoiceCallRuntime(
 
     private suspend fun leave(token: String, rejected: Boolean, fromPlatform: Boolean) {
         val current = requireCurrent(token)
-        markTerminal(current, if (rejected) "Call rejected" else "You left the call", failed = false)
+        markTerminal(
+            current,
+            if (rejected) "Call rejected" else "You left the call",
+            failed = false,
+            rejected = rejected && current.direction == VoiceCallDirection.INCOMING,
+        )
         var failure: Throwable? = null
         try {
             if (rejected && current.direction == VoiceCallDirection.INCOMING) voiceClient.reject(token) else voiceClient.hangup(token)
@@ -480,7 +496,10 @@ class VoiceCallRuntime(
                 "telecom.user-action-failed",
                 mapOf("action" to action, "leg_token" to token, "error" to error.toString()),
             )
-            if (leg?.token == token) publishNotice(error.message ?: "The call action failed")
+            val live = leg?.takeIf { it.token == token }
+            if (live != null && live.phase != VoiceCallPhase.ENDING) {
+                publishNotice(error.message ?: "The call action failed")
+            }
         }
     }
 
@@ -556,7 +575,7 @@ class VoiceCallRuntime(
 
     private fun schedulePlatformCleanup(token: String, rejected: Boolean, detail: String) {
         val current = leg?.takeIf { it.token == token } ?: return
-        if (current.phase != VoiceCallPhase.ENDING) markTerminal(current, detail, failed = true)
+        if (current.phase != VoiceCallPhase.ENDING) markTerminal(current, detail, failed = true, rejected = rejected)
         scope.launch {
             runCatching {
                 if (rejected && current.direction == VoiceCallDirection.INCOMING) voiceClient.reject(token)
@@ -603,10 +622,11 @@ class VoiceCallRuntime(
         }
     }
 
-    private fun markTerminal(current: Leg, detail: String, failed: Boolean) {
+    private fun markTerminal(current: Leg, detail: String, failed: Boolean, rejected: Boolean = false) {
         current.phase = VoiceCallPhase.ENDING
         current.terminalDetail = detail
         current.terminalFailed = current.terminalFailed || failed
+        current.terminalRejected = current.terminalRejected || rejected
         voice = voice.copy(state = "ending", peer = current.peer, detail = detail)
         publish()
     }
@@ -645,6 +665,7 @@ class VoiceCallRuntime(
             telecomManaged = current?.control != null,
             microphonePermissionRequired = current?.direction == VoiceCallDirection.INCOMING &&
                 !voiceClient.hasMicrophonePermission(),
+            endingRejected = current?.terminalRejected == true,
             audio = current?.audio ?: PlatformAudioState(),
         )
         _snapshot.value = value

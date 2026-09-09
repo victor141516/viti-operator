@@ -1,5 +1,6 @@
 package com.viti.operator.voice
 
+import com.viti.operator.data.VoiceUiState
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -7,6 +8,15 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class VoicePlatformPolicyTest {
+    @Test
+    fun endingIsAVisibleLocalCleanupStateButNotAnActiveMediaState() {
+        val state = VoiceUiState(state = "ending")
+
+        assertTrue(state.ending)
+        assertFalse(state.incoming)
+        assertFalse(state.inCall)
+    }
+
     @Test
     fun coreTelecomRequiresBothApi26AndTheTelecomFeature() {
         assertFalse(supportsCoreTelecom(25, hasTelecomFeature = true))
