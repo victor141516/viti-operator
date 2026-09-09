@@ -210,6 +210,11 @@ func (s *Store) ContactSources() []ContactSourceRecord {
 }
 
 func (s *Store) Contacts(query string) []Contact {
+	contacts, _ := s.ContactsSnapshot(query)
+	return contacts
+}
+
+func (s *Store) ContactsSnapshot(query string) ([]Contact, uint64) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]Contact, 0, len(s.contactView))
@@ -222,7 +227,7 @@ func (s *Store) Contacts(query string) []Contact {
 		contact.Sources = append([]ContactSource(nil), contact.Sources...)
 		result = append(result, contact)
 	}
-	return result
+	return result, s.contactsVersion
 }
 
 func (s *Store) ContactsVersion() uint64 {

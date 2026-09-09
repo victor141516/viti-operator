@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -137,6 +138,57 @@ func TestFailedContactPersistenceRollsBackMemoryAndRevision(t *testing.T) {
 	store.path = validPath
 	if changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 7, records); err != nil || !changed {
 		t.Fatalf("retry changed=%v err=%v", changed, err)
+	}
+}
+
+func TestContactsSnapshotKeepsContentAndVersionConsistentDuringUpdates(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := func(name string) []ContactSourceRecord {
+		return []ContactSourceRecord{{SourceContactID: "42", Names: []string{name}, Numbers: []ContactNumber{{Original: "+34612345678"}}}}
+	}
+	if _, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 1, record("Odd")); err != nil {
+		t.Fatal(err)
+	}
+
+	var wait sync.WaitGroup
+	wait.Add(1)
+	done := make(chan struct{})
+	go func() {
+		defer wait.Done()
+		defer close(done)
+		for revision := int64(2); revision <= 200; revision++ {
+			name := "Even"
+			if revision%2 == 1 {
+				name = "Odd"
+			}
+			if _, updateErr := store.ReplaceContactSource("phone-a", "OnePlus", "ES", revision, record(name)); updateErr != nil {
+				t.Errorf("replace revision %d: %v", revision, updateErr)
+				return
+			}
+		}
+	}()
+
+	for {
+		contacts, version := store.ContactsSnapshot("")
+		if len(contacts) != 1 {
+			t.Fatalf("snapshot at version %d has %d contacts", version, len(contacts))
+		}
+		want := "Even"
+		if version%2 == 1 {
+			want = "Odd"
+		}
+		if contacts[0].Name != want {
+			t.Fatalf("snapshot version %d contains %q, want %q", version, contacts[0].Name, want)
+		}
+		select {
+		case <-done:
+			wait.Wait()
+			return
+		default:
+		}
 	}
 }
 
