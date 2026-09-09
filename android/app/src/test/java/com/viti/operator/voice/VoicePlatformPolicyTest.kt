@@ -35,6 +35,18 @@ class VoicePlatformPolicyTest {
     }
 
     @Test
+    fun failedRejectKeepsRejectSemanticsInTheNotification() {
+        val rejected = VoiceCallSnapshot(
+            phase = VoiceCallPhase.ENDING,
+            endingRejected = true,
+        )
+        val hangingUp = rejected.copy(endingRejected = false)
+
+        assertTrue(shouldRejectFromNotification(rejected))
+        assertFalse(shouldRejectFromNotification(hangingUp))
+    }
+
+    @Test
     fun legacyRouteDoesNotClaimBluetoothBeforeScoConnects() {
         val wired = VoiceAudioEndpoint("wired", "Wired", VoiceAudioEndpointType.WIRED_HEADSET)
         val bluetooth = VoiceAudioEndpoint("bt", "Bluetooth", VoiceAudioEndpointType.BLUETOOTH)

@@ -198,14 +198,24 @@ class VoiceCallRuntime(
             publish()
         }
         scope.launch {
-            runCatching { voiceClient.setSystemInactive(current.token, inactive) }
-                .onSuccess {
-                    if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@onSuccess
-                    current.platformInactive = inactive
-                    current.phase = if (inactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
-                    publish()
+            try {
+                voiceClient.setSystemInactive(current.token, inactive)
+                if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@launch
+                current.platformInactive = inactive
+                current.phase = if (inactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
+                publish()
+            } catch (error: Throwable) {
+                if (leg !== current || current.phase == VoiceCallPhase.ENDING) return@launch
+                if (inactive) {
+                    // Audio focus has already been lost. If the WebRTC leg
+                    // cannot be suppressed, retaining it would leak call audio
+                    // into a native call, so terminate this local branch.
+                    runCatching { voiceClient.hangup(current.token) }
+                    terminateAfterEngineFailure(current, error.message ?: "Could not suppress call audio")
+                } else {
+                    publishNotice(error.message ?: "Could not restore call audio focus")
                 }
-                .onFailure { publishNotice(it.message ?: "Could not update call audio focus") }
+            }
         }
     }
 
@@ -435,7 +445,7 @@ class VoiceCallRuntime(
             current.pendingAnswer = false
             current.platformActive = !current.platformInactive
             current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
-            if (telecomGateway == null) legacyAudio.setActive(true)
+            if (telecomGateway == null && !current.platformInactive) legacyAudio.setActive(true)
             voice = voice.copy(state = "active", detail = "Call in progress")
             publish()
         } catch (error: Throwable) {
@@ -507,7 +517,7 @@ class VoiceCallRuntime(
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
         current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
-        if (telecomGateway == null) legacyAudio.setActive(true)
+        if (telecomGateway == null && !current.platformInactive) legacyAudio.setActive(true)
         voice = voice.copy(state = "active", peer = event.peer.ifBlank { current.peer }, detail = "Call in progress")
         publish()
         if (current.control != null && !current.platformActive && !current.platformActivating && !current.platformInactive) {

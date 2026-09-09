@@ -326,6 +326,46 @@ class VoiceCallRuntimeTest {
 
         assertEquals(VoiceCallPhase.INACTIVE, runtime.snapshot.value.phase)
         assertTrue(engine.commands.contains("inactive:$token:true"))
+        assertTrue(legacy.activeRequests.isEmpty())
+        runtime.close()
+    }
+
+    @Test
+    fun legacyAnswerCompletionCannotReclaimAudioAfterFocusLoss() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { answerGate = gate }
+        val legacy = FakeLegacyAudio()
+        val runtime = runtime(engine, null, legacy)
+        val token = "legacy-answer-inactive-interleaving"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000020", legToken = token))
+        runCurrent()
+        runtime.answer(token)
+        runCurrent()
+        runtime.onLegacyInactiveChanged(true)
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals(VoiceCallPhase.INACTIVE, runtime.snapshot.value.phase)
+        assertTrue(legacy.activeRequests.isEmpty())
+        runtime.close()
+    }
+
+    @Test
+    fun failedLegacyInactiveSuppressionEndsTheLocalCall() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine().apply { inactiveFailure = IllegalStateException("media suppression failed") }
+        val legacy = FakeLegacyAudio()
+        val runtime = runtime(engine, null, legacy)
+
+        runtime.placeCall("+34600000021")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onLegacyInactiveChanged(true)
+        runCurrent()
+
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        assertEquals(1, legacy.endCount)
         runtime.close()
     }
 
@@ -553,10 +593,12 @@ class VoiceCallRuntimeTest {
 
     private class FakeLegacyAudio : LegacyAudioControl {
         var beginCount = 0
+        var endCount = 0
+        val activeRequests = mutableListOf<Boolean>()
         override fun begin(direction: VoiceCallDirection) { beginCount += 1 }
-        override fun setActive(value: Boolean) = Unit
+        override fun setActive(value: Boolean) { activeRequests += value }
         override fun requestEndpoint(endpointId: String) = Unit
-        override fun end() = Unit
+        override fun end() { endCount += 1 }
         override fun close() = Unit
     }
 }

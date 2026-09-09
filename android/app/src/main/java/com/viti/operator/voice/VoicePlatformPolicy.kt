@@ -10,3 +10,7 @@ internal fun supportsCoreTelecom(sdkInt: Int, hasTelecomFeature: Boolean): Boole
  */
 internal fun callActionData(action: String, legToken: String): String =
     "viti-call:${action.substringAfterLast('.')}:${legToken.length}:$legToken"
+
+/** A failed incoming reject must remain a reject when retried from CallStyle. */
+internal fun shouldRejectFromNotification(snapshot: VoiceCallSnapshot): Boolean =
+    snapshot.phase == VoiceCallPhase.ENDING && snapshot.endingRejected

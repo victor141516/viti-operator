@@ -199,6 +199,7 @@ class VoiceCallService : Service() {
         )
         val reject = serviceAction(ACTION_REJECT, token, REJECT_REQUEST)
         val hangup = serviceAction(ACTION_HANGUP, token, HANGUP_REQUEST)
+        val endCall = if (shouldRejectFromNotification(snapshot)) reject else hangup
         val answer = if (snapshot.microphonePermissionRequired) {
             PendingIntent.getActivity(
                 this,
@@ -220,7 +221,7 @@ class VoiceCallService : Service() {
             .setContentText(snapshot.voice.detail)
             .setStyle(
                 if (incoming) NotificationCompat.CallStyle.forIncomingCall(person, reject, answer)
-                else NotificationCompat.CallStyle.forOngoingCall(person, hangup),
+                else NotificationCompat.CallStyle.forOngoingCall(person, endCall),
             )
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
