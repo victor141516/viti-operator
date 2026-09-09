@@ -449,10 +449,17 @@ private fun MessageComposerSheet(
                 singleLine = true,
             )
             if (!contactsAvailable) {
-                FilledTonalButton(onClick = onRequestContacts) {
-                    Icon(Icons.Default.ContactPhone, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Search contacts")
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Syncing uploads contact names and phone numbers to your private Viti server so every connected client can resolve them.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FilledTonalButton(onClick = onRequestContacts) {
+                        Icon(Icons.Default.ContactPhone, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Sync this phone's contacts")
+                    }
                 }
             }
             suggestions.forEach { contact ->
@@ -674,10 +681,20 @@ private fun CallsScreen(
             } else {
                 if (!ui.contactsAvailable) {
                     item {
-                        FilledTonalButton(onClick = onRequestContacts, modifier = Modifier.fillMaxWidth()) {
-                            Icon(Icons.Default.ContactPhone, null)
-                            Spacer(Modifier.width(8.dp))
-                            Text("Add contacts from this phone")
+                        ElevatedCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text("Sync this phone's contacts", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Names and phone numbers are uploaded to your private Viti server and shared with your connected clients.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                FilledTonalButton(onClick = onRequestContacts, modifier = Modifier.fillMaxWidth()) {
+                                    Icon(Icons.Default.ContactPhone, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Sync contacts")
+                                }
+                            }
                         }
                     }
                 }

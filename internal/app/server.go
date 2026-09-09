@@ -572,7 +572,7 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) messages(w http.ResponseWriter, _ *http.Request) {
 	items := a.store.Messages()
-	contacts := mergedContacts(a.store.ContactSources(), "")
+	contacts := a.store.Contacts("")
 	for index := range items {
 		peer := items[index].From
 		if items[index].Direction == DirectionOutgoing {
@@ -652,7 +652,7 @@ func (a *App) deliverMessage(message Message) {
 
 func (a *App) calls(w http.ResponseWriter, _ *http.Request) {
 	items := a.callsWithRecordingTiming()
-	contacts := mergedContacts(a.store.ContactSources(), "")
+	contacts := a.store.Contacts("")
 	for index := range items {
 		if contact, found := resolveContact(contacts, items[index].Peer); found {
 			items[index].ContactID = contact.ID

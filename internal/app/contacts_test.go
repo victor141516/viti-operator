@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -52,13 +53,13 @@ func TestReplacingOneContactSourcePreservesOtherDeviceContribution(t *testing.T)
 	record := func(id string) []ContactSourceRecord {
 		return []ContactSourceRecord{{SourceContactID: id, Names: []string{"Alice"}, Numbers: []ContactNumber{{Original: "+34612345678"}}}}
 	}
-	if _, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", record("1")); err != nil {
+	if _, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 1, record("1")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReplaceContactSource("phone-b", "Pixel", "ES", record("9")); err != nil {
+	if _, err := store.ReplaceContactSource("phone-b", "Pixel", "ES", 1, record("9")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", nil); err != nil {
+	if _, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 2, nil); err != nil {
 		t.Fatal(err)
 	}
 	contacts := mergedContacts(store.ContactSources(), "")
@@ -74,12 +75,12 @@ func TestReplacingIdenticalContactSourceIsANoOp(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []ContactSourceRecord{{SourceContactID: "42", Names: []string{"Alice"}, Numbers: []ContactNumber{{Original: "+34612345678"}}}}
-	changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", records)
+	changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 1, records)
 	if err != nil || !changed {
 		t.Fatalf("first replace changed=%v err=%v", changed, err)
 	}
 	first := store.ContactSources()[0].UpdatedAt
-	changed, err = store.ReplaceContactSource("phone-a", "OnePlus", "ES", records)
+	changed, err = store.ReplaceContactSource("phone-a", "OnePlus", "ES", 2, records)
 	if err != nil || changed {
 		t.Fatalf("identical replace changed=%v err=%v", changed, err)
 	}
@@ -92,6 +93,38 @@ func TestReplacingIdenticalContactSourceIsANoOp(t *testing.T) {
 	}
 	if contacts := mergedContacts(reopened.ContactSources(), "Alice"); len(contacts) != 1 || contacts[0].Sources[0].ClientName != "OnePlus" {
 		t.Fatalf("persisted contacts = %#v", contacts)
+	}
+	stale := []ContactSourceRecord{{SourceContactID: "42", Names: []string{"Stale name"}, Numbers: []ContactNumber{{Original: "+34612345678"}}}}
+	if changed, err := reopened.ReplaceContactSource("phone-a", "OnePlus", "ES", 1, stale); err != nil || changed {
+		t.Fatalf("stale replace changed=%v err=%v", changed, err)
+	}
+	if contacts := reopened.Contacts(""); len(contacts) != 1 || contacts[0].Name != "Alice" {
+		t.Fatalf("stale snapshot replaced current contacts: %#v", contacts)
+	}
+}
+
+func TestFailedContactPersistenceRollsBackMemoryAndRevision(t *testing.T) {
+	directory := t.TempDir()
+	validPath := filepath.Join(directory, "state.json")
+	store, err := OpenStore(validPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	records := []ContactSourceRecord{{SourceContactID: "42", Names: []string{"Alice"}, Numbers: []ContactNumber{{Original: "+34612345678"}}}}
+	blocker := filepath.Join(directory, "not-a-directory")
+	if err := os.WriteFile(blocker, []byte("block directory creation"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.path = filepath.Join(blocker, "state.json")
+	if changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 7, records); err == nil || changed {
+		t.Fatalf("failed replace changed=%v err=%v", changed, err)
+	}
+	if contacts := store.ContactSources(); len(contacts) != 0 {
+		t.Fatalf("failed persistence leaked contacts into memory: %#v", contacts)
+	}
+	store.path = validPath
+	if changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 7, records); err != nil || !changed {
+		t.Fatalf("retry changed=%v err=%v", changed, err)
 	}
 }
 
@@ -115,7 +148,7 @@ func TestContactSyncAPIIsRepeatableAndEnrichesSharedHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	body := []byte(`{"client_name":"OnePlus","region":"ES","contacts":[{"source_contact_id":"42","names":["Alice","Alicia"],"numbers":[{"original":"612 34 56 78","normalized":"","label":"Mobile"}]}]}`)
+	body := []byte(`{"client_name":"OnePlus","region":"ES","snapshot_revision":42,"contacts":[{"source_contact_id":"42","names":["Alice","Alicia"],"numbers":[{"original":"612 34 56 78","normalized":"","label":"Mobile"}]}]}`)
 	for range 2 {
 		request := httptest.NewRequest(http.MethodPut, "/api/v1/contacts/sources/phone-one", bytes.NewReader(body))
 		response := httptest.NewRecorder()

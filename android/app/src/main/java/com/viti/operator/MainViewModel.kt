@@ -68,13 +68,21 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     private val _incomingMessages = MutableSharedFlow<Message>(extraBufferCapacity = 16)
     val incomingMessages = _incomingMessages.asSharedFlow()
     private var clientIdentity: ClientIdentity? = null
+    private var unversionedContactSnapshot: DeviceContactsSnapshot? = null
+    private var latestContactSnapshot: DeviceContactsSnapshot? = null
     private var pendingContactSnapshot: DeviceContactsSnapshot? = null
+    private var contactRevisionJob: Job? = null
     private var contactSyncJob: Job? = null
+    private var contactSyncSettings: ServerSettings? = null
     private val incomingMessageTracker = IncomingMessageTracker()
 
     init {
         viewModelScope.launch {
-            settings.collectLatest {
+            settings.collectLatest { currentSettings ->
+                if (contactSyncSettings != currentSettings) {
+                    latestContactSnapshot?.let { pendingContactSnapshot = it }
+                    startContactSync()
+                }
                 refresh()
             }
         }
@@ -282,13 +290,27 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
 
     fun synchronizeContacts(snapshot: DeviceContactsSnapshot) {
         val localContacts = snapshot.asPhoneContacts()
-        pendingContactSnapshot = snapshot
+        unversionedContactSnapshot = snapshot
         _uiState.value = _uiState.value.copy(
             contacts = localContacts,
             contactsAvailable = true,
             notice = if (localContacts.isEmpty()) "No contacts have phone numbers" else "Synchronizing contacts…",
         )
-        startContactSync()
+        startContactRevisioning()
+    }
+
+    private fun startContactRevisioning() {
+        if (unversionedContactSnapshot == null || contactRevisionJob?.isActive == true) return
+        contactRevisionJob = viewModelScope.launch {
+            while (true) {
+                val snapshot = unversionedContactSnapshot ?: break
+                unversionedContactSnapshot = null
+                val versionedSnapshot = snapshot.copy(revision = settingsStore.nextContactSnapshotRevision())
+                latestContactSnapshot = versionedSnapshot
+                pendingContactSnapshot = versionedSnapshot
+                startContactSync()
+            }
+        }
     }
 
     private fun startContactSync() {
@@ -298,14 +320,18 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
             while (true) {
                 val snapshot = pendingContactSnapshot ?: break
                 val identity = clientIdentity ?: break
+                val attemptedSettings = settings.value
                 val result = runCatching {
-                    val api = VitiApi(settings.value)
+                    val api = VitiApi(attemptedSettings)
                     api.replaceContacts(identity, snapshot)
                     api.contacts()
                 }
                 result.onSuccess { contacts ->
-                    if (pendingContactSnapshot == snapshot) pendingContactSnapshot = null
-                    _uiState.value = _uiState.value.copy(contacts = contacts, notice = "Contacts synchronized")
+                    if (settings.value == attemptedSettings) {
+                        if (pendingContactSnapshot == snapshot) pendingContactSnapshot = null
+                        contactSyncSettings = attemptedSettings
+                        _uiState.value = _uiState.value.copy(contacts = contacts, notice = "Contacts synchronized")
+                    }
                     retryDelay = 1_000L
                 }.onFailure { error ->
                     _uiState.value = _uiState.value.copy(notice = error.message ?: "Could not synchronize contacts; retrying")

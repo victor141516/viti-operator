@@ -178,7 +178,7 @@ func contactMatches(contact Contact, query string) bool {
 }
 
 func (a *App) contacts(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"contacts": mergedContacts(a.store.ContactSources(), r.URL.Query().Get("q"))})
+	writeJSON(w, http.StatusOK, map[string]any{"contacts": a.store.Contacts(r.URL.Query().Get("q"))})
 }
 
 func (a *App) replaceContactSource(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +186,7 @@ func (a *App) replaceContactSource(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		ClientName string                `json:"client_name"`
 		Region     string                `json:"region"`
+		Revision   int64                 `json:"snapshot_revision"`
 		Contacts   []ContactSourceRecord `json:"contacts"`
 	}
 	if err := readJSON(r, &request, 8<<20); err != nil {
@@ -230,7 +231,7 @@ func (a *App) replaceContactSource(w http.ResponseWriter, r *http.Request) {
 		record.Numbers = numbers
 		clean = append(clean, record)
 	}
-	changed, err := a.store.ReplaceContactSource(clientID, request.ClientName, request.Region, clean)
+	changed, err := a.store.ReplaceContactSource(clientID, request.ClientName, request.Region, request.Revision, clean)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not persist contacts")
 		return

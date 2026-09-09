@@ -20,6 +20,7 @@ type diskState struct {
 	IMSRegistrationEnabled *bool                 `json:"ims_registration_enabled,omitempty"`
 	CallRecordingEnabled   *bool                 `json:"call_recording_enabled,omitempty"`
 	Contacts               []ContactSourceRecord `json:"contacts,omitempty"`
+	ContactSourceRevisions map[string]int64      `json:"contact_source_revisions,omitempty"`
 }
 
 type Store struct {
@@ -32,6 +33,8 @@ type Store struct {
 	imsRegistrationEnabled bool
 	callRecordingEnabled   bool
 	contacts               map[string]ContactSourceRecord
+	contactSourceRevisions map[string]int64
+	contactView            []Contact
 	diag                   *DiagnosticRecorder
 }
 
@@ -42,7 +45,7 @@ func (s *Store) SetDiagnostics(diagnostics *DiagnosticRecorder) {
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, contacts: map[string]ContactSourceRecord{}, imsRegistrationEnabled: true}
+	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, contacts: map[string]ContactSourceRecord{}, contactSourceRevisions: map[string]int64{}, imsRegistrationEnabled: true}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -66,6 +69,10 @@ func OpenStore(path string) (*Store, error) {
 	for _, item := range state.Contacts {
 		s.contacts[contactSourceKey(item.SourceClientID, item.SourceContactID)] = item
 	}
+	for clientID, revision := range state.ContactSourceRevisions {
+		s.contactSourceRevisions[clientID] = revision
+	}
+	s.contactView = mergedContacts(contactSourcesFromMap(s.contacts), "")
 	s.simAuthAssignment = state.SIMAuthAssignment
 	if state.IMSRegistrationEnabled != nil {
 		s.imsRegistrationEnabled = *state.IMSRegistrationEnabled
@@ -118,9 +125,13 @@ func (s *Store) KnownClients() []KnownClient {
 
 func contactSourceKey(clientID, contactID string) string { return clientID + "\x00" + contactID }
 
-func (s *Store) ReplaceContactSource(clientID, clientName, region string, records []ContactSourceRecord) (bool, error) {
+func (s *Store) ReplaceContactSource(clientID, clientName, region string, revision int64, records []ContactSourceRecord) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	currentRevision := s.contactSourceRevisions[clientID]
+	if currentRevision > 0 && revision <= currentRevision {
+		return false, nil
+	}
 	proposed := make(map[string]ContactSourceRecord, len(records))
 	for _, record := range records {
 		record.SourceClientID = clientID
@@ -137,33 +148,75 @@ func (s *Store) ReplaceContactSource(clientID, clientName, region string, record
 		record.UpdatedAt = time.Time{}
 		existing[key] = record
 	}
-	if reflect.DeepEqual(existing, proposed) {
+	contentChanged := !reflect.DeepEqual(existing, proposed)
+	if !contentChanged && revision <= 0 {
 		return false, nil
 	}
+	nextContacts := make(map[string]ContactSourceRecord, len(s.contacts)-len(existing)+len(records))
 	for key, record := range s.contacts {
-		if record.SourceClientID == clientID {
-			delete(s.contacts, key)
+		if contentChanged && record.SourceClientID == clientID {
+			continue
+		}
+		nextContacts[key] = record
+	}
+	if contentChanged {
+		now := time.Now().UTC()
+		for _, record := range records {
+			record.SourceClientID = clientID
+			record.SourceClientName = clientName
+			record.Region = region
+			record.UpdatedAt = now
+			nextContacts[contactSourceKey(clientID, record.SourceContactID)] = record
 		}
 	}
-	now := time.Now().UTC()
-	for _, record := range records {
-		record.SourceClientID = clientID
-		record.SourceClientName = clientName
-		record.Region = region
-		record.UpdatedAt = now
-		s.contacts[contactSourceKey(clientID, record.SourceContactID)] = record
+	nextRevisions := make(map[string]int64, len(s.contactSourceRevisions)+1)
+	for id, value := range s.contactSourceRevisions {
+		nextRevisions[id] = value
 	}
-	return true, s.flushLocked()
+	if revision > 0 {
+		nextRevisions[clientID] = revision
+	}
+	previousContacts, previousRevisions, previousView := s.contacts, s.contactSourceRevisions, s.contactView
+	s.contacts = nextContacts
+	s.contactSourceRevisions = nextRevisions
+	if contentChanged {
+		s.contactView = mergedContacts(contactSourcesFromMap(nextContacts), "")
+	}
+	if err := s.flushLocked(); err != nil {
+		s.contacts, s.contactSourceRevisions, s.contactView = previousContacts, previousRevisions, previousView
+		return false, err
+	}
+	return contentChanged, nil
+}
+
+func contactSourcesFromMap(records map[string]ContactSourceRecord) []ContactSourceRecord {
+	result := make([]ContactSourceRecord, 0, len(records))
+	for _, record := range records {
+		record.Names = append([]string(nil), record.Names...)
+		record.Numbers = append([]ContactNumber(nil), record.Numbers...)
+		result = append(result, record)
+	}
+	return result
 }
 
 func (s *Store) ContactSources() []ContactSourceRecord {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	result := make([]ContactSourceRecord, 0, len(s.contacts))
-	for _, record := range s.contacts {
-		record.Names = append([]string(nil), record.Names...)
-		record.Numbers = append([]ContactNumber(nil), record.Numbers...)
-		result = append(result, record)
+	return contactSourcesFromMap(s.contacts)
+}
+
+func (s *Store) Contacts(query string) []Contact {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]Contact, 0, len(s.contactView))
+	for _, contact := range s.contactView {
+		if !contactMatches(contact, query) {
+			continue
+		}
+		contact.Names = append([]string(nil), contact.Names...)
+		contact.Numbers = append([]ContactNumber(nil), contact.Numbers...)
+		contact.Sources = append([]ContactSource(nil), contact.Sources...)
+		result = append(result, contact)
 	}
 	return result
 }
@@ -437,6 +490,7 @@ func (s *Store) flushLocked() error {
 	for _, item := range s.contacts {
 		state.Contacts = append(state.Contacts, item)
 	}
+	state.ContactSourceRevisions = s.contactSourceRevisions
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

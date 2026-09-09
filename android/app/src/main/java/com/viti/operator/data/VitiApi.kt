@@ -142,7 +142,11 @@ class VitiApi(private val settings: ServerSettings) {
                 }
                 contacts.put(JSONObject().put("source_contact_id", contact.id).put("names", JSONArray(contact.names)).put("numbers", numbers))
             }
-            JSONObject().put("client_name", identity.name).put("region", snapshot.region).put("contacts", contacts)
+            JSONObject()
+                .put("client_name", identity.name)
+                .put("region", snapshot.region)
+                .put("snapshot_revision", snapshot.revision)
+                .put("contacts", contacts)
         }
         rawRequest(
             path = "/api/v1/contacts/sources/${urlSegment(identity.id)}",

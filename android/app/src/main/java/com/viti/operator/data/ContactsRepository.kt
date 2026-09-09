@@ -4,6 +4,7 @@ import android.content.Context
 import android.provider.ContactsContract
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.telephony.TelephonyManager
+import java.io.IOException
 import java.util.Locale
 
 data class PhoneContact(
@@ -16,7 +17,11 @@ data class PhoneContact(
 
 data class DeviceContactNumber(val original: String, val normalized: String, val label: String)
 data class DeviceContact(val id: String, val names: List<String>, val numbers: List<DeviceContactNumber>)
-data class DeviceContactsSnapshot(val region: String, val contacts: List<DeviceContact>)
+data class DeviceContactsSnapshot(
+    val region: String,
+    val contacts: List<DeviceContact>,
+    val revision: Long = 0,
+)
 
 class ContactsRepository(private val context: Context) {
     fun load(): DeviceContactsSnapshot {
@@ -31,13 +36,14 @@ class ContactsRepository(private val context: Context) {
         )
         data class ContactBuilder(val names: LinkedHashSet<String> = linkedSetOf(), val numbers: MutableList<DeviceContactNumber> = mutableListOf())
         val contacts = linkedMapOf<Long, ContactBuilder>()
-        context.contentResolver.query(
+        val cursor = context.contentResolver.query(
             Phone.CONTENT_URI,
             projection,
             null,
             null,
             Phone.DISPLAY_NAME_PRIMARY + " COLLATE LOCALIZED ASC",
-        )?.use { cursor ->
+        ) ?: throw IOException("The Android contacts provider did not return an address book")
+        cursor.use {
             val idIndex = cursor.getColumnIndexOrThrow(Phone.CONTACT_ID)
             val nameIndex = cursor.getColumnIndexOrThrow(Phone.DISPLAY_NAME_PRIMARY)
             val alternativeNameIndex = cursor.getColumnIndexOrThrow(ContactsContract.Contacts.DISPLAY_NAME_ALTERNATIVE)
@@ -45,15 +51,15 @@ class ContactsRepository(private val context: Context) {
             val numberIndex = cursor.getColumnIndexOrThrow(Phone.NUMBER)
             val typeIndex = cursor.getColumnIndexOrThrow(Phone.TYPE)
             val labelIndex = cursor.getColumnIndexOrThrow(Phone.LABEL)
-            while (cursor.moveToNext()) {
-                val original = cursor.getString(numberIndex)?.trim().orEmpty()
-                val normalized = cursor.getString(normalizedIndex)?.trim().orEmpty()
+            while (it.moveToNext()) {
+                val original = it.getString(numberIndex)?.trim().orEmpty()
+                val normalized = it.getString(normalizedIndex)?.trim().orEmpty()
                 if (original.isBlank() && normalized.isBlank()) continue
-                val builder = contacts.getOrPut(cursor.getLong(idIndex), ::ContactBuilder)
-                listOf(cursor.getString(nameIndex), cursor.getString(alternativeNameIndex))
+                val builder = contacts.getOrPut(it.getLong(idIndex), ::ContactBuilder)
+                listOf(it.getString(nameIndex), it.getString(alternativeNameIndex))
                     .mapNotNull { it?.trim()?.takeIf(String::isNotBlank) }
                     .forEach(builder.names::add)
-                val label = Phone.getTypeLabel(context.resources, cursor.getInt(typeIndex), cursor.getString(labelIndex)).toString()
+                val label = Phone.getTypeLabel(context.resources, it.getInt(typeIndex), it.getString(labelIndex)).toString()
                 builder.numbers += DeviceContactNumber(original = original.ifBlank { normalized }, normalized = normalized, label = label)
             }
         }

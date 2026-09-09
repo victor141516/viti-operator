@@ -43,7 +43,8 @@ import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
-    private val viewModel by viewModels<MainViewModel> { MainViewModel.Factory(SettingsStore(applicationContext)) }
+    private val settingsStore by lazy { SettingsStore(applicationContext) }
+    private val viewModel by viewModels<MainViewModel> { MainViewModel.Factory(settingsStore) }
     private lateinit var voiceClient: VoiceWebViewClient
     private lateinit var incomingCallRinger: IncomingCallRinger
     private val clientIdentity by lazy { vitiClientIdentity() }
@@ -58,8 +59,7 @@ class MainActivity : ComponentActivity() {
     }
     private val contactsPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
-            observeContacts()
-            loadContacts()
+            enableContactSync()
         } else viewModel.showNotice("Contacts permission was not granted")
     }
 
@@ -145,12 +145,15 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         publishClientIdentity()
-        // A permission already granted in an earlier session must populate the
-        // dialer immediately; otherwise reinstalling or reopening the activity
-        // leaves a misleading "Use contacts" prompt until it is tapped.
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            observeContacts()
-            loadContacts()
+        // Existing installs may have granted READ_CONTACTS for the old local-only
+        // picker. Upload starts only after the separate Viti sync disclosure was
+        // accepted and persisted.
+        lifecycleScope.launch {
+            val permissionGranted = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+            if (permissionGranted && settingsStore.contactSyncConsent.first()) {
+                observeContacts()
+                loadContacts()
+            }
         }
     }
 
@@ -442,9 +445,17 @@ class MainActivity : ComponentActivity() {
 
     private fun requestContacts() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            loadContacts()
+            enableContactSync()
         } else {
             contactsPermission.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
+
+    private fun enableContactSync() {
+        lifecycleScope.launch {
+            settingsStore.setContactSyncConsent(true)
+            observeContacts()
+            loadContacts()
         }
     }
 
