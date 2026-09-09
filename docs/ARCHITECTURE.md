@@ -108,6 +108,50 @@ DataStore, and AndroidX WebKit. It targets API 36 and supports API 24 and later.
 The voice layer reuses the same bundled JsSIP implementation inside a controlled
 WebView, which keeps call signaling behavior aligned with the web client.
 
+`VoiceCallService` owns that hidden WebView, the SIP/WebRTC runtime, and the
+current Android call leg. Compose activities only attach to the process-owned
+state, so ordinary activity recreation, navigation, or detachment does not end
+a call. This is not durable call restoration: if Android kills the application
+process, the local SIP leg and its in-memory Telecom scope are lost and normal
+server-side stale-call reconciliation applies.
+
+On API 26 and later, when the device exposes `FEATURE_TELECOM`, the client
+registers with AndroidX Core-Telecom as a self-managed VoIP application. It
+does not request the default dialer role and cannot receive or control ordinary
+SIM calls. Outgoing SIP dialing starts only after Telecom admits the call, so a
+native call or another system concurrency decision is never bypassed with the
+legacy path. Incoming SIP legs are admitted immediately; answering still
+requires microphone permission, and a system or accessory answer without that
+permission rejects only the matching Viti leg.
+
+Every local leg has an immutable token shared by native callbacks, notification
+actions, and the JavaScript bridge. Delayed actions and events for an older leg
+are ignored. The leg remains in an explicit `ENDING` state until the
+Core-Telecom call scope has actually finished; a failed disconnect remains
+visible and retryable rather than freeing the slot prematurely. Provisioning
+changes are deferred until the current leg has ended.
+
+Telecom is the source of truth for current and available audio endpoints and
+temporary system mute/inactive state. User mute is separate and affects only
+that client's WebRTC sender. Core-Telecom routes earpiece, speaker, wired, and
+Bluetooth endpoints and supplies supported headset answer/disconnect actions.
+An accessory disconnect leaves this one conference participant; the existing
+server rule ends the carrier leg only when the last local participant leaves.
+
+API 24-25 devices, and newer devices that do not expose Telecom, use a legacy
+capability path based on audio focus, device observation, confirmed Bluetooth
+SCO state, and a media session for headset buttons. Audio-focus transitions are
+serialized and versioned: an obsolete loss or gain cannot overwrite a newer
+state. If a current focus loss cannot suppress WebRTC media, the client ends its
+local branch instead of claiming that audio is private. Exact headset behavior
+on this fallback remains dependent on what the Android build and accessory
+actually expose.
+
+The service stays foreground with a quiet `specialUse` notification while it
+keeps private VoIP signaling ready. During a call it declares `phoneCall` as
+well. This lifetime is distinct from the remote-SIM authentication foreground
+service.
+
 The connection topology is also rendered from one shared server-owned web view.
 Native Compose owns navigation, settings, notifications, and accessibility;
 the embedded topology surface owns pan, pinch-to-zoom, hit testing, and detail
@@ -407,6 +451,15 @@ a webhook retry cannot create a second conversation row.
   all clients.
 - Client histories are recovered from disk, not reconstructed from transient
   browser or Android state.
+- Android activity recreation reattaches to the process-owned call service and
+  does not recreate the SIP leg.
+- Android process death does not restore a local call. The server and engine
+  remain authoritative for carrier/conference cleanup and history recovery.
+- Telecom disconnect failures keep the exact leg in a retryable `ENDING` state;
+  late callbacks cannot attach to a replacement leg.
+- Legacy audio-focus commands are serialized. Obsolete completions are ignored,
+  while failure to suppress media for a current focus loss terminates only that
+  client branch.
 
 ## Security and trust boundaries
 
@@ -442,6 +495,8 @@ protected after testing.
 | Go singleton manager | Small static binary, simple concurrency, reliable embedded assets | Horizontal scaling needs an external store/event bus |
 | Asterisk carrier engine | Mature SIP, IMS patches, media translation, and conferencing | Engine image is specialized and privileged |
 | Shared JsSIP voice layer | Web and Android follow the same SIP/WebRTC behavior | Android voice depends on a controlled WebView |
+| Self-managed Android Telecom | Native concurrency, endpoints and headset actions without becoming the default dialer | API 24-25 and devices without Telecom use a vendor-dependent legacy audio path |
+| Process-owned Android call service | Activity recreation does not destroy a call | Android process death still loses the local SIP leg |
 | Server-owned history | Every client sees one consistent timeline | Server storage must be backed up |
 | Lossless per-participant WAV recording | Selected sides can be remixed without transcoding or losing evidence | Recording storage grows with call duration and participant count |
 | Dynamic SIM agent | The SIM can remain in a phone or move to USB without restart | Only one agent may own AKA at a time |

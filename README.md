@@ -15,6 +15,9 @@ IMS and conference audio.
 - Per-participant audio mixing and independent departure.
 - Client-local microphone mute on web and Android; other participants and
   incoming audio remain unaffected.
+- Android service calls integrate with the system Telecom concurrency and audio
+  model without replacing the default dialer, with a capability fallback for
+  Android 7 devices.
 - Browser-local microphone and speaker preferences with safe default fallback
   and automatic restoration when a remembered device reconnects.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.

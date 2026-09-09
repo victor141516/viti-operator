@@ -143,6 +143,52 @@ The Android remote authentication service must remain allowed to run in the
 background. On vendor Android builds, disable battery optimization for Viti
 Operator if the agent stops polling while the screen is off.
 
+## Android service-call integration
+
+Viti calls are self-managed VoIP calls. The application never asks to become
+the default phone application and does not take over ordinary carrier calls.
+On API 26+ devices with Android Telecom, the system admits each Viti call and
+applies native-call concurrency policy. A rejected admission is final for that
+attempt; Viti does not bypass it through its Android 7 fallback.
+
+Grant microphone access before answering or placing calls. Notification access
+is strongly recommended so the foreground-service and CallStyle controls remain
+visible. On Android 12+, grant nearby-device/Bluetooth access when prompted if
+Bluetooth route discovery or control is required. The application declares
+`MANAGE_OWN_CALLS`, foreground-service `specialUse`/`phoneCall`, audio-settings,
+and microphone permissions; it does not declare or request the dialer role.
+
+The quiet **Call service** notification means the process-owned SIP service is
+ready in the background. An active call uses the high-priority **Incoming
+calls** channel and exposes answer/reject/end actions supported by that Android
+version. Android notification-channel sound choices are persistent system
+settings: if incoming calls are visible but silent, open Viti's notification
+settings and verify that the Incoming calls channel has sound and vibration
+enabled.
+
+Audio routes shown during a call come from Telecom on supported devices. A
+route change is reported as successful only after Android accepts it. Wired and
+Bluetooth device changes update the list dynamically. On the API 24-25 fallback,
+Bluetooth is shown as current only after SCO actually connects; the exact
+mapping of headset play/call/end buttons depends on the vendor and accessory.
+
+If a native call makes a Viti leg inactive, Viti suppresses that client's
+WebRTC media without changing its user-mute preference. Rapid focus loss/gain
+events are serialized so the newest state wins. If current media suppression
+fails, Viti leaves that local conference branch rather than risking overlapping
+audio. Other joined Viti clients and the carrier call continue under the normal
+last-participant rule.
+
+Activity recreation does not end a call. Force-stopping the application or an
+Android process kill does: the local SIP leg is memory-only and is not restored
+after process creation. Confirm server-side call state before starting another
+call; stale history is reconciled by the manager/engine recovery flow.
+
+When an end or reject reaches the service but Android does not close its Telecom
+scope, the UI remains in **Ending** and offers the same operation again. Do not
+clear application data to remove this state: retry once, inspect Android Telecom
+and Viti diagnostics, and let the actual scope completion free the local slot.
+
 ## Browser audio devices
 
 Open **Connection → Call audio** to select this browser's microphone and, when
@@ -282,6 +328,18 @@ RTP packet capture, and decoded WAV directions. A signaling success does not
 prove media reachability. Check TURN allocation and the Tailscale path before
 changing the carrier tunnel.
 
+### Android call controls or routes are missing
+
+1. Check the Android version and whether the device exposes the Telecom feature.
+   API 24-25 and feature-less builds intentionally use the legacy capability path.
+2. Verify microphone, notifications, and nearby-device/Bluetooth permissions.
+3. For Bluetooth, wait for the accessory's SCO connection; mere pairing does
+   not prove that call audio is active.
+4. If a native call is present, end it or wait for Android to reactivate Viti.
+   Viti intentionally follows the system concurrency decision.
+5. If the UI remains in **Ending**, retry the displayed end/reject action and
+   inspect `dumpsys telecom` plus Viti diagnostics before restarting the app.
+
 ### SMS remains submitted or delivery is unconfirmed
 
 Carrier acceptance and destination delivery are different states. RP-ACK only
@@ -322,6 +380,11 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
 - HTTP on the tailnet; no application-layer TLS termination in this Compose
   project.
 - Android remote routing depends on Shizuku and device/vendor telephony support.
+- Android service-call integration uses self-managed Telecom on API 26+ only
+  when the device exposes it; the API 24-25 fallback and headset button mapping
+  remain vendor/accessory dependent.
+- Android activity recreation preserves a call, but process death does not
+  restore the local SIP/WebRTC leg.
 - Carrier Wi-Fi Calling provisioning and policy remain outside the project's
   control.
 - Destination SMS delivery reports depend on carrier/SMSC support and may remain
