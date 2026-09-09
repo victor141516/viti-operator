@@ -1,5 +1,6 @@
 import JsSIP from 'jssip'
 import { createMicrophoneMuteController } from './microphone-mute.js'
+import { createMicrophoneInputController } from './microphone-input.js'
 
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
@@ -46,6 +47,12 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     client_id: clientId, session_id: sessionId(current), trace_id: traceId(current), kind, data,
     })
   }
+  const microphoneInput = createMicrophoneInputController({
+    mediaDevices: navigator.mediaDevices,
+    getSession: () => session,
+    isMuted: () => microphoneMute.muted,
+    diagnose,
+  })
 
   if (!globalThis.__vitiGlobalDiagnosticsBound) {
     globalThis.__vitiGlobalDiagnosticsBound = true
@@ -331,7 +338,9 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     }
     next.on('ended', (event) => {
       stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
-      if (session === next) session = null
+      const wasCurrent = session === next
+      if (wasCurrent) session = null
+      if (wasCurrent) microphoneInput.release()
       microphoneMute.reset()
       localHangup = false
       const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }) }
@@ -340,7 +349,9 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     })
     next.on('failed', (event) => {
       stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
-      if (session === next) session = null
+      const wasCurrent = session === next
+      if (wasCurrent) session = null
+      if (wasCurrent) microphoneInput.release()
       microphoneMute.reset()
       const endedLocally = localHangup
       localHangup = false
@@ -375,7 +386,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       stopIncomingRing('outgoing-call')
       pendingTraceID = suppliedTraceID || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
       const options = {
-        mediaConstraints: { audio: true, video: false }, pcConfig: peerConfig(),
+        mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(),
         extraHeaders: [`X-Viti-Trace-ID: ${pendingTraceID}`, `X-Viti-Client-ID: ${clientId}`],
       }
       if (new URLSearchParams(location.search).get('testTone') === '1') {
@@ -389,7 +400,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       bindSession(session)
       emit('calling', { to: number, trace_id: traceId(session) })
     },
-    answer() { if (session) { stopIncomingRing('answer'); diagnose('action.answer'); session.answer({ mediaConstraints: { audio: true, video: false }, pcConfig: peerConfig(), extraHeaders: [`X-Viti-Client-ID: ${clientId}`] }) } },
+    answer() { if (session) { stopIncomingRing('answer'); diagnose('action.answer'); session.answer({ mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(), extraHeaders: [`X-Viti-Client-ID: ${clientId}`] }) } },
     reject() { if (session) { stopIncomingRing('reject'); diagnose('action.reject'); session.terminate({ status_code: 603, reason_phrase: 'Decline' }) } },
     hangup() {
       if (!session) return
@@ -399,6 +410,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       localHangup = false
       stopRingback('local-hangup')
       stopIncomingRing('local-hangup')
+      microphoneInput.release()
       if (session === ending) session = null
       microphoneMute.reset()
       const finish = () => {
@@ -412,6 +424,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       diagnose('action.mute', { value: Boolean(value) })
       return microphoneMute.set(value, session)
     },
+    setAudioInput: (deviceId) => microphoneInput.setDevice(deviceId),
     dtmf(tone) {
       if (!session || !session.isEstablished()) throw new Error('The call is not connected yet')
       if (!/^[0-9*#]$/.test(String(tone))) throw new Error('Invalid DTMF key')
@@ -426,6 +439,6 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       session.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
       emit('dtmf', { tone: String(tone) })
     },
-    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneMute.reset(session); if (session) session.terminate(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null },
+    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); if (session) session.terminate(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null },
   }
 }

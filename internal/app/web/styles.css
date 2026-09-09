@@ -36,6 +36,26 @@
 .nav-item svg{width:20px;height:20px;flex:0 0 20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
 .nav-item.active{box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--primary) 24%,transparent)}
 .settings-grid>.status-card{display:none}
+
+.audio-setting{grid-column:1/-1;padding:1.25rem;border-top:1px solid var(--line)}
+.audio-setting-heading h2{margin:0 0 .35rem}
+.audio-setting-heading p{margin:0;color:var(--muted);font-size:.82rem}
+.audio-device-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-top:.45rem}
+.audio-device-field{min-width:0;margin-top:.75rem}
+.audio-device-field>span{display:block;margin-bottom:.45rem;font-size:.82rem;font-weight:700}
+.audio-device-field select{width:100%;min-height:var(--control);border:1px solid var(--line);border-radius:14px;background:var(--surface-2);color:var(--text);padding:.75rem 2.35rem .75rem .9rem;font:inherit}
+.audio-device-field select:focus-visible,.audio-permission-button:focus-visible,.audio-output-picker-button:focus-visible{outline:3px solid color-mix(in srgb,var(--primary) 55%,transparent);outline-offset:2px}
+.audio-device-field select:disabled{opacity:.55;cursor:not-allowed}
+.audio-device-field small{display:block;min-height:2.4em;margin-top:.4rem;color:var(--muted);font-size:.76rem;line-height:1.35}
+.audio-device-field small[data-error="true"]{color:var(--danger)}
+.audio-access-row{display:flex;align-items:center;gap:1rem;min-height:48px;margin-top:.35rem}
+.audio-access-row[hidden]{display:none}
+.audio-permission-button,.audio-output-picker-button{min-height:var(--control);border:1px solid var(--line);border-radius:14px;padding:0 1rem;background:var(--surface-2);color:var(--text);font-weight:700;cursor:pointer}
+.audio-permission-button:hover:not(:disabled),.audio-output-picker-button:hover:not(:disabled){border-color:var(--primary);color:var(--primary)}
+.audio-permission-button:disabled,.audio-output-picker-button:disabled{opacity:.55;cursor:wait}
+.audio-access-row .form-status{margin:0}
+
+@media(max-width:760px){.audio-device-grid{grid-template-columns:1fr}.audio-access-row{align-items:flex-start;flex-direction:column;gap:.35rem}.audio-permission-button,.audio-output-picker-button{width:100%}}
 .topology-card{padding:1.45rem;background:radial-gradient(circle at 50% 40%,color-mix(in srgb,var(--primary) 8%,transparent),transparent 42%),linear-gradient(145deg,color-mix(in srgb,var(--surface) 94%,var(--primary-soft)),var(--surface));border-radius:18px}
 .topology-heading{margin-bottom:.9rem}
 .topology-map{display:grid;grid-template-columns:minmax(190px,1fr) minmax(128px,150px) 190px minmax(300px,1.3fr);grid-template-areas:"sim sim-edge server clients" ". . operator .";align-items:center;column-gap:0;row-gap:0;min-height:548px;padding:.25rem 0 .5rem}

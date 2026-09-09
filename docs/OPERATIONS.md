@@ -143,6 +143,30 @@ The Android remote authentication service must remain allowed to run in the
 background. On vendor Android builds, disable battery optimization for Viti
 Operator if the agent stops polling while the screen is off.
 
+## Browser audio devices
+
+Open **Connection → Call audio** to select this browser's microphone and, when
+supported, its speaker. Choices are stored only in that browser origin, so an
+HTTP loopback URL, an HTTPS deployment, and another host or port each have
+independent preferences. Audio capture and device enumeration require a secure
+browser context; loopback origins qualify, while a remote plain-HTTP origin may
+not. Use an HTTPS endpoint when a browser does not permit microphone access on
+the remote Tailscale URL.
+
+Choose **Allow audio device access** when device names are hidden. The browser
+may show a microphone permission prompt; the temporary permission stream is
+stopped immediately after enumeration. A separate **Choose a speaker…** action
+appears only when the browser supplies its native output picker. If speaker
+selection is unsupported, route output with the browser or operating-system
+audio controls instead.
+
+Unplugging the selected microphone or Bluetooth headset deliberately falls back
+to the system default without deleting the desired preference. The UI states
+that fallback and restores the device after it reconnects when its identifier,
+physical group, or unique label can be matched safely. Duplicate labels remain
+on the default route rather than selecting an arbitrary device. A failed live
+microphone switch leaves the previous call track and saved choice intact.
+
 ## Contact synchronization
 
 Contact synchronization is disabled until the user chooses **Sync contacts**

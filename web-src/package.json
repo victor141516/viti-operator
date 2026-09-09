@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify && esbuild recording-presence.js --bundle --format=iife --global-name=VitiRecordingPresence --outfile=../internal/app/web/recording-presence.js --minify",
+    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify && esbuild recording-presence.js --bundle --format=iife --global-name=VitiRecordingPresence --outfile=../internal/app/web/recording-presence.js --minify && esbuild audio-preferences.js --bundle --format=iife --global-name=VitiAudioPreferences --outfile=../internal/app/web/audio-preferences.bundle.js --minify",
     "test": "node --test *.test.js"
   },
   "dependencies": {
