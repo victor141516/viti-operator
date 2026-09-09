@@ -150,9 +150,10 @@ def flush_once(outbox=None, manager_url=None, token=None, session=HTTP):
     delivered = 0
     for path in files:
         if not deliver_file(path, manager_url, token, session):
-            # Preserve ordering. Later events are safe to process out of order,
-            # but stopping avoids an unbounded retry storm while the manager is down.
-            break
+            # A response may reach AMI before the local `submitted` event. Keep
+            # it durable, but continue so the later mapping can be accepted;
+            # the next pass can then correlate the early response.
+            continue
         delivered += 1
     return delivered
 

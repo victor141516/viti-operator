@@ -89,13 +89,15 @@ func TestEngineSMSProtocolEventsUpdateOriginalMessage(t *testing.T) {
 		"instance": "engine-1", "event": "sms_protocol",
 		"args": []string{"status_report", "sms-engine", "+34600000000", "1", "1", "7", "0", "0", "-1"},
 	}
-	// Exercise a fast report arriving before the submitted event and its duplicate.
-	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
-	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
+	// A fast report is retained by the engine outbox when its persisted reference
+	// mapping has not arrived yet.
+	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusConflict)
 	postEngineEvent(t, server.URL, "test-token", map[string]any{
 		"instance": "engine-1", "event": "sms_protocol",
 		"args": []string{"submitted", "sms-engine", "+34600000000", "1", "1", "7", "0", "-1", "-1"},
 	}, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
 
 	stored, ok := application.store.GetMessage("sms-engine")
 	if !ok || stored.State != "delivered" || stored.DeliveryState != "delivered" || len(stored.Parts) != 1 {

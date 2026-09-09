@@ -59,8 +59,11 @@ func OpenStore(path string) (*Store, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
+	normalizedState := false
 	for _, item := range state.Messages {
-		s.messages[item.ID] = normalizeStoredMessage(item, time.Now().UTC())
+		normalized := normalizeStoredMessage(item, time.Now().UTC())
+		s.messages[item.ID] = normalized
+		normalizedState = normalizedState || !reflect.DeepEqual(item, normalized)
 	}
 	for _, item := range state.Calls {
 		s.calls[item.ID] = item
@@ -82,6 +85,11 @@ func OpenStore(path string) (*Store, error) {
 	}
 	if state.CallRecordingEnabled != nil {
 		s.callRecordingEnabled = *state.CallRecordingEnabled
+	}
+	if normalizedState {
+		if err := s.flushLocked(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }

@@ -727,7 +727,14 @@ func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, arg
 		eventTime = time.Unix(0, recordedAtNS).UTC()
 	}
 	message, changed, err := a.store.ApplySMSProtocolEvent(event, eventTime)
-	if errors.Is(err, ErrSMSReportNotCorrelated) || errors.Is(err, ErrSMSReportAmbiguous) {
+	if errors.Is(err, ErrSMSReportNotCorrelated) {
+		// The durable engine outbox retains an early response until its later
+		// submitted event establishes the persistent reference mapping.
+		a.logger.Warn("SMS protocol event is waiting for correlation", "event", event, "error", err)
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, ErrSMSReportAmbiguous) {
 		a.logger.Warn("SMS protocol event was not applied", "event", event, "error", err)
 		w.WriteHeader(http.StatusNoContent)
 		return

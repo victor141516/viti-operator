@@ -12,6 +12,7 @@ import (
 
 const smsDeliveryReportWindow = 24 * time.Hour
 const smsServiceCentreTimeTolerance = 15 * time.Minute
+const smsRPReferenceCorrelationWindow = 15 * time.Minute
 
 var (
 	ErrSMSReportNotCorrelated = errors.New("SMS delivery report could not be correlated")
@@ -84,7 +85,8 @@ func (s *Store) UpdateMessage(id string, update func(*Message) bool) (Message, b
 func (s *Store) ApplySMSProtocolEvent(event SMSProtocolEvent, now time.Time) (Message, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	id, err := s.correlateSMSLocked(event)
+	now = now.UTC()
+	id, err := s.correlateSMSLocked(event, now)
 	if err != nil {
 		return Message{}, false, err
 	}
@@ -102,8 +104,10 @@ func (s *Store) ApplySMSProtocolEvent(event SMSProtocolEvent, now time.Time) (Me
 	return cloneMessage(next), true, nil
 }
 
-func (s *Store) correlateSMSLocked(event SMSProtocolEvent) (string, error) {
-	if id := strings.TrimSpace(event.MessageID); id != "" {
+func (s *Store) correlateSMSLocked(event SMSProtocolEvent, eventTime time.Time) (string, error) {
+	id := strings.TrimSpace(event.MessageID)
+	phase := strings.ToLower(strings.TrimSpace(event.Phase))
+	if id != "" {
 		message, ok := s.messages[id]
 		if !ok || message.Direction != DirectionOutgoing {
 			return "", ErrSMSReportNotCorrelated
@@ -111,69 +115,84 @@ func (s *Store) correlateSMSLocked(event SMSProtocolEvent) (string, error) {
 		if event.Destination != "" && strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
 			return "", ErrSMSReportNotCorrelated
 		}
-		if event.ServiceCentreTime != nil && messageHasConflictingSubmissionTime(message, event) {
-			return "", ErrSMSReportNotCorrelated
+		// These events describe the local operation that created the references,
+		// so the manager-generated message ID is authoritative. Responses are
+		// validated against all persisted reference owners below because
+		// Asterisk's in-memory table is empty after a restart.
+		if phase == "submitted" || phase == "local_failure" {
+			return id, nil
 		}
-		return id, nil
 	}
+	candidates := s.smsCorrelationCandidatesLocked(event, eventTime)
+	if len(candidates) > 1 {
+		return "", ErrSMSReportAmbiguous
+	}
+	for candidate := range candidates {
+		// A volatile Asterisk track may attach a stale response to a newly
+		// reused reference. Persisted timestamp/reference evidence wins.
+		return candidate, nil
+	}
+	return "", ErrSMSReportNotCorrelated
+}
+
+func (s *Store) smsCorrelationCandidatesLocked(event SMSProtocolEvent, eventTime time.Time) map[string]struct{} {
+	phase := strings.ToLower(strings.TrimSpace(event.Phase))
 	candidates := make(map[string]struct{})
 	for _, message := range s.messages {
-		if message.Direction != DirectionOutgoing || strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
+		if message.Direction != DirectionOutgoing {
+			continue
+		}
+		if event.Destination != "" && strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
 			continue
 		}
 		for _, part := range message.Parts {
-			if event.Instance != "" && part.Instance != "" && event.Instance != part.Instance {
+			if strings.TrimSpace(event.Instance) != strings.TrimSpace(part.Instance) {
 				continue
 			}
-			if !sameReference(part.RPReference, event.RPReference) && !sameReference(part.TPReference, event.TPReference) {
+			if part.SubmittedAt == nil {
 				continue
 			}
-			if event.ServiceCentreTime != nil {
-				if part.SubmittedAt == nil || !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime) {
+			switch phase {
+			case "rp_ack", "rp_error":
+				if !sameReference(part.RPReference, event.RPReference) ||
+					!smsTimesWithin(*part.SubmittedAt, eventTime, smsRPReferenceCorrelationWindow) {
 					continue
 				}
+			case "status_report":
+				if !sameReference(part.TPReference, event.TPReference) {
+					continue
+				}
+				if event.ServiceCentreTime != nil {
+					if !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime) {
+						continue
+					}
+				} else if !smsTimesWithin(*part.SubmittedAt, eventTime, smsDeliveryReportWindow) {
+					continue
+				}
+			default:
+				continue
 			}
 			candidates[message.ID] = struct{}{}
 			break
 		}
 	}
-	if len(candidates) == 0 {
-		return "", ErrSMSReportNotCorrelated
-	}
-	if len(candidates) != 1 {
-		return "", ErrSMSReportAmbiguous
-	}
-	for id := range candidates {
-		return id, nil
-	}
-	panic("unreachable SMS correlation result")
-}
-
-func messageHasConflictingSubmissionTime(message Message, event SMSProtocolEvent) bool {
-	for _, part := range message.Parts {
-		if event.Part > 0 && part.Part != event.Part {
-			continue
-		}
-		if event.Instance != "" && part.Instance != "" && event.Instance != part.Instance {
-			continue
-		}
-		if part.SubmittedAt != nil {
-			return !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime)
-		}
-	}
-	return false
+	return candidates
 }
 
 func sameReference(left, right *int) bool {
 	return left != nil && right != nil && *left == *right
 }
 
-func smsTimesClose(left, right time.Time) bool {
+func smsTimesWithin(left, right time.Time, window time.Duration) bool {
 	delta := left.Sub(right)
 	if delta < 0 {
 		delta = -delta
 	}
-	return delta <= smsServiceCentreTimeTolerance
+	return delta <= window
+}
+
+func smsTimesClose(left, right time.Time) bool {
+	return smsTimesWithin(left, right, smsServiceCentreTimeTolerance)
 }
 
 func applySMSProtocolEvent(message *Message, event SMSProtocolEvent, now time.Time) (bool, error) {
@@ -201,6 +220,10 @@ func applySMSProtocolEvent(message *Message, event SMSProtocolEvent, now time.Ti
 		changed = true
 	}
 	part := &message.Parts[index]
+	if (phase == "submitted" || phase == "local_failure") &&
+		(referenceConflicts(part.RPReference, event.RPReference) || referenceConflicts(part.TPReference, event.TPReference)) {
+		return false, errors.New("SMS submission references conflict with persisted part mapping")
+	}
 	changed = setString(&part.Instance, strings.TrimSpace(event.Instance)) || changed
 	changed = setString(&part.Recipient, strings.TrimSpace(event.Destination)) || changed
 	if part.Parts < event.Parts {
@@ -245,6 +268,10 @@ func applySMSProtocolEvent(message *Message, event SMSProtocolEvent, now time.Ti
 	}
 	message.UpdatedAt = now
 	return true, nil
+}
+
+func referenceConflicts(current, next *int) bool {
+	return current != nil && next != nil && *current != *next
 }
 
 func smsPartIndex(parts []SMSPartStatus, event SMSProtocolEvent) int {
@@ -571,6 +598,13 @@ func normalizeStoredMessage(message Message, now time.Time) Message {
 		case "failed":
 			message.DeliveryState = "failed"
 		}
+	}
+	if message.State == "sending" {
+		message.State = "unknown"
+		message.DeliveryState = "unknown"
+		message.DeliveryReportDeadline = nil
+		message.StatusDetail = "The manager restarted before the submission outcome was persisted; carrier submission is unknown."
+		return message
 	}
 	if message.DeliveryState == "pending" && message.DeliveryReportDeadline == nil {
 		basis := message.UpdatedAt

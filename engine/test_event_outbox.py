@@ -42,6 +42,16 @@ class EventOutboxTest(unittest.TestCase):
             self.assertFalse(event_outbox.deliver_file(path, "http://manager", "", session))
             self.assertTrue(path.exists())
 
+    def test_uncorrelated_early_event_does_not_block_later_mapping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            early = event_outbox.enqueue_event("sms_protocol", ["status_report"], recorded_at_ns=1, outbox=directory)
+            mapping = event_outbox.enqueue_event("sms_protocol", ["submitted"], recorded_at_ns=2, outbox=directory)
+            session = mock.Mock()
+            session.post.side_effect = [Response(409), Response(200)]
+            self.assertEqual(event_outbox.flush_once(directory, "http://manager", "", session), 1)
+            self.assertTrue(early.exists())
+            self.assertFalse(mapping.exists())
+
 
 if __name__ == "__main__":
     unittest.main()
