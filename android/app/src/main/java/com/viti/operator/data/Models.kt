@@ -121,6 +121,8 @@ data class RecordingTrack(
     val label: String,
     val contentType: String,
     val createdAt: String,
+    val offsetMs: Long,
+    val durationMs: Long,
 )
 
 data class RecordingSettings(val enabled: Boolean = false)

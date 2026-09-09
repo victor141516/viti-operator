@@ -264,7 +264,10 @@ endpoint can mark the response as a download. This keeps late joins and early
 departures at the same position even when only one track is selected. All tracks
 are selected initially in both UIs, and any number of local participant tracks
 can be independently deselected. Both clients expose seeking, elapsed and total
-time, and cyclic 1×/1.5×/2× playback controls.
+time, and cyclic 1×/1.5×/2× playback controls. During playback and immediately
+after seeking, each track row is marked as present, not yet joined, or already
+departed from its actual offset and WAV duration. Inactive rows are only a visual
+timeline state: their selected-mix checkbox is never changed automatically.
 
 ## SMS architecture
 

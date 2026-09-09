@@ -302,6 +302,8 @@ class VitiApi(private val settings: ServerSettings) {
                 label = track.optString("label"),
                 contentType = track.optString("content_type"),
                 createdAt = track.optString("created_at"),
+                offsetMs = track.optLong("offset_ms"),
+                durationMs = track.optLong("duration_ms"),
             )
         },
     )

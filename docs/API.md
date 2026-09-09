@@ -138,7 +138,10 @@ answer, update, and end timestamps.
 
 Recorded calls also include `recording_tracks`. Each track has a stable `id`,
 `role` (`remote` or `client`), human-readable device `label`, WAV content type,
-source timestamp, and client/participant identifiers when applicable.
+source timestamp, call-relative `offset_ms`, actual WAV `duration_ms`, and
+client/participant identifiers when applicable. For completed legacy records,
+the manager derives missing timing from the WAV header and persists only those
+track fields atomically; concurrent call or participant updates are preserved.
 
 ### `GET /api/v1/recording`
 

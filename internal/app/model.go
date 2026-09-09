@@ -45,6 +45,8 @@ type RecordingTrack struct {
 	ContentType   string    `json:"content_type"`
 	File          string    `json:"file,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
+	OffsetMS      int64     `json:"offset_ms"`
+	DurationMS    int64     `json:"duration_ms"`
 }
 
 type RecordingParticipant struct {

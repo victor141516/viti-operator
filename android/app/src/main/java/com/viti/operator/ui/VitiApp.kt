@@ -871,9 +871,15 @@ private fun RecordingSheet(call: Call, settings: ServerSettings, onDismiss: () -
             )
             Text("Tracks", style = MaterialTheme.typography.labelLarge)
             call.recordingTracks.forEach { track ->
+                val presence = recordingTrackPresence(track, positionMs.toLong())
+                val presenceText = when (presence.phase) {
+                    RecordingPresencePhase.BEFORE -> "Joins at ${formatPlaybackTime(presence.boundaryMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())}"
+                    RecordingPresencePhase.ACTIVE -> "Present now"
+                    RecordingPresencePhase.AFTER -> "Left at ${formatPlaybackTime(presence.boundaryMs.coerceAtMost(Int.MAX_VALUE.toLong()).toInt())}"
+                }
                 Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                     Row(
-                        Modifier.fillMaxWidth().clickable {
+                        Modifier.fillMaxWidth().alpha(if (presence.active) 1f else 0.5f).clickable {
                             selected = if (track.id in selected) selected - track.id else selected + track.id
                         }.padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -890,6 +896,12 @@ private fun RecordingSheet(call: Call, settings: ServerSettings, onDismiss: () -
                                 if (track.role == "remote") "Other side of the call" else "Microphone from this device",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Text(
+                                presenceText,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (presence.active) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontWeight = FontWeight.SemiBold,
                             )
                         }
                     }

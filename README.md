@@ -15,7 +15,8 @@ IMS and conference audio.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
 - Shared connection topology with live device presence.
 - Optional lossless call recordings with independently selectable microphone tracks,
-  a seekable timeline, 1x/1.5x/2x playback and selected-track WAV downloads.
+  a seekable timeline, participant-presence indicators, 1x/1.5x/2x playback and
+  selected-track WAV downloads.
 
 ## Setup
 

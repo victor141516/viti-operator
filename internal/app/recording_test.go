@@ -114,6 +114,71 @@ func TestMixWAVKeepsTheFullCallTimelineForLateAndShortTracks(t *testing.T) {
 	}
 }
 
+func TestPCM16WAVDurationReadsAudioLengthWithoutDecodingSamples(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duration.wav")
+	if err := os.WriteFile(path, writePCM16WAV(8_000, 1, make([]int16, 12_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	duration, err := pcm16WAVDuration(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duration != 1500*time.Millisecond {
+		t.Fatalf("duration = %s, want 1.5s", duration)
+	}
+}
+
+func TestRecordingTrackTimingUsesCallOffsetAndActualWAVDuration(t *testing.T) {
+	directory := t.TempDir()
+	callID := "call-timing"
+	if err := os.Mkdir(filepath.Join(directory, callID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, callID, "late.wav"), writePCM16WAV(8_000, 1, make([]int16, 4_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	application := &App{cfg: Config{Recordings: RecordingsConfig{Directory: directory}}}
+	track := application.recordingTrackTiming(
+		Call{StartedAt: start},
+		RecordingTrack{File: filepath.Join(callID, "late.wav"), CreatedAt: start.Add(5 * time.Second)},
+	)
+	if track.OffsetMS != 5_000 || track.DurationMS != 500 {
+		t.Fatalf("timing = offset %dms, duration %dms; want 5000ms and 500ms", track.OffsetMS, track.DurationMS)
+	}
+}
+
+func TestRecordingTimingUpdateRetainsTrackAddedAfterSnapshot(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := Call{
+		ID: "call-concurrent", Instance: "default", EngineCallID: "engine-concurrent",
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		RecordingTracks: []RecordingTrack{{ID: "remote", CreatedAt: time.Now().UTC()}},
+	}
+	if err := store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the stale-snapshot window: another event appends a client track
+	// after the call list was read but before derived timing is persisted.
+	_ = store.Calls()
+	if _, found, err := store.AddRecordingTrack("default", "engine-concurrent", RecordingTrack{ID: "client-new"}); err != nil || !found {
+		t.Fatalf("add concurrent track: found=%v err=%v", found, err)
+	}
+	if _, found, err := store.UpdateRecordingTrackTiming(call.ID, "remote", 250, 1_500); err != nil || !found {
+		t.Fatalf("update timing: found=%v err=%v", found, err)
+	}
+	got, ok := store.GetCall(call.ID)
+	if !ok || len(got.RecordingTracks) != 2 {
+		t.Fatalf("recording tracks = %#v; concurrent track was lost", got.RecordingTracks)
+	}
+	if got.RecordingTracks[0].OffsetMS != 250 || got.RecordingTracks[0].DurationMS != 1_500 {
+		t.Fatalf("updated timing = %#v", got.RecordingTracks[0])
+	}
+}
+
 func wavSamples(t *testing.T, wav []byte) []int16 {
 	t.Helper()
 	if len(wav) < 44 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {

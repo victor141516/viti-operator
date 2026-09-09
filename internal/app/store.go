@@ -315,6 +315,32 @@ func (s *Store) AddRecordingTrack(instance, engineCallID string, track Recording
 	return Call{}, false, nil
 }
 
+// UpdateRecordingTrackTiming changes only derived timing fields under the
+// store lock. It deliberately does not replace the surrounding Call snapshot,
+// because recording and participant events may arrive concurrently.
+func (s *Store) UpdateRecordingTrackTiming(callID, trackID string, offsetMS, durationMS int64) (Call, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	call, found := s.calls[callID]
+	if !found {
+		return Call{}, false, nil
+	}
+	for index := range call.RecordingTracks {
+		track := &call.RecordingTracks[index]
+		if track.ID != trackID {
+			continue
+		}
+		if track.OffsetMS == offsetMS && track.DurationMS == durationMS {
+			return call, true, nil
+		}
+		track.OffsetMS = offsetMS
+		track.DurationMS = durationMS
+		s.calls[callID] = call
+		return call, true, s.flushLocked()
+	}
+	return call, false, nil
+}
+
 func (s *Store) Messages() []Message {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
