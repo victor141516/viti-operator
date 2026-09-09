@@ -156,9 +156,34 @@ Successful replacements return `204`. A content change also publishes
 ### `GET /api/v1/messages`
 
 Returns `{"messages":[...]}` in descending creation order. Records include
-`id`, `direction`, `from`, `to`, `text`, `state`, `created_at`, and `updated_at`.
+`id`, `direction`, `from`, `to`, `text`, `state`, `delivery_state`,
+`delivery_report_requested`, `delivery_report_deadline`, `status_detail`,
+`failure_code`, `failure_reason`, `parts`, `created_at`, and `updated_at`.
 When the peer resolves to a synchronized contact, `contact_id` and
 `contact_name` are included while the original number remains unchanged.
+
+For outgoing messages, the fields mean:
+
+| `state` | Evidence |
+|---|---|
+| `sending` | Persisted locally; submission is running. |
+| `submitted` | Handed to the IMS transport; carrier acceptance is not proven. |
+| `accepted` | Every segment has carrier/service-centre evidence, but delivery is not fully confirmed. |
+| `delivered` | Every segment has a successful GSM status report. |
+| `unknown` | Submission outcome was interrupted before it could be persisted. |
+| `failed` | Local transport, RP, or terminal TP failure. |
+
+`delivery_state` is independently `pending`, `delivered`, `failed`, or
+`unknown`. `status_detail` explains the strongest current evidence. Exact RP or
+TP failures are exposed in `failure_code` and `failure_reason`. Each entry in
+`parts` contains its multipart index/count, engine instance, recipient, RP/TP
+references, state, protocol codes, submission/service-centre timestamps, and
+last update time.
+
+`delivered` means the destination device was reported as reached. It is never a
+read receipt. Carrier acceptance, HTTP success, and SIP transaction success are
+not presented as delivery. Carriers that omit or delay status reports produce
+an honest `unknown` state after the reporting window.
 
 ### `POST /api/v1/messages`
 
@@ -168,7 +193,9 @@ When the peer resolves to a synchronized contact, `contact_id` and
 
 The destination must be E.164 and text must contain 1–1000 Unicode characters.
 The manager persists a `sending` record before returning `202`; delivery then
-continues asynchronously.
+continues asynchronously. The response only confirms local acceptance of the
+request. All connected clients observe later persisted changes through the
+shared event stream and normal history refresh.
 
 ## Calls
 

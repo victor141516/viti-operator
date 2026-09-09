@@ -7,7 +7,8 @@ IMS and conference audio.
 
 ## Features
 
-- Shared SMS and call history across web and Android.
+- Shared SMS and call history across web and Android, with carrier acceptance,
+  destination delivery, failure, and honest unconfirmed SMS states.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.

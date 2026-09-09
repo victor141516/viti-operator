@@ -306,14 +306,64 @@ timeline state: their selected-mix checkbox is never changed automatically.
 The manager accepts an outgoing SMS, writes it immediately with state
 `sending`, and returns HTTP 202. A single worker lock serializes the carrier's
 IMS MESSAGE channel while allowing web and Android clients to submit
-concurrently. The engine sends SIP MESSAGE toward IMS. Resulting states are:
+concurrently. The engine sends SIP MESSAGE toward IMS and requests a GSM status
+report for every segment. Local HTTP or SIP success never means destination
+delivery.
+
+The message `state` describes the furthest evidenced lifecycle stage, while
+`delivery_state` describes destination confirmation. Resulting message states
+are:
 
 - `sending`: locally queued or being submitted;
-- `submitted`: sent but no conclusive RP response arrived before timeout;
-- `accepted`: acknowledged by the carrier submission path;
-- `delivered`: independently verified by the configured receive path;
+- `submitted`: handed to the IMS transport, without carrier acceptance yet;
+- `accepted`: every segment has carrier acknowledgement or later service-centre
+  evidence, but destination delivery is not fully confirmed;
+- `delivered`: every segment has a successful GSM status report;
+- `unknown`: the manager restarted before recording the submission result;
 - `failed`: rejected locally or by the carrier;
 - `received`: inbound and persisted.
+
+`delivery_state` is `pending`, `delivered`, `failed`, or `unknown`. A successful
+RP-ACK proves acceptance by the carrier message service, not delivery. TP-ST
+`0x00` proves delivery to the destination device but is not a read receipt.
+Temporary TP-ST values remain pending; terminal failures preserve their exact
+status/cause and a human-readable explanation. If no conclusive report arrives
+within 24 hours, the manager records `unknown` rather than claiming success.
+
+### Durable evidence and correlation
+
+The patched Asterisk module emits the manager message ID, multipart index,
+engine instance, RP reference, TP message reference, TP status/cause, and the
+service-centre timestamp when the protocol supplies it. `ami_usim` commits each
+event with `fsync` and atomic rename to the bind-mounted
+`/run/vowifi/event-outbox` before returning from the AMI callback. A worker keeps
+retrying network errors and non-2xx responses and removes a file only after the
+manager returns 2xx. A response that arrives before its `submitted` mapping gets
+HTTP 409; the worker continues with later files and retries the early response
+after the mapping exists.
+
+Asterisk's track table is deliberately treated as volatile. The manager is the
+persistent correlation authority:
+
+- `submitted` establishes an immutable RP/TP mapping for one message segment;
+- RP-ACK and RP-ERROR use only the RP reference, stable engine instance, and
+  original event time within a 15-minute correlation window; inferred message
+  ID, destination, TP reference, and multipart index are not trusted;
+- status reports use only the TP reference, engine instance, protocol recipient,
+  and service-centre submission timestamp (within 15 minutes of the persisted
+  submission); reports without a decodable service-centre timestamp use the
+  original event time within the 24-hour reporting window;
+- reused references that match more than one persisted owner are rejected as
+  ambiguous instead of being assigned to the newest message;
+- multipart responses select their segment by RP for RP responses and by TP for
+  status reports. Aggregate acceptance or delivery requires evidence for every
+  expected segment.
+
+These rules remain valid across manager, engine, and Asterisk restarts. If the
+manager restarts while a row is still `sending`, it immediately and durably
+changes that row to `state=unknown`, `delivery_state=unknown`; it never resends
+the message automatically. A later durably queued protocol event may still
+promote the record when it can be correlated safely.
 
 Inbound engine events include their original timestamp and are deduplicated so
 a webhook retry cannot create a second conversation row.
