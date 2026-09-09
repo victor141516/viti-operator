@@ -74,6 +74,33 @@ binary. JsSIP 3.10.1 is bundled with esbuild for SIP over WebSocket and WebRTC
 media. The browser uses the manager for history and status, while live call
 signaling passes through `/sipws` to Asterisk.
 
+#### Browser audio-device preferences
+
+Audio-device choice is browser-local rather than manager-owned. The desired
+microphone and speaker identities are stored in origin-scoped `localStorage`;
+the effective routes are volatile and are recomputed from `enumerateDevices()`
+at startup and after every serialized `devicechange` event. A remembered device
+is resolved first by its exact identifier, then by one unique physical group,
+and finally by one unique label. Ambiguous labels are never guessed.
+
+If a desired device disappears, the client preserves that preference but moves
+the effective route to the system default and reports the fallback in the UI.
+It restores the desired route when the device reappears, including when the
+browser assigned a new identifier that can be matched unambiguously. Selecting
+a microphone during a call first acquires a candidate track and then uses
+`RTCRtpSender.replaceTrack()`. The selection is committed only after replacement
+succeeds for the same call; failed or superseded operations stop the candidate
+track and retain the previous preference. If the call merely ended, the desired
+choice is kept for the next call.
+
+Speaker routing uses `HTMLMediaElement.setSinkId()` where available. Browsers
+that also expose `MediaDevices.selectAudioOutput()` receive a user-activated
+native speaker picker so private output devices can be authorized. Browsers
+without programmatic output routing keep the system speaker and explain that
+the browser or operating-system controls must be used. The application does not
+claim a preferred device is active unless the corresponding browser operation
+has succeeded.
+
 ### Android client
 
 The native application uses Kotlin, Jetpack Compose, Material 3, coroutines,

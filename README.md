@@ -15,6 +15,8 @@ IMS and conference audio.
 - Per-participant audio mixing and independent departure.
 - Client-local microphone mute on web and Android; other participants and
   incoming audio remain unaffected.
+- Browser-local microphone and speaker preferences with safe default fallback
+  and automatic restoration when a remembered device reconnects.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
 - Shared connection topology with live device presence.
 - Optional lossless call recordings with independently selectable microphone tracks,
