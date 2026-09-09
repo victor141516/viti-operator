@@ -222,6 +222,13 @@ participants, excluding its own audio. The carrier receives the combined local
 side. Hanging up removes only that participant. The carrier leg ends when the
 last local participant leaves.
 
+Microphone mute is local to each web or Android participant. The shared JsSIP
+voice layer disables only that client's outbound audio sender, so the muted
+client continues receiving conference audio and cannot mute another device.
+Mute state is reapplied if WebRTC replaces the outbound sender during the same
+call, and it resets when that client leaves or starts a new call. JsSIP remains
+responsible for restoring media on unmute so SIP hold state is respected.
+
 Future call transfer between devices is therefore mostly a product operation:
 join the destination, verify media, then leave the source. A dedicated atomic
 handoff UI has not yet been implemented.
