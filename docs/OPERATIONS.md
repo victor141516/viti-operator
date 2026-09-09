@@ -97,6 +97,15 @@ AMI, engine WebSocket, and TURN relay ports are private to the Compose network.
 
 ## Windows OpenStick ADB bridge
 
+First prepare the supported stock-Android stick using the
+[component release ZIP](https://github.com/victor141516/viti-operator/releases/tag/openstick-android-bridge-v1.0.0)
+and its [installer guide](../tools/openstick-android-bridge/README.md).
+This is a separate prerequisite from the host-side ADB transport described below.
+The installer verifies the hardware/firmware allowlist, installs the recovered
+APK/helpers, and prints the serial for `VITI_ADB_SERIAL`. It does not install
+Linux OpenStick, firmware, Docker, or the host ADB bridge. Its original payload
+source remains unavailable; this limitation is documented in the release.
+
 Do not run `adb -a`; it listens broadly and is especially unsafe while the
 Windows firewall is disabled. Build the restricted bridge:
 
@@ -212,8 +221,8 @@ do not add them to source-controlled configuration.
    or reconnect the configured OpenStick serial.
 3. If ePDG failed, inspect SWu/IKE logs and UDP 500/4500 reachability.
 4. If IMS failed, inspect Asterisk registration and SIP AKA logs.
-5. Do not repeatedly reflash the modem: OpenStick firmware is only the local SIM
-   transport and is not the carrier IMS stack.
+5. Do not repeatedly reflash the modem: the stock-Android SIM bridge is only
+   the local authentication transport and is not the carrier IMS stack.
 
 ### Modem was unplugged
 

@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "version": "1.0.0",
+  "package": "lab.codex.simidentity",
+  "description": "Recovered Android stock SIM bridge binaries; original source currently unavailable.",
+  "expected_properties": {
+    "ro.product.manufacturer": "HiMI",
+    "ro.product.model": "UFI",
+    "ro.product.device": "UFI",
+    "ro.product.name": "UFI",
+    "ro.product.board": "msm8916",
+    "ro.board.platform": "msm8916",
+    "ro.hardware": "qcom",
+    "ro.build.fingerprint": "qcom/msm8916_32_512/msm8916_32_512:4.4.4/KTU84P/eng.root.20230916:userdebug/test-keys",
+    "ro.build.version.release": "4.4.4",
+    "ro.build.version.sdk": "19",
+    "ro.product.cpu.abi": "armeabi-v7a",
+    "gsm.version.baseband": "HIMI_U01_MODEM_V2.0"
+  },
+  "apk_signer_certificate_sha256": "c8a2e9bccf597c2fb6dc66bee293fc13f2fc47ec77bc6b2b0d52c11f51192ab8",
+  "files": [
+    {
+      "name": "sim-identity-platform.apk",
+      "size": 16727,
+      "sha256": "ef9c104d10e68cb4d17392b012c1c28d16c405971ec7b20a49bc176730756c7d",
+      "kind": "apk"
+    },
+    {
+      "name": "qmi_auth_aka",
+      "size": 10624,
+      "sha256": "7567f8252bcf4c2943de51cf6be58cf6c5bf9ef0036d9142aea9475a60f47ab2",
+      "kind": "helper",
+      "remote": "/data/local/tmp/qmi_auth_aka"
+    },
+    {
+      "name": "qmi_uim_smsc",
+      "size": 8296,
+      "sha256": "06825e7351cf039e5163348d8e3e5298c5e43bd692e311fdfd20f2a49ae09ac8",
+      "kind": "helper",
+      "remote": "/data/local/tmp/qmi_uim_smsc"
+    }
+  ]
+}

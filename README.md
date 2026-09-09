@@ -39,13 +39,20 @@ The private TURN service uses UDP; its relay ports stay inside the Docker networ
 
 The carrier must support the required Wi-Fi Calling/IMS flows. Android remote
 authentication requires a compatible device and the documented Shizuku setup.
-The OpenStick adapter expects an existing privileged on-device bridge,
-`lab.codex.simidentity/.ReadIdentityActivity`, which exchanges
-`/data/local/tmp/aka_challenge.bin` and `/data/local/tmp/aka_result`.
-The bridge's source was not present in the exported project; this repository
-does not install it or supply a modem firmware image. A stock modem is therefore
-not a plug-and-play prerequisite satisfied by this checkout. Remote Android,
-command adapters and the optional PC/SC configuration are documented alternatives.
+For the USB adapter, first install the dedicated
+[OpenStick Stock Android Bridge Binaries v1.0.0 component release](https://github.com/victor141516/viti-operator/releases/tag/openstick-android-bridge-v1.0.0).
+Download and extract its ZIP, then run `python install.py --check` followed by
+`python install.py` with Python 3.10+ and ADB installed. See the
+[bridge setup and compatibility guide](tools/openstick-android-bridge/README.md).
+The historical `openstick` adapter name refers here to HiMI/UFI hardware running
+the verified **stock Android 4.4.4 firmware**, not the Linux OpenStick OS.
+
+The release contains the recovered privileged APK and two native helper binaries,
+plus their installer. Their original source is currently unavailable; recovering
+or reimplementing it remains pending. No firmware or private device data is shipped.
+The installer rejects unvalidated firmware/ordinary phones and does not flash or
+root devices. Remote Android, command adapters and optional PC/SC remain alternative
+SIM authentication paths.
 
 ## Development
 
@@ -84,4 +91,5 @@ This is a clean source snapshot with a new Git history. It includes reusable
 application, engine, tests, configuration templates and opt-in diagnostics code.
 It excludes deployment credentials, local configuration, raw traces, recordings,
 screenshots, APKs, modem recovery/flashing tools and workstation-specific scripts.
-The original local histories are not included.
+The original local histories are not included. The three recovered stock-Android
+bridge binaries are distributed separately as component release assets, not in Git.
