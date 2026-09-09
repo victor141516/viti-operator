@@ -3,8 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify",
-    "test": "node --test microphone-mute.test.js"
+    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify && esbuild recording-presence.js --bundle --format=iife --global-name=VitiRecordingPresence --outfile=../internal/app/web/recording-presence.js --minify",
+    "test": "node --test *.test.js"
   },
   "dependencies": {
     "jssip": "3.10.1"

@@ -114,6 +114,40 @@ func TestMixWAVKeepsTheFullCallTimelineForLateAndShortTracks(t *testing.T) {
 	}
 }
 
+func TestPCM16WAVDurationReadsAudioLengthWithoutDecodingSamples(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "duration.wav")
+	if err := os.WriteFile(path, writePCM16WAV(8_000, 1, make([]int16, 12_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	duration, err := pcm16WAVDuration(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if duration != 1500*time.Millisecond {
+		t.Fatalf("duration = %s, want 1.5s", duration)
+	}
+}
+
+func TestRecordingTrackTimingUsesCallOffsetAndActualWAVDuration(t *testing.T) {
+	directory := t.TempDir()
+	callID := "call-timing"
+	if err := os.Mkdir(filepath.Join(directory, callID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, callID, "late.wav"), writePCM16WAV(8_000, 1, make([]int16, 4_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	application := &App{cfg: Config{Recordings: RecordingsConfig{Directory: directory}}}
+	track := application.recordingTrackTiming(
+		Call{StartedAt: start},
+		RecordingTrack{File: filepath.Join(callID, "late.wav"), CreatedAt: start.Add(5 * time.Second)},
+	)
+	if track.OffsetMS != 5_000 || track.DurationMS != 500 {
+		t.Fatalf("timing = offset %dms, duration %dms; want 5000ms and 500ms", track.OffsetMS, track.DurationMS)
+	}
+}
+
 func wavSamples(t *testing.T, wav []byte) []int16 {
 	t.Helper()
 	if len(wav) < 44 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {

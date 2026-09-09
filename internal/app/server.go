@@ -637,7 +637,7 @@ func (a *App) deliverMessage(message Message) {
 }
 
 func (a *App) calls(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"calls": a.store.Calls()})
+	writeJSON(w, http.StatusOK, map[string]any{"calls": a.callsWithRecordingTiming()})
 }
 
 func (a *App) startCall(w http.ResponseWriter, r *http.Request) {

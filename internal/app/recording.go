@@ -243,6 +243,112 @@ type pcmWAV struct {
 	samples    []int16
 }
 
+// pcm16WAVDuration reads only the RIFF chunk headers needed to determine the
+// duration. This keeps call-list requests cheap even for long recordings.
+func pcm16WAVDuration(path string) (time.Duration, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return 0, err
+	}
+	header := make([]byte, 12)
+	if _, err := io.ReadFull(file, header); err != nil || string(header[:4]) != "RIFF" || string(header[8:]) != "WAVE" {
+		return 0, errors.New("recording is not a RIFF/WAVE file")
+	}
+	var byteRate uint32
+	var dataSize uint32
+	for {
+		chunk := make([]byte, 8)
+		if _, err := io.ReadFull(file, chunk); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return 0, err
+		}
+		size := binary.LittleEndian.Uint32(chunk[4:])
+		payloadStart, err := file.Seek(0, io.SeekCurrent)
+		if err != nil {
+			return 0, err
+		}
+		if int64(size) > info.Size()-payloadStart {
+			return 0, errors.New("recording contains a truncated WAVE chunk")
+		}
+		switch string(chunk[:4]) {
+		case "fmt ":
+			if size < 16 {
+				return 0, errors.New("recording contains an invalid format chunk")
+			}
+			format := make([]byte, 16)
+			if _, err := io.ReadFull(file, format); err != nil {
+				return 0, err
+			}
+			if binary.LittleEndian.Uint16(format[:2]) != 1 {
+				return 0, errors.New("recording must use uncompressed PCM")
+			}
+			byteRate = binary.LittleEndian.Uint32(format[8:12])
+			if _, err := file.Seek(int64(size)-16+int64(size%2), io.SeekCurrent); err != nil {
+				return 0, err
+			}
+		case "data":
+			dataSize = size
+			if _, err := file.Seek(int64(size)+int64(size%2), io.SeekCurrent); err != nil {
+				return 0, err
+			}
+		default:
+			if _, err := file.Seek(int64(size)+int64(size%2), io.SeekCurrent); err != nil {
+				return 0, err
+			}
+		}
+		if byteRate > 0 && dataSize > 0 {
+			return time.Duration(dataSize) * time.Second / time.Duration(byteRate), nil
+		}
+	}
+	return 0, errors.New("recording does not contain duration metadata")
+}
+
+func (a *App) recordingTrackTiming(call Call, track RecordingTrack) RecordingTrack {
+	offset := track.CreatedAt.Sub(call.StartedAt)
+	if offset < 0 {
+		offset = 0
+	}
+	track.OffsetMS = offset.Milliseconds()
+	if track.DurationMS > 0 {
+		return track
+	}
+	path, err := a.recordingPath(track.File)
+	if err != nil {
+		return track
+	}
+	duration, err := pcm16WAVDuration(path)
+	if err == nil {
+		track.DurationMS = (duration.Nanoseconds() + int64(time.Millisecond) - 1) / int64(time.Millisecond)
+	}
+	return track
+}
+
+func (a *App) callsWithRecordingTiming() []Call {
+	calls := a.store.Calls()
+	for callIndex := range calls {
+		calls[callIndex].RecordingTracks = append([]RecordingTrack(nil), calls[callIndex].RecordingTracks...)
+		timingChanged := false
+		for trackIndex, track := range calls[callIndex].RecordingTracks {
+			timed := a.recordingTrackTiming(calls[callIndex], track)
+			calls[callIndex].RecordingTracks[trackIndex] = timed
+			timingChanged = timingChanged || timed.OffsetMS != track.OffsetMS || timed.DurationMS != track.DurationMS
+		}
+		// Lazily migrate completed recordings once their final WAV header is
+		// readable. Subsequent history polls then avoid reopening audio files.
+		if timingChanged && calls[callIndex].EndedAt != nil {
+			_ = a.store.SaveCall(calls[callIndex])
+		}
+	}
+	return calls
+}
+
 func readPCM16WAV(path string) (pcmWAV, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
