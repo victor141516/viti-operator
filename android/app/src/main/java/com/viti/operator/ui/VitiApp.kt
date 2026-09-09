@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
@@ -59,12 +60,15 @@ import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ElevatedCard
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -126,6 +130,8 @@ import com.viti.operator.data.RuntimeStatus
 import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.PhoneContact
 import com.viti.operator.data.VitiApi
+import com.viti.operator.voice.VoiceCallRuntime
+import com.viti.operator.voice.VoiceCallSnapshot
 import com.viti.operator.voice.VoiceWebViewClient
 import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
@@ -148,6 +154,7 @@ private enum class Destination(val label: String, val icon: ImageVector) {
 @Composable
 fun VitiApp(
     viewModel: MainViewModel,
+    voiceRuntime: VoiceCallRuntime,
     voiceClient: VoiceWebViewClient,
     onPlaceCall: (String) -> Unit,
     onAnswerCall: () -> Unit,
@@ -155,6 +162,7 @@ fun VitiApp(
     onHangupCall: () -> Unit,
     onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
+    onSelectAudioEndpoint: (String) -> Unit,
     onPrepareShizuku: () -> Unit,
     onStartAuthAgent: () -> Unit,
     onStopAuthAgent: () -> Unit,
@@ -166,10 +174,11 @@ fun VitiApp(
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val authService by viewModel.authService.collectAsStateWithLifecycle()
 	val phoneRouting by viewModel.phoneRouting.collectAsStateWithLifecycle()
+    val callSnapshot by voiceRuntime.snapshot.collectAsStateWithLifecycle()
     var destination by rememberSaveable { mutableStateOf(Destination.Messages) }
 
     LaunchedEffect(ui.voiceProvisioning) {
-        if (ui.voiceProvisioning.enabled) voiceClient.start(ui.voiceProvisioning)
+        voiceRuntime.start(ui.voiceProvisioning)
     }
 
     Box(Modifier.fillMaxSize()) {
@@ -225,12 +234,14 @@ fun VitiApp(
                     Destination.Calls -> CallsScreen(
                         ui = ui,
                         settings = settings,
+                        callSnapshot = callSnapshot,
                         onCall = onPlaceCall,
                         onAnswer = onAnswerCall,
                         onReject = onRejectCall,
                         onHangup = onHangupCall,
                         onSetMuted = onSetMuted,
                         onSendDtmf = onSendDtmf,
+                        onSelectAudioEndpoint = onSelectAudioEndpoint,
                         onRequestContacts = onRequestContacts,
                     )
                     Destination.Connection -> ConnectionScreen(
@@ -610,12 +621,14 @@ private fun ContactSuggestion(contact: PhoneContact, onClick: () -> Unit) {
 private fun CallsScreen(
     ui: AppUiState,
     settings: ServerSettings,
+    callSnapshot: VoiceCallSnapshot,
     onCall: (String) -> Unit,
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onHangup: () -> Unit,
     onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
+    onSelectAudioEndpoint: (String) -> Unit,
     onRequestContacts: () -> Unit,
 ) {
     var query by rememberSaveable { mutableStateOf("") }
@@ -663,6 +676,7 @@ private fun CallsScreen(
                     Spacer(Modifier.height(14.dp))
                     ActiveCallPanel(
                         ui = ui,
+                        callSnapshot = callSnapshot,
                         activeServerCall = activeServerCall,
                         anotherClientOwnsCall = anotherClientOwnsCall,
                         canJoinCall = canJoinCall,
@@ -672,6 +686,7 @@ private fun CallsScreen(
                         onSetMuted = onSetMuted,
                         onJoin = { onCall("*44") },
                         onOpenKeypad = { dialerOpen = true },
+                        onSelectAudioEndpoint = onSelectAudioEndpoint,
                     )
                 }
                 Spacer(Modifier.height(10.dp))
@@ -730,6 +745,7 @@ private fun CallsScreen(
         DialerSheet(
             initialNumber = dialerNumber,
             ui = ui,
+            callSnapshot = callSnapshot,
             serverCallActive = serverCallActive,
             anotherClientOwnsCall = anotherClientOwnsCall,
             onDismiss = { dialerOpen = false },
@@ -740,6 +756,7 @@ private fun CallsScreen(
             onHangup = onHangup,
             onSetMuted = onSetMuted,
             onSendDtmf = onSendDtmf,
+            onSelectAudioEndpoint = onSelectAudioEndpoint,
         )
     }
     recordingCall?.let { call ->
@@ -750,6 +767,7 @@ private fun CallsScreen(
 @Composable
 private fun ActiveCallPanel(
     ui: AppUiState,
+    callSnapshot: VoiceCallSnapshot,
     activeServerCall: Call?,
     anotherClientOwnsCall: Boolean,
     canJoinCall: Boolean,
@@ -759,6 +777,7 @@ private fun ActiveCallPanel(
     onSetMuted: (Boolean) -> Unit,
     onJoin: () -> Unit,
     onOpenKeypad: () -> Unit,
+    onSelectAudioEndpoint: (String) -> Unit,
 ) {
     val peerNumber = activeServerCall?.peer?.takeUnless { it == "*44" }.orEmpty().ifBlank { ui.voice.peer }.ifBlank { "Call" }
     val peer = activeServerCall?.contactName.orEmpty().ifBlank { contactName(ui.contacts, peerNumber) }
@@ -808,6 +827,21 @@ private fun ActiveCallPanel(
                     Icon(Icons.AutoMirrored.Filled.CallReceived, null)
                     Spacer(Modifier.width(6.dp))
                     Text("Join")
+                }
+            }
+            if (ui.voice.inCall) {
+                AudioRouteButton(callSnapshot, onSelectAudioEndpoint)
+                when {
+                    callSnapshot.phase == com.viti.operator.voice.VoiceCallPhase.INACTIVE -> Text(
+                        "Android has paused this call's audio for another call.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
+                    callSnapshot.audio.telecomMuted -> Text(
+                        "The microphone is muted by Android or a connected accessory.",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.tertiary,
+                    )
                 }
             }
         }
@@ -1065,6 +1099,7 @@ private fun ContactCallRow(contact: PhoneContact, enabled: Boolean, onCall: () -
 private fun DialerSheet(
     initialNumber: String,
     ui: AppUiState,
+    callSnapshot: VoiceCallSnapshot,
     serverCallActive: Boolean,
     anotherClientOwnsCall: Boolean,
     onDismiss: () -> Unit,
@@ -1075,6 +1110,7 @@ private fun DialerSheet(
     onHangup: () -> Unit,
     onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
+    onSelectAudioEndpoint: (String) -> Unit,
 ) {
     var number by rememberSaveable(initialNumber) { mutableStateOf(initialNumber) }
     val dialRows = if (ui.voice.inCall) listOf("123", "456", "789", "*0#") else listOf("123", "456", "789", "+0⌫")
@@ -1112,6 +1148,10 @@ private fun DialerSheet(
                 }
             }
             Spacer(Modifier.height(12.dp))
+            if (ui.voice.inCall) {
+                AudioRouteButton(callSnapshot, onSelectAudioEndpoint)
+                Spacer(Modifier.height(12.dp))
+            }
             when {
                 ui.voice.incoming -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Button(onClick = onAnswer, modifier = Modifier.weight(1f).height(52.dp)) { Text("Answer") }
@@ -1140,6 +1180,43 @@ private fun DialerSheet(
                 }
             }
             Spacer(Modifier.height(20.dp))
+        }
+    }
+}
+
+@Composable
+private fun AudioRouteButton(
+    snapshot: VoiceCallSnapshot,
+    onSelect: (String) -> Unit,
+) {
+    val endpoints = snapshot.audio.available
+    if (endpoints.isEmpty()) return
+    var expanded by remember { mutableStateOf(false) }
+    Box(Modifier.fillMaxWidth()) {
+        FilledTonalButton(
+            onClick = { expanded = true },
+            enabled = snapshot.platformReady,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+        ) {
+            Icon(Icons.AutoMirrored.Filled.VolumeUp, null)
+            Spacer(Modifier.width(8.dp))
+            Text(
+                snapshot.audio.current?.name ?: "Choose audio route",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            endpoints.forEach { endpoint ->
+                DropdownMenuItem(
+                    text = { Text(endpoint.name) },
+                    leadingIcon = { Icon(Icons.AutoMirrored.Filled.VolumeUp, null) },
+                    onClick = {
+                        expanded = false
+                        onSelect(endpoint.id)
+                    },
+                )
+            }
         }
     }
 }

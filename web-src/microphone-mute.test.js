@@ -72,3 +72,33 @@ test('reset starts the next call unmuted', () => {
   assert.equal(session.audio.enabled, true)
   assert.deepEqual(changes, [true, false])
 })
+
+test('system suppression composes with user mute without changing the user choice', () => {
+  const controller = createMicrophoneMuteController()
+  const session = fakeSession()
+
+  controller.setSuppressed(true, session)
+  assert.equal(controller.muted, false)
+  assert.equal(controller.suppressed, true)
+  assert.equal(session.audio.enabled, false)
+  assert.equal(session.muteCalls, 0)
+
+  controller.set(true, session)
+  controller.setSuppressed(false, session)
+  assert.equal(controller.muted, true)
+  assert.equal(session.audio.enabled, false)
+
+  controller.set(false, session)
+  assert.equal(session.audio.enabled, true)
+})
+
+test('clearing system suppression restores an unmuted sender', () => {
+  const controller = createMicrophoneMuteController()
+  const session = fakeSession()
+
+  controller.setSuppressed(true, session)
+  controller.setSuppressed(false, session)
+
+  assert.equal(session.audio.enabled, true)
+  assert.equal(session.unmuteCalls, 1)
+})
