@@ -10,6 +10,8 @@ IMS and conference audio.
 - Shared SMS and call history across web and Android.
 - Incoming calls ring connected clients; additional clients can join the active call.
 - Per-participant audio mixing and independent departure.
+- Client-local microphone mute on web and Android; other participants and
+  incoming audio remain unaffected.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
 - Shared connection topology with live device presence.
 - Optional lossless call recordings with independently selectable microphone tracks,
@@ -58,6 +60,7 @@ SIM authentication paths.
 
 ```sh
 npm --prefix web-src ci
+npm --prefix web-src test
 npm --prefix web-src run build
 go test ./...
 go build ./cmd/viti-operator

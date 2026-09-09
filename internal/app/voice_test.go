@@ -1,12 +1,29 @@
 package app
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
 )
+
+func TestEmbeddedCallUIIncludesLocalMicrophoneMuteControl(t *testing.T) {
+	index, err := webAssets.ReadFile("web/index.html")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range [][]byte{
+		[]byte(`id="mute-call"`),
+		[]byte(`aria-pressed="false"`),
+		[]byte(`<span>Mute</span>`),
+	} {
+		if !bytes.Contains(index, fragment) {
+			t.Fatalf("embedded call UI is missing %q", fragment)
+		}
+	}
+}
 
 func TestVoiceProvisioningDerivesTailscaleFacingURLFromRequest(t *testing.T) {
 	cfg := Config{

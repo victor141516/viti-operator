@@ -59,6 +59,10 @@
             <div class="call-actions" id="call-actions" hidden>
               <button type="button" class="answer-button" id="answer-call">Answer</button>
               <button type="button" class="join-button" id="join-call" hidden>Join</button>
+              <button type="button" class="mute-button" id="mute-call" aria-pressed="false" hidden>
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Z"/><path d="M5 11v1a7 7 0 0 0 14 0v-1M12 19v3M8 22h8"/><path class="mute-slash" d="m4 4 16 16"/></svg>
+                <span>Mute</span>
+              </button>
               <button type="button" class="hangup-button" id="hangup-call">Hang up</button>
             </div>
             <p class="form-status" id="call-status" role="status"></p>

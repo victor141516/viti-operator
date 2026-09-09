@@ -58,6 +58,7 @@ Host exposure is restricted by the `ports` mappings in `compose.yml`.
 
 ```powershell
 npm --prefix web-src ci
+npm --prefix web-src test
 npm --prefix web-src run build
 go test ./...
 go build ./cmd/viti-operator

@@ -145,6 +145,7 @@ data class VoiceUiState(
     val state: String = "disconnected",
     val peer: String = "",
     val detail: String = "Telephony disconnected",
+    val microphoneMuted: Boolean = false,
 ) {
     val registered: Boolean get() = state == "registered"
     val incoming: Boolean get() = state == "incoming"

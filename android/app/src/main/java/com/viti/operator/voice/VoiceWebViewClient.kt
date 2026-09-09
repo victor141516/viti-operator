@@ -101,6 +101,10 @@ class VoiceWebViewClient(
     }
     fun reject() { recordNative("voice.reject-requested"); evaluate("window.vitiVoiceReject()") }
     fun hangup() { recordNative("voice.hangup-requested"); evaluate("window.vitiVoiceHangup()") }
+    fun setMuted(muted: Boolean) {
+        recordNative("voice.mute-requested", JSONObject().put("muted", muted))
+        evaluate("window.vitiVoiceMute($muted)")
+    }
 
     fun destroy() {
         recordNative("voice.destroy-requested")
@@ -165,10 +169,10 @@ class VoiceWebViewClient(
             val peer = body.optString("from", body.optString("to"))
             val traceId = body.optString("trace_id")
             val participantId = body.optString("participant_id")
-            val cause = if (type == "media") {
-                "sent=${body.optBoolean("sent")},received=${body.optBoolean("received")}"
-            } else {
-                body.optString("cause")
+            val cause = when (type) {
+                "media" -> "sent=${body.optBoolean("sent")},received=${body.optBoolean("received")}"
+                "mute-changed" -> "muted=${body.optBoolean("muted")}"
+                else -> body.optString("cause")
             }
             mainHandler.post {
                 // Do not switch to communication routing while an incoming call

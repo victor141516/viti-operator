@@ -1,4 +1,5 @@
 import JsSIP from 'jssip'
+import { createMicrophoneMuteController } from './microphone-mute.js'
 
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
@@ -32,6 +33,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   const traceId = (value = session) => sessionTraceIDs.get(value) || requestHeader(value, 'X-Viti-Trace-ID') || pendingTraceID || sessionId(value)
   const participantId = (value = session) => requestHeader(value, 'X-Viti-Participant-ID') || clientId
   const emit = (type, detail = {}) => onEvent(type, { participant_id: detail.participant_id || participantId(), client_id: clientId, ...detail, trace_id: detail.trace_id || traceId() })
+  const microphoneMute = createMicrophoneMuteController((muted) => {
+    diagnose('microphone.mute-changed', { muted })
+    emit('mute-changed', { muted })
+  })
   const nativeAndroidRinging = /Android/i.test(navigator.userAgent)
   const diagnose = (kind, data = {}, current = session) => {
     if (!diagnosticsEnabled) return
@@ -248,6 +253,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         ready()
       }
     })
+    next.on('peerconnection', () => microphoneMute.apply(next))
     next.on('peerconnection:setremotedescriptionfailed', (error) => {
       diagnose('peer.set-remote-description.failed', {
         error: error ? { name: error.name, message: error.message, stack: error.stack } : null,
@@ -313,9 +319,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         } catch (error) { diagnose('peer.stats.failed', { name: error?.name, message: error?.message }, next) }
       }, 1000)
       snapshot('peer.monitoring-started')
+      microphoneMute.apply(next)
     }
-    next.on('accepted', (event) => { next.__vitiWasActive = true; stopRingback('accepted'); stopIncomingRing('accepted'); diagnose('session.accepted', { response: event?.response?.toString?.() }, next); emit('active'); monitorConnection(next.connection) })
-    next.on('confirmed', (event) => { next.__vitiWasActive = true; stopRingback('confirmed'); stopIncomingRing('confirmed'); diagnose('session.confirmed', { ack: event?.ack?.toString?.() }, next); emit('active'); monitorConnection(next.connection) })
+    next.on('accepted', (event) => { next.__vitiWasActive = true; stopRingback('accepted'); stopIncomingRing('accepted'); diagnose('session.accepted', { response: event?.response?.toString?.() }, next); microphoneMute.apply(next); emit('active'); monitorConnection(next.connection) })
+    next.on('confirmed', (event) => { next.__vitiWasActive = true; stopRingback('confirmed'); stopIncomingRing('confirmed'); diagnose('session.confirmed', { ack: event?.ack?.toString?.() }, next); microphoneMute.apply(next); emit('active'); monitorConnection(next.connection) })
     const stopTestAudio = () => {
       if (!testAudio) return
       try { testAudio.oscillator.stop() } catch {}
@@ -325,6 +332,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     next.on('ended', (event) => {
       stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       if (session === next) session = null
+      microphoneMute.reset()
       localHangup = false
       const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }) }
       if (next.__vitiWasActive) playEndTone('remote-ended').finally(finish)
@@ -333,6 +341,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     next.on('failed', (event) => {
       stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       if (session === next) session = null
+      microphoneMute.reset()
       const endedLocally = localHangup
       localHangup = false
       const finish = () => { if (!next.__vitiLocallyEnded) emit(endedLocally ? 'ended' : 'failed', { trace_id: traceId(next), cause: event?.cause || '' }) }
@@ -362,6 +371,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     },
     call(number, suppliedTraceID = '') {
       if (!ua || !ua.isRegistered()) throw new Error('The WebRTC phone is not registered yet')
+      microphoneMute.reset()
       stopIncomingRing('outgoing-call')
       pendingTraceID = suppliedTraceID || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
       const options = {
@@ -390,13 +400,18 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       stopRingback('local-hangup')
       stopIncomingRing('local-hangup')
       if (session === ending) session = null
+      microphoneMute.reset()
       const finish = () => {
         try { ending.terminate() } finally { emit('ended', { trace_id: traceId(ending) }) }
       }
       if (ending.__vitiWasActive) playEndTone('local-hangup').finally(finish)
       else finish()
     },
-    mute(value) { if (session) { diagnose('action.mute', { value }); value ? session.mute({ audio: true }) : session.unmute({ audio: true }) } },
+    mute(value) {
+      if (!session) return microphoneMute.muted
+      diagnose('action.mute', { value: Boolean(value) })
+      return microphoneMute.set(value, session)
+    },
     dtmf(tone) {
       if (!session || !session.isEstablished()) throw new Error('The call is not connected yet')
       if (!/^[0-9*#]$/.test(String(tone))) throw new Error('Invalid DTMF key')
@@ -411,6 +426,6 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       session.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
       emit('dtmf', { tone: String(tone) })
     },
-    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); if (session) session.terminate(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null },
+    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneMute.reset(session); if (session) session.terminate(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null },
   }
 }
