@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -12,12 +13,13 @@ import (
 )
 
 type diskState struct {
-	Messages               []Message         `json:"messages"`
-	Calls                  []Call            `json:"calls"`
-	Clients                []KnownClient     `json:"clients,omitempty"`
-	SIMAuthAssignment      SIMAuthAssignment `json:"sim_auth_assignment,omitempty"`
-	IMSRegistrationEnabled *bool             `json:"ims_registration_enabled,omitempty"`
-	CallRecordingEnabled   *bool             `json:"call_recording_enabled,omitempty"`
+	Messages               []Message             `json:"messages"`
+	Calls                  []Call                `json:"calls"`
+	Clients                []KnownClient         `json:"clients,omitempty"`
+	SIMAuthAssignment      SIMAuthAssignment     `json:"sim_auth_assignment,omitempty"`
+	IMSRegistrationEnabled *bool                 `json:"ims_registration_enabled,omitempty"`
+	CallRecordingEnabled   *bool                 `json:"call_recording_enabled,omitempty"`
+	Contacts               []ContactSourceRecord `json:"contacts,omitempty"`
 }
 
 type Store struct {
@@ -29,6 +31,7 @@ type Store struct {
 	simAuthAssignment      SIMAuthAssignment
 	imsRegistrationEnabled bool
 	callRecordingEnabled   bool
+	contacts               map[string]ContactSourceRecord
 	diag                   *DiagnosticRecorder
 }
 
@@ -39,7 +42,7 @@ func (s *Store) SetDiagnostics(diagnostics *DiagnosticRecorder) {
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, imsRegistrationEnabled: true}
+	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, contacts: map[string]ContactSourceRecord{}, imsRegistrationEnabled: true}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -59,6 +62,9 @@ func OpenStore(path string) (*Store, error) {
 	}
 	for _, item := range state.Clients {
 		s.clients[item.ID] = item
+	}
+	for _, item := range state.Contacts {
+		s.contacts[contactSourceKey(item.SourceClientID, item.SourceContactID)] = item
 	}
 	s.simAuthAssignment = state.SIMAuthAssignment
 	if state.IMSRegistrationEnabled != nil {
@@ -106,6 +112,58 @@ func (s *Store) KnownClients() []KnownClient {
 	result := make([]KnownClient, 0, len(s.clients))
 	for _, client := range s.clients {
 		result = append(result, client)
+	}
+	return result
+}
+
+func contactSourceKey(clientID, contactID string) string { return clientID + "\x00" + contactID }
+
+func (s *Store) ReplaceContactSource(clientID, clientName, region string, records []ContactSourceRecord) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	proposed := make(map[string]ContactSourceRecord, len(records))
+	for _, record := range records {
+		record.SourceClientID = clientID
+		record.SourceClientName = clientName
+		record.Region = region
+		record.UpdatedAt = time.Time{}
+		proposed[contactSourceKey(clientID, record.SourceContactID)] = record
+	}
+	existing := make(map[string]ContactSourceRecord, len(proposed))
+	for key, record := range s.contacts {
+		if record.SourceClientID != clientID {
+			continue
+		}
+		record.UpdatedAt = time.Time{}
+		existing[key] = record
+	}
+	if reflect.DeepEqual(existing, proposed) {
+		return false, nil
+	}
+	for key, record := range s.contacts {
+		if record.SourceClientID == clientID {
+			delete(s.contacts, key)
+		}
+	}
+	now := time.Now().UTC()
+	for _, record := range records {
+		record.SourceClientID = clientID
+		record.SourceClientName = clientName
+		record.Region = region
+		record.UpdatedAt = now
+		s.contacts[contactSourceKey(clientID, record.SourceContactID)] = record
+	}
+	return true, s.flushLocked()
+}
+
+func (s *Store) ContactSources() []ContactSourceRecord {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]ContactSourceRecord, 0, len(s.contacts))
+	for _, record := range s.contacts {
+		record.Names = append([]string(nil), record.Names...)
+		record.Numbers = append([]ContactNumber(nil), record.Numbers...)
+		result = append(result, record)
 	}
 	return result
 }
@@ -375,6 +433,9 @@ func (s *Store) flushLocked() error {
 	}
 	for _, item := range s.clients {
 		state.Clients = append(state.Clients, item)
+	}
+	for _, item := range s.contacts {
+		state.Contacts = append(state.Contacts, item)
 	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

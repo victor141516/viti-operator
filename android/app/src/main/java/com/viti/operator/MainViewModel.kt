@@ -7,8 +7,10 @@ import com.viti.operator.auth.RemoteAuthService
 import com.viti.operator.data.Call
 import com.viti.operator.data.ClientIdentity
 import com.viti.operator.data.ConnectionTopology
+import com.viti.operator.data.DeviceContactsSnapshot
 import com.viti.operator.data.Message
 import com.viti.operator.data.PhoneContact
+import com.viti.operator.data.asPhoneContacts
 import com.viti.operator.data.RuntimeStatus
 import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.SettingsStore
@@ -18,6 +20,7 @@ import com.viti.operator.data.RecordingSettings
 import com.viti.operator.data.VitiApi
 import com.viti.operator.data.VoiceProvisioning
 import com.viti.operator.data.VoiceUiState
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -65,6 +68,8 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     private val _incomingMessages = MutableSharedFlow<Message>(extraBufferCapacity = 16)
     val incomingMessages = _incomingMessages.asSharedFlow()
     private var clientIdentity: ClientIdentity? = null
+    private var pendingContactSnapshot: DeviceContactsSnapshot? = null
+    private var contactSyncJob: Job? = null
     private val incomingMessageTracker = IncomingMessageTracker()
 
     init {
@@ -86,7 +91,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         val api = VitiApi(settings.value)
         runCatching {
             clientIdentity?.let { api.heartbeat(it) }
-            RefreshData(api.status(), api.messages(), api.calls(), api.voice(), api.imsRegistration(), api.recordingSettings(), api.topology())
+            RefreshData(api.status(), api.messages(), api.calls(), api.contacts(), api.voice(), api.imsRegistration(), api.recordingSettings(), api.topology())
         }.onSuccess { data ->
             val currentMessageSource = settings.value.serverUrl.trim().trimEnd('/')
             val newIncomingMessages = incomingMessageTracker.update(currentMessageSource, data.messages)
@@ -94,6 +99,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
                 status = data.status,
                 messages = data.messages,
                 calls = data.calls,
+                contacts = data.contacts,
                 voiceProvisioning = data.voice,
 				serverIMS = data.serverIMS,
                 recording = data.recording,
@@ -113,6 +119,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     fun setClientIdentity(identity: ClientIdentity) {
         clientIdentity = identity
         _uiState.value = _uiState.value.copy(clientId = identity.id)
+        startContactSync()
         refresh(silent = true)
     }
 
@@ -273,13 +280,45 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         _uiState.value = _uiState.value.copy(notice = message)
     }
 
-    fun setContacts(contacts: List<PhoneContact>) {
+    fun synchronizeContacts(snapshot: DeviceContactsSnapshot) {
+        val localContacts = snapshot.asPhoneContacts()
+        pendingContactSnapshot = snapshot
         _uiState.value = _uiState.value.copy(
-            contacts = contacts,
+            contacts = localContacts,
             contactsAvailable = true,
-            notice = if (contacts.isEmpty()) "No contacts have phone numbers" else "Contacts available",
+            notice = if (localContacts.isEmpty()) "No contacts have phone numbers" else "Synchronizing contacts…",
         )
+        startContactSync()
     }
+
+    private fun startContactSync() {
+        if (pendingContactSnapshot == null || clientIdentity == null || contactSyncJob?.isActive == true) return
+        contactSyncJob = viewModelScope.launch {
+            var retryDelay = 1_000L
+            while (true) {
+                val snapshot = pendingContactSnapshot ?: break
+                val identity = clientIdentity ?: break
+                val result = runCatching {
+                    val api = VitiApi(settings.value)
+                    api.replaceContacts(identity, snapshot)
+                    api.contacts()
+                }
+                result.onSuccess { contacts ->
+                    if (pendingContactSnapshot == snapshot) pendingContactSnapshot = null
+                    _uiState.value = _uiState.value.copy(contacts = contacts, notice = "Contacts synchronized")
+                    retryDelay = 1_000L
+                }.onFailure { error ->
+                    _uiState.value = _uiState.value.copy(notice = error.message ?: "Could not synchronize contacts; retrying")
+                    delay(retryDelay)
+                    retryDelay = (retryDelay * 2).coerceAtMost(30_000L)
+                }
+            }
+        }
+    }
+
+    fun contactNameFor(number: String): String = _uiState.value.contacts.firstOrNull {
+        it.number.filter(Char::isDigit) == number.filter(Char::isDigit)
+    }?.name.orEmpty()
 
     class Factory(private val store: SettingsStore) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
@@ -290,6 +329,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         val status: RuntimeStatus,
         val messages: List<Message>,
         val calls: List<Call>,
+        val contacts: List<PhoneContact>,
         val voice: VoiceProvisioning,
 		val serverIMS: IMSRegistrationState,
         val recording: RecordingSettings,

@@ -148,6 +148,8 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/messages", a.authorized(http.HandlerFunc(a.messages)))
 	a.mux.Handle("POST /api/v1/messages", a.authorized(http.HandlerFunc(a.sendMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
+	a.mux.Handle("GET /api/v1/contacts", a.authorized(http.HandlerFunc(a.contacts)))
+	a.mux.Handle("PUT /api/v1/contacts/sources/{client}", a.authorized(http.HandlerFunc(a.replaceContactSource)))
 	a.mux.Handle("POST /api/v1/calls", a.authorized(http.HandlerFunc(a.startCall)))
 	a.mux.Handle("POST /api/v1/calls/{id}/hangup", a.authorized(http.HandlerFunc(a.hangupCall)))
 	a.mux.Handle("GET /api/v1/recording", a.authorized(http.HandlerFunc(a.recordingSettings)))
@@ -569,7 +571,19 @@ func (a *App) status(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) messages(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"messages": a.store.Messages()})
+	items := a.store.Messages()
+	contacts := mergedContacts(a.store.ContactSources(), "")
+	for index := range items {
+		peer := items[index].From
+		if items[index].Direction == DirectionOutgoing {
+			peer = items[index].To
+		}
+		if contact, found := resolveContact(contacts, peer); found {
+			items[index].ContactID = contact.ID
+			items[index].ContactName = contact.Name
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messages": items})
 }
 
 func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
@@ -637,7 +651,15 @@ func (a *App) deliverMessage(message Message) {
 }
 
 func (a *App) calls(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"calls": a.callsWithRecordingTiming()})
+	items := a.callsWithRecordingTiming()
+	contacts := mergedContacts(a.store.ContactSources(), "")
+	for index := range items {
+		if contact, found := resolveContact(contacts, items[index].Peer); found {
+			items[index].ContactID = contact.ID
+			items[index].ContactName = contact.Name
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"calls": items})
 }
 
 func (a *App) startCall(w http.ResponseWriter, r *http.Request) {

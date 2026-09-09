@@ -113,6 +113,45 @@ class VitiApi(private val settings: ServerSettings) {
         .optJSONArray("calls")
         .mapObjects(::callFromJson)
 
+    suspend fun contacts(query: String = ""): List<PhoneContact> {
+        val suffix = if (query.isBlank()) "" else "?q=${java.net.URLEncoder.encode(query, Charsets.UTF_8.name())}"
+        return request("/api/v1/contacts$suffix").optJSONArray("contacts").mapObjects { contact ->
+            val id = contact.optString("id")
+            val name = contact.optString("name")
+            val names = contact.optJSONArray("names").mapStrings()
+            val sources = contact.optJSONArray("sources").mapObjects { it.optString("client_name") }
+            contact.optJSONArray("numbers").mapObjects { number ->
+                PhoneContact(
+                    id = "$id:${number.optString("normalized").ifBlank { number.optString("original") }}",
+                    name = name,
+                    number = number.optString("normalized").ifBlank { number.optString("original") },
+                    alternativeNames = names.drop(1),
+                    sourceNames = sources,
+                )
+            }
+        }.flatten()
+    }
+
+    suspend fun replaceContacts(identity: ClientIdentity, snapshot: DeviceContactsSnapshot) {
+        val body = withContext(Dispatchers.Default) {
+            val contacts = JSONArray()
+            snapshot.contacts.forEach { contact ->
+                val numbers = JSONArray()
+                contact.numbers.forEach { number ->
+                    numbers.put(JSONObject().put("original", number.original).put("normalized", number.normalized).put("label", number.label))
+                }
+                contacts.put(JSONObject().put("source_contact_id", contact.id).put("names", JSONArray(contact.names)).put("numbers", numbers))
+            }
+            JSONObject().put("client_name", identity.name).put("region", snapshot.region).put("contacts", contacts)
+        }
+        rawRequest(
+            path = "/api/v1/contacts/sources/${urlSegment(identity.id)}",
+            method = "PUT",
+            body = body,
+            acceptedStatuses = setOf(204),
+        )
+    }
+
     suspend fun recordingSettings(): RecordingSettings = request("/api/v1/recording").let {
         RecordingSettings(it.optBoolean("enabled"))
     }
@@ -284,6 +323,8 @@ class VitiApi(private val settings: ServerSettings) {
         text = body.optString("text"),
         state = body.optString("state"),
         createdAt = body.optString("created_at"),
+        contactId = body.optString("contact_id"),
+        contactName = body.optString("contact_name"),
     )
 
     private fun callFromJson(body: JSONObject) = Call(
@@ -306,6 +347,8 @@ class VitiApi(private val settings: ServerSettings) {
                 durationMs = track.optLong("duration_ms"),
             )
         },
+        contactId = body.optString("contact_id"),
+        contactName = body.optString("contact_name"),
     )
 
     private fun topologyNodeFromJson(body: JSONObject?, fallbackLabel: String = "Viti server") = TopologyNode(

@@ -101,6 +101,8 @@ data class Message(
     val text: String,
     val state: String,
     val createdAt: String,
+    val contactId: String = "",
+    val contactName: String = "",
 )
 
 data class Call(
@@ -111,6 +113,8 @@ data class Call(
     val startedAt: String,
     val endedAt: String,
     val recordingTracks: List<RecordingTrack> = emptyList(),
+    val contactId: String = "",
+    val contactName: String = "",
 )
 
 data class RecordingTrack(
