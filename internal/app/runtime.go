@@ -38,6 +38,34 @@ func (a *App) StartIMSPreferenceReconciler(ctx context.Context) {
 	}()
 }
 
+// StartSMSDeliveryReconciler converts an unanswered delivery-report request to
+// an explicit unknown state. Reports arriving later still update that state.
+func (a *App) StartSMSDeliveryReconciler(ctx context.Context) {
+	reconcile := func() {
+		messages, err := a.store.ExpireSMSDeliveryReports(time.Now().UTC())
+		if err != nil {
+			a.logger.Warn("expire SMS delivery reports", "error", err)
+			return
+		}
+		for _, message := range messages {
+			a.events.Publish("message.updated", message)
+		}
+	}
+	reconcile()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				reconcile()
+			}
+		}
+	}()
+}
+
 func (a *App) enforceDisabledIMSRegistration(parent context.Context) {
 	if a.store.IMSRegistrationEnabled() {
 		return

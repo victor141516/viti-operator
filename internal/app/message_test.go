@@ -23,7 +23,7 @@ type serialSMSFixture struct {
 	release chan struct{}
 }
 
-func (fixture *serialSMSFixture) SendSMS(ctx context.Context, _, _ string) (SMSSubmitResult, error) {
+func (fixture *serialSMSFixture) SendSMS(ctx context.Context, _, _, _ string) (SMSSubmitResult, error) {
 	fixture.mu.Lock()
 	fixture.active++
 	if fixture.active > fixture.maximum {

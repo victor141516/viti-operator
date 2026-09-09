@@ -10,16 +10,38 @@ const (
 )
 
 type Message struct {
-	ID          string    `json:"id"`
-	Direction   Direction `json:"direction"`
-	From        string    `json:"from"`
-	To          string    `json:"to"`
-	Text        string    `json:"text"`
-	State       string    `json:"state"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	ContactID   string    `json:"contact_id,omitempty"`
-	ContactName string    `json:"contact_name,omitempty"`
+	ID                      string          `json:"id"`
+	Direction               Direction       `json:"direction"`
+	From                    string          `json:"from"`
+	To                      string          `json:"to"`
+	Text                    string          `json:"text"`
+	State                   string          `json:"state"`
+	DeliveryState           string          `json:"delivery_state,omitempty"`
+	DeliveryReportRequested bool            `json:"delivery_report_requested,omitempty"`
+	DeliveryReportDeadline  *time.Time      `json:"delivery_report_deadline,omitempty"`
+	StatusDetail            string          `json:"status_detail,omitempty"`
+	FailureCode             string          `json:"failure_code,omitempty"`
+	FailureReason           string          `json:"failure_reason,omitempty"`
+	Parts                   []SMSPartStatus `json:"parts,omitempty"`
+	CreatedAt               time.Time       `json:"created_at"`
+	UpdatedAt               time.Time       `json:"updated_at"`
+	ContactID               string          `json:"contact_id,omitempty"`
+	ContactName             string          `json:"contact_name,omitempty"`
+}
+
+type SMSPartStatus struct {
+	Part          int       `json:"part"`
+	Parts         int       `json:"parts"`
+	Instance      string    `json:"instance,omitempty"`
+	Recipient     string    `json:"recipient,omitempty"`
+	RPReference   *int      `json:"rp_reference,omitempty"`
+	TPReference   *int      `json:"tp_reference,omitempty"`
+	State         string    `json:"state"`
+	StatusCode    string    `json:"status_code,omitempty"`
+	FailureCode   string    `json:"failure_code,omitempty"`
+	FailureReason string    `json:"failure_reason,omitempty"`
+	Detail        string    `json:"detail,omitempty"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Call struct {

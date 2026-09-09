@@ -56,12 +56,13 @@ func (g *AMIGateway) Status(ctx context.Context) (RuntimeStatus, error) {
 	return status, nil
 }
 
-func (g *AMIGateway) SendSMS(ctx context.Context, to, text string) (SMSSubmitResult, error) {
+func (g *AMIGateway) SendSMS(ctx context.Context, messageID, to, text string) (SMSSubmitResult, error) {
 	response, err := g.action(ctx, map[string]string{
-		"Action": "MessageSend",
-		"To":     "pjsip:volte_ims/" + to + "@volte_ims",
-		"From":   "sip:" + g.cfg.FromNumber + "@" + g.cfg.Realm,
-		"Body":   text,
+		"Action":   "MessageSend",
+		"To":       "pjsip:volte_ims/" + to + "@volte_ims",
+		"From":     "sip:" + g.cfg.FromNumber + "@" + g.cfg.Realm,
+		"Body":     text,
+		"Variable": "VITI_MESSAGE_ID=" + messageID,
 	})
 	if err != nil {
 		return SMSSubmitResult{State: "failed"}, err
@@ -69,7 +70,9 @@ func (g *AMIGateway) SendSMS(ctx context.Context, to, text string) (SMSSubmitRes
 	if first(response, "Response") != "Success" {
 		return SMSSubmitResult{State: "failed"}, fmt.Errorf("Asterisk rejected SMS: %s", first(response, "Message"))
 	}
-	return SMSSubmitResult{State: "accepted"}, nil
+	// AMI Success means only that Asterisk handed the message to its protocol
+	// handler. RP-ACK and TP-STATUS-REPORT events provide stronger evidence.
+	return SMSSubmitResult{State: "submitted", DeliveryReportExpected: true, Detail: "Submitted to Asterisk; awaiting carrier acknowledgement."}, nil
 }
 
 func (g *AMIGateway) StartCall(context.Context, string, string) error {
@@ -153,7 +156,7 @@ func (g *AMIGateway) action(ctx context.Context, fields map[string]string) (map[
 }
 
 func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]string) (map[string][]string, error) {
-	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body"} {
+	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable"} {
 		value, ok := fields[key]
 		if !ok {
 			continue

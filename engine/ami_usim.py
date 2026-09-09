@@ -41,6 +41,22 @@ ANDROID_QMI = os.environ.get("SWU_ANDROID_QMI", "").strip() == "1"
 HTTP_AKA_URL = os.environ.get("SWU_HTTP_AKA_URL", "").strip()
 
 
+def forward_sms_protocol_event(message):
+    """Forward the patched Asterisk event without interpreting protocol evidence."""
+    fields = [
+        "Phase", "MessageID", "Destination", "Part", "Parts",
+        "RPReference", "TPReference", "Status", "Cause",
+    ]
+    values = ["" if getattr(message, field, None) is None else str(getattr(message, field)) for field in fields]
+    if values[0] not in ("submitted", "local_failure", "rp_ack", "rp_error", "status_report"):
+        print("Ignoring invalid VitiSMS event phase=%r" % values[0])
+        return
+    subprocess.Popen(
+        ["python3", "/usr/local/bin/notify.py", "sms_protocol"] + values,
+        close_fds=True,
+    )
+
+
 # --- Reader binding by physical USB port -----------------------------------------------------
 # Resolve a reader by its STABLE physical USB port path (USIM_READER_PORT, e.g. "3-2") so the SIP
 # IMS-AKA path addresses the same physical reader as swu_ike/pin_keeper — even when pcscd flips
@@ -596,6 +612,10 @@ def main():
         else:
             manager.send_action({"Action": "AuthResponse", "Registration": cfg_endpoint})
         print("AuthResponse sent: material=<redacted>")
+
+    @manager.register_event("VitiSMS")
+    def on_sms_protocol(manager, message):
+        forward_sms_protocol_event(message)
 
     @manager.register_event("Newchannel")
     def on_newchannel(manager, message):

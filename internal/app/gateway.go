@@ -15,7 +15,7 @@ import (
 
 type TelephonyGateway interface {
 	Status(context.Context) (RuntimeStatus, error)
-	SendSMS(context.Context, string, string) (SMSSubmitResult, error)
+	SendSMS(context.Context, string, string, string) (SMSSubmitResult, error)
 	StartCall(context.Context, string, string) error
 	HangupCall(context.Context, string) error
 }
@@ -28,7 +28,11 @@ type IMSRegistrationController interface {
 // deliberately separates local submission, carrier acceptance and verified
 // delivery so clients never present a timeout as a delivered message.
 type SMSSubmitResult struct {
-	State string
+	State                  string
+	DeliveryReportExpected bool
+	Detail                 string
+	FailureCode            string
+	FailureReason          string
 }
 
 type IncomingMessageSource interface {
@@ -42,8 +46,8 @@ type MemoryGateway struct{}
 func (MemoryGateway) Status(context.Context) (RuntimeStatus, error) {
 	return RuntimeStatus{Ready: true, SIMReady: true, TunnelReady: true, IMSReady: true, Provider: "memory", UpdatedAt: time.Now().UTC()}, nil
 }
-func (MemoryGateway) SendSMS(context.Context, string, string) (SMSSubmitResult, error) {
-	return SMSSubmitResult{State: "accepted"}, nil
+func (MemoryGateway) SendSMS(context.Context, string, string, string) (SMSSubmitResult, error) {
+	return SMSSubmitResult{State: "submitted", DeliveryReportExpected: true}, nil
 }
 func (MemoryGateway) StartCall(context.Context, string, string) error { return nil }
 func (MemoryGateway) HangupCall(context.Context, string) error        { return nil }
@@ -73,8 +77,8 @@ func (g *CommandGateway) Status(ctx context.Context) (RuntimeStatus, error) {
 	return status, nil
 }
 
-func (g *CommandGateway) SendSMS(ctx context.Context, to, text string) (SMSSubmitResult, error) {
-	spec := expandCommand(g.cfg.SendSMS, map[string]string{"to": to, "text": text})
+func (g *CommandGateway) SendSMS(ctx context.Context, messageID, to, text string) (SMSSubmitResult, error) {
+	spec := expandCommand(g.cfg.SendSMS, map[string]string{"message_id": messageID, "to": to, "text": text})
 	output, err := runCommand(ctx, spec, commandInput(spec))
 	result := classifySMSSubmitOutput(output)
 	if err != nil && (bytes.Contains(output, []byte("SMS_RESULT=submit-report-timeout")) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
@@ -83,28 +87,25 @@ func (g *CommandGateway) SendSMS(ctx context.Context, to, text string) (SMSSubmi
 	if err != nil {
 		return result, err
 	}
-	if result.State == "" {
-		// Generic command adapters may not emit Viti's optional result marker. A
-		// successful process is still only carrier acceptance, never delivery.
-		result.State = "accepted"
-	}
 	return result, nil
 }
 
 func classifySMSSubmitOutput(output []byte) SMSSubmitResult {
 	switch {
 	case bytes.Contains(output, []byte("SMS_RESULT=delivered-and-verified")):
-		return SMSSubmitResult{State: "delivered"}
+		return SMSSubmitResult{State: "delivered", DeliveryReportExpected: true, Detail: "The adapter verified delivery to the destination device."}
 	case bytes.Contains(output, []byte("SMS_RESULT=network-accepted")):
-		return SMSSubmitResult{State: "accepted"}
+		return SMSSubmitResult{State: "accepted", Detail: "The carrier accepted the message; this adapter does not provide destination delivery reports."}
 	case bytes.Contains(output, []byte("SMS_RESULT=submit-report-timeout")):
-		return SMSSubmitResult{State: "submitted"}
+		return SMSSubmitResult{State: "submitted", Detail: "The adapter submitted the message but no delivery report was received."}
 	case bytes.Contains(output, []byte("SMS_RESULT=operator-barred")),
 		bytes.Contains(output, []byte("SMS_RESULT=network-rejected")),
 		bytes.Contains(output, []byte("SMS_RESULT=local-submit-failed")):
-		return SMSSubmitResult{State: "failed"}
+		return SMSSubmitResult{State: "failed", FailureReason: "The SMS adapter rejected the message."}
 	default:
-		return SMSSubmitResult{}
+		// A successful child process proves only that the local adapter accepted
+		// the command. It says nothing about carrier acceptance or delivery.
+		return SMSSubmitResult{State: "submitted", Detail: "The local SMS adapter accepted the request but does not provide delivery reports."}
 	}
 }
 

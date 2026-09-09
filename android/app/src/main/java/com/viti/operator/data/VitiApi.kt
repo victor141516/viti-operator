@@ -329,6 +329,22 @@ class VitiApi(private val settings: ServerSettings) {
         to = body.optString("to"),
         text = body.optString("text"),
         state = body.optString("state"),
+        deliveryState = body.optString("delivery_state"),
+        deliveryReportRequested = body.optBoolean("delivery_report_requested"),
+        statusDetail = body.optString("status_detail"),
+        failureCode = body.optString("failure_code"),
+        failureReason = body.optString("failure_reason"),
+        parts = body.optJSONArray("parts").mapObjects { part ->
+            SMSPartStatus(
+                part = part.optInt("part"),
+                parts = part.optInt("parts"),
+                state = part.optString("state"),
+                statusCode = part.optString("status_code"),
+                failureCode = part.optString("failure_code"),
+                failureReason = part.optString("failure_reason"),
+                detail = part.optString("detail"),
+            )
+        },
         createdAt = body.optString("created_at"),
         contactId = body.optString("contact_id"),
         contactName = body.optString("contact_name"),

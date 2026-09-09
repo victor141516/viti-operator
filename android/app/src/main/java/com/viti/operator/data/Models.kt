@@ -103,9 +103,25 @@ data class Message(
     val to: String,
     val text: String,
     val state: String,
+    val deliveryState: String = "",
+    val deliveryReportRequested: Boolean = false,
+    val statusDetail: String = "",
+    val failureCode: String = "",
+    val failureReason: String = "",
+    val parts: List<SMSPartStatus> = emptyList(),
     val createdAt: String,
     val contactId: String = "",
     val contactName: String = "",
+)
+
+data class SMSPartStatus(
+    val part: Int,
+    val parts: Int,
+    val state: String,
+    val statusCode: String = "",
+    val failureCode: String = "",
+    val failureReason: String = "",
+    val detail: String = "",
 )
 
 data class Call(

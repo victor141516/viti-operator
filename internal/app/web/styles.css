@@ -19,6 +19,8 @@
 @media(max-width:760px){.connection-heading{align-items:flex-start}.topology-summary{align-items:flex-end;flex-direction:column;gap:.35rem}.topology-summary time{font-size:.68rem}}
 @media(max-width:520px){.topology-heading{display:block}.live-pill{margin-top:.7rem}.topology-legend{gap:.45rem .75rem}.topology-summary time{display:none}}
 .row-meta{display:flex;flex-direction:column;align-items:flex-end;gap:.2rem;text-align:right}.row-meta strong{color:var(--text);font-size:.76rem}.row-meta time{font:inherit;color:inherit}
+.message-row[data-message-state="failed"] .row-meta strong{color:var(--danger)}.message-row[data-message-state="unknown"] .row-meta strong{color:var(--warning)}.message-detail{display:-webkit-box;max-width:15rem;color:var(--muted);font-size:.68rem;font-weight:500;line-height:1.25;white-space:normal;overflow:hidden;-webkit-line-clamp:2;-webkit-box-orient:vertical}.message-row[data-message-state="delivered"] .row-meta strong{color:var(--success)}
+@media(max-width:520px){.message-row{grid-template-columns:38px minmax(0,1fr) auto;gap:.65rem;padding:.8rem}.message-detail{max-width:8rem}}
 
 /* Keep the complete operator route above the fold on wide screens. */
 .topology-map{grid-template-areas:"sim sim-edge server clients" "operator operator operator operator";row-gap:28px;min-height:292px}

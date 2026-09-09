@@ -60,7 +60,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	for _, item := range state.Messages {
-		s.messages[item.ID] = item
+		s.messages[item.ID] = normalizeStoredMessage(item, time.Now().UTC())
 	}
 	for _, item := range state.Calls {
 		s.calls[item.ID] = item
@@ -268,15 +268,24 @@ func (s *Store) SetIMSRegistrationEnabled(enabled bool) error {
 func (s *Store) SaveMessage(message Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.messages[message.ID] = message
-	return s.flushLocked()
+	previous, existed := s.messages[message.ID]
+	s.messages[message.ID] = cloneMessage(message)
+	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.messages[message.ID] = previous
+		} else {
+			delete(s.messages, message.ID)
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) GetMessage(id string) (Message, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	message, ok := s.messages[id]
-	return message, ok
+	return cloneMessage(message), ok
 }
 
 func (s *Store) SaveCall(call Call) error {
@@ -472,7 +481,7 @@ func (s *Store) Messages() []Message {
 	defer s.mu.RUnlock()
 	items := make([]Message, 0, len(s.messages))
 	for _, item := range s.messages {
-		items = append(items, item)
+		items = append(items, cloneMessage(item))
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].CreatedAt.After(items[j].CreatedAt) })
 	return items

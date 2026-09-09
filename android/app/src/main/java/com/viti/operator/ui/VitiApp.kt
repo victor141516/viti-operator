@@ -408,7 +408,11 @@ private fun MessageConversationRow(
         Column(horizontalAlignment = Alignment.End) {
             Text(formatActivityTime(message.createdAt), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(5.dp))
-            Text(messageStateLabel(message.state), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+            Text(
+                messageStatusLabel(message),
+                style = MaterialTheme.typography.labelSmall,
+                color = if (message.state == "failed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+            )
         }
     }
 }
@@ -560,11 +564,20 @@ private fun MessageBubble(message: Message) {
                 Text(message.text, style = MaterialTheme.typography.bodyLarge)
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    listOf(formatActivityTime(message.createdAt), messageStateLabel(message.state)).filter(String::isNotBlank).joinToString(" · "),
+                    listOf(formatActivityTime(message.createdAt), messageStatusLabel(message)).filter(String::isNotBlank).joinToString(" · "),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.align(Alignment.End),
                 )
+                val detail = messageStatusDetail(message)
+                if (outgoing && detail.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        detail,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = if (message.state == "failed") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
     }
@@ -1847,6 +1860,24 @@ private fun messageStateLabel(state: String): String = when (state) {
     "received" -> "Received"
     "failed" -> "Failed"
     else -> state
+}
+
+private fun messageStatusLabel(message: Message): String = when {
+    message.state == "failed" -> "Failed"
+    message.deliveryState == "delivered" -> "Delivered"
+    message.deliveryState == "unknown" -> "Delivery unconfirmed"
+    message.state == "accepted" -> "Accepted by carrier"
+    message.state == "submitted" -> "Submitted"
+    else -> messageStateLabel(message.state)
+}
+
+private fun messageStatusDetail(message: Message): String = when {
+    message.failureReason.isNotBlank() && message.failureCode.isNotBlank() ->
+        "${message.failureReason} (${message.failureCode})"
+    message.failureReason.isNotBlank() -> message.failureReason
+    message.statusDetail.isNotBlank() -> message.statusDetail
+    message.deliveryState == "unknown" -> "The carrier did not provide destination delivery confirmation."
+    else -> ""
 }
 
 private fun callStateLabel(state: String): String = when (state) {

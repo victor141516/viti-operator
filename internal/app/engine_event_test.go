@@ -65,6 +65,66 @@ func TestEngineIncomingSMSIsPersistedAndIdempotent(t *testing.T) {
 	postEngineEvent(t, server.URL, "test-token", payload, http.StatusBadRequest)
 }
 
+func TestEngineSMSProtocolEventsUpdateOriginalMessage(t *testing.T) {
+	cfg := Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	message := Message{
+		ID: "sms-engine", Direction: DirectionOutgoing, To: "+34600000000", Text: "hello",
+		State: "sending", DeliveryState: "pending", CreatedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveMessage(message); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+
+	statusReport := map[string]any{
+		"instance": "engine-1", "event": "sms_protocol",
+		"args": []string{"status_report", "sms-engine", "+34600000000", "1", "1", "7", "0", "0", "-1"},
+	}
+	// Exercise a fast report arriving before the submitted event and its duplicate.
+	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", statusReport, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "sms_protocol",
+		"args": []string{"submitted", "sms-engine", "+34600000000", "1", "1", "7", "0", "-1", "-1"},
+	}, http.StatusOK)
+
+	stored, ok := application.store.GetMessage("sms-engine")
+	if !ok || stored.State != "delivered" || stored.DeliveryState != "delivered" || len(stored.Parts) != 1 {
+		t.Fatalf("protocol lifecycle was not coalesced: %+v", stored)
+	}
+	if stored.Parts[0].TPReference == nil || *stored.Parts[0].TPReference != 0 {
+		t.Fatalf("zero TP-MR was lost: %+v", stored.Parts[0])
+	}
+	if stored.StatusDetail == "" || stored.UpdatedAt.Before(now) {
+		t.Fatalf("status explanation/timestamp missing: %+v", stored)
+	}
+}
+
+func TestEngineSMSProtocolEventValidation(t *testing.T) {
+	cfg := Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}
+	application, err := New(cfg, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"event": "sms_protocol", "args": []string{"rp_error"},
+	}, http.StatusBadRequest)
+}
+
 func TestRuntimeStatusTracksOpenStickAndTunnelTransitions(t *testing.T) {
 	cfg := Config{
 		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
