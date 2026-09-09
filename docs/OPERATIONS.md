@@ -258,6 +258,30 @@ RTP packet capture, and decoded WAV directions. A signaling success does not
 prove media reachability. Check TURN allocation and the Tailscale path before
 changing the carrier tunnel.
 
+### SMS remains submitted or delivery is unconfirmed
+
+Carrier acceptance and destination delivery are different states. RP-ACK only
+proves that the carrier message service accepted a segment. A successful TP
+status report is required for `delivered`; carriers that do not provide one
+leave the message pending until the 24-hour reporting window ends as
+`unknown`. This is expected and is not a read receipt failure.
+
+Pending engine evidence is stored below the bind-mounted
+`${VITI_DIAGNOSTICS_DIR}/engine/runtime/event-outbox`. This outbox operates even
+when diagnostic capture is disabled. Do not delete it while messages are in
+flight. Engine/container recreation preserves it. A non-empty directory can
+mean that the manager is unreachable or that an early protocol response is
+waiting for its `submitted` reference mapping. Inspect manager and engine logs
+before intervening; the worker retries automatically and deletes an event only
+after a 2xx manager response.
+
+After a manager restart, any locally persisted `sending` row whose asynchronous
+worker was lost is changed to `unknown` immediately and durably. The manager
+does not resend it because doing so could duplicate a real SMS. A later queued
+status report can still update the row if its persisted RP/TP evidence identifies
+exactly one message. An ambiguous reused reference is intentionally not guessed;
+the affected messages eventually remain or become unconfirmed.
+
 ## Backup and retention
 
 The minimum backup is `deploy/data/state.json`, `deploy/data/recordings`, and
@@ -276,3 +300,5 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
 - Android remote routing depends on Shizuku and device/vendor telephony support.
 - Carrier Wi-Fi Calling provisioning and policy remain outside the project's
   control.
+- Destination SMS delivery reports depend on carrier/SMSC support and may remain
+  unconfirmed; the service never equates acceptance with a read receipt.

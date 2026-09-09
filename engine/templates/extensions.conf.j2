@@ -69,6 +69,9 @@ same => n,Hangup()
 ; ===== Incoming SMS from the IMS/VoWiFi side =====
 [volte_ims_msg]
 exten => _.,1,NoOp(Incoming SMS from ${MESSAGE(from)})
+; RP-ACK, RP-ERROR and SMS-STATUS-REPORT are protocol evidence consumed by
+; the manager. They are not user messages and must never enter SMS history.
+same => n,GotoIf($["${MESSAGE_DATA(VITI_SMS_PROTOCOL_ONLY)}" = "1"]?done)
 same => n,Set(NL=${BASE64_DECODE(Cg==)})
 {% if debug_asterisk %}same => n,Set(FILE(/logs/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL}){% endif %}
 {% if sms_record_command %}
@@ -107,7 +110,7 @@ same => n,Answer()
 same => n,Gosub(viti-start-client-recording,s,1(${VITI_PARTICIPANT_ID},${VITI_CLIENT_ID},${VITI_RECORDING_FILE_ID}))
 same => n,TrySystem(python3 /usr/local/bin/notify.py call_active "${VITI_CALL_ID}" "${VITI_TRACE_ID}" out "${CALLPEER}")
 same => n,Echo()
-same => n,Hangup()
+same => n(done),Hangup()
 same => n(busy),Busy()
 same => n,Hangup()
 ; Join the currently active carrier call. This extension is reachable only from the

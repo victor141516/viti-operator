@@ -3,6 +3,7 @@ import importlib.util
 import os
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -57,6 +58,23 @@ class HTTPAKAProviderTest(unittest.TestCase):
         self.assertIsNone(ck)
         self.assertIsNone(ik)
         self.assertEqual(len(auts), 28)
+
+    def test_sms_protocol_event_is_forwarded_without_losing_zero_values(self):
+        event = SimpleNamespace(
+            Phase="status_report", MessageID="sms-1", Destination="+34600000000",
+            Part=1, Parts=2, RPReference=0, TPReference=0, Status=0, Cause=None,
+            ServiceCentreTime=1700000000,
+        )
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
+            self.module.forward_sms_protocol_event(event)
+        self.assertEqual(enqueue.call_args.args, (
+            "sms_protocol", ["status_report", "sms-1", "+34600000000", "1", "2", "0", "0", "0", "", "1700000000"],
+        ))
+
+    def test_unknown_sms_protocol_event_is_not_forwarded(self):
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
+            self.module.forward_sms_protocol_event(SimpleNamespace(Phase="bogus"))
+        enqueue.assert_not_called()
 
 
 if __name__ == "__main__":

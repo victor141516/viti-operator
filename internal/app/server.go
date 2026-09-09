@@ -244,6 +244,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
+		EventID      string   `json:"event_id,omitempty"`
 		Instance     string   `json:"instance"`
 		Event        string   `json:"event"`
 		CallID       string   `json:"call_id,omitempty"`
@@ -264,6 +265,10 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Event == "recording_track" {
 		a.ingestRecordingTrack(w, request.Instance, request.CallID, request.Args, request.RecordedAtNS)
+		return
+	}
+	if request.Event == "sms_protocol" {
+		a.ingestSMSProtocolEvent(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
 	}
 	var call Call
@@ -614,7 +619,12 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
-	message := Message{ID: id, Direction: DirectionOutgoing, To: request.To, Text: request.Text, State: "sending", CreatedAt: now, UpdatedAt: now}
+	deadline := now.Add(smsDeliveryReportWindow)
+	message := Message{
+		ID: id, Direction: DirectionOutgoing, To: request.To, Text: request.Text,
+		State: "sending", DeliveryState: "pending", StatusDetail: "Queued for local submission.",
+		DeliveryReportDeadline: &deadline, CreatedAt: now, UpdatedAt: now,
+	}
 	if err := a.store.SaveMessage(message); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not persist message")
 		return
@@ -632,22 +642,111 @@ func (a *App) deliverMessage(message Message) {
 	defer a.smsMu.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	result, err := a.gateway.SendSMS(ctx, message.To, message.Text)
-	message.UpdatedAt = time.Now().UTC()
-	if errors.Is(err, ErrDeliveryUnconfirmed) {
-		message.State = "submitted"
-	} else if err != nil {
-		message.State = "failed"
-	} else if result.State != "" {
-		message.State = result.State
-	} else {
-		message.State = "accepted"
+	result, err := a.gateway.SendSMS(ctx, message.ID, message.To, message.Text)
+	updated, changed, persistErr := a.store.UpdateMessage(message.ID, func(current *Message) bool {
+		return applySMSSubmitResult(current, result, err, time.Now().UTC())
+	})
+	if persistErr != nil {
+		a.logger.Warn("persist SMS submission result", "message_id", message.ID, "error", persistErr)
+	} else if changed {
+		a.events.Publish("message.updated", updated)
 	}
-	_ = a.store.SaveMessage(message)
-	a.events.Publish("message.updated", message)
 	if err != nil && !errors.Is(err, ErrDeliveryUnconfirmed) {
 		a.logger.Warn("SMS send failed", "message_id", message.ID, "error", err)
 	}
+}
+
+func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, args []string, recordedAtNS int64) {
+	if len(args) < 9 {
+		writeError(w, http.StatusBadRequest, "invalid SMS protocol event")
+		return
+	}
+	parseOptional := func(name, raw string) (*int, error) {
+		raw = strings.TrimSpace(raw)
+		if raw == "" || raw == "-1" {
+			return nil, nil
+		}
+		value, err := strconv.ParseInt(raw, 0, 16)
+		if err != nil || value < 0 || value > 255 {
+			return nil, fmt.Errorf("invalid %s", name)
+		}
+		parsed := int(value)
+		return &parsed, nil
+	}
+	part, err := strconv.Atoi(strings.TrimSpace(args[3]))
+	if err != nil || part <= 0 {
+		writeError(w, http.StatusBadRequest, "invalid SMS part")
+		return
+	}
+	parts, err := strconv.Atoi(strings.TrimSpace(args[4]))
+	if err != nil || parts < part {
+		writeError(w, http.StatusBadRequest, "invalid SMS part count")
+		return
+	}
+	rpReference, err := parseOptional("RP reference", args[5])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	tpReference, err := parseOptional("TP reference", args[6])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	status, err := parseOptional("TP status", args[7])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	cause, err := parseOptional("RP cause", args[8])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var serviceCentreTime *time.Time
+	if len(args) > 9 {
+		raw := strings.TrimSpace(args[9])
+		if raw != "" && raw != "-1" {
+			seconds, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || seconds <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid service-centre timestamp")
+				return
+			}
+			parsed := time.Unix(seconds, 0).UTC()
+			serviceCentreTime = &parsed
+		}
+	}
+	event := SMSProtocolEvent{
+		Instance: strings.TrimSpace(instance), Phase: strings.TrimSpace(args[0]),
+		MessageID: strings.TrimSpace(args[1]), Destination: strings.TrimSpace(args[2]),
+		Part: part, Parts: parts, RPReference: rpReference, TPReference: tpReference,
+		Status: status, Cause: cause, ServiceCentreTime: serviceCentreTime,
+	}
+	eventTime := time.Now().UTC()
+	if recordedAtNS > 0 {
+		eventTime = time.Unix(0, recordedAtNS).UTC()
+	}
+	message, changed, err := a.store.ApplySMSProtocolEvent(event, eventTime)
+	if errors.Is(err, ErrSMSReportNotCorrelated) {
+		// The durable engine outbox retains an early response until its later
+		// submitted event establishes the persistent reference mapping.
+		a.logger.Warn("SMS protocol event is waiting for correlation", "event", event, "error", err)
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, ErrSMSReportAmbiguous) {
+		a.logger.Warn("SMS protocol event was not applied", "event", event, "error", err)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if changed {
+		a.events.Publish("message.updated", message)
+	}
+	writeJSON(w, http.StatusOK, message)
 }
 
 func (a *App) calls(w http.ResponseWriter, _ *http.Request) {

@@ -25,6 +25,7 @@ import time
 
 from panoramisk import Manager
 import requests
+import event_outbox
 try:
     from smartcard.System import readers
     from smartcard.util import toHexString, toBytes
@@ -39,6 +40,25 @@ RUNDIR = os.environ.get("VOWIFI_RUNDIR", "/run/vowifi")
 USIM_PIN = os.environ.get("USIM_PIN", "")
 ANDROID_QMI = os.environ.get("SWU_ANDROID_QMI", "").strip() == "1"
 HTTP_AKA_URL = os.environ.get("SWU_HTTP_AKA_URL", "").strip()
+
+
+def forward_sms_protocol_event(message):
+    """Persist the patched Asterisk event without interpreting protocol evidence."""
+    fields = [
+        "Phase", "MessageID", "Destination", "Part", "Parts",
+        "RPReference", "TPReference", "Status", "Cause", "ServiceCentreTime",
+    ]
+    values = ["" if getattr(message, field, None) is None else str(getattr(message, field)) for field in fields]
+    if values[0] not in ("submitted", "local_failure", "rp_ack", "rp_error", "status_report"):
+        print("Ignoring invalid VitiSMS event phase=%r" % values[0])
+        return
+    try:
+        event_outbox.enqueue_event("sms_protocol", values)
+    except Exception as error:
+        # The event must not be silently downgraded to a best-effort POST. A
+        # storage failure is visible in the engine log and leaves Asterisk's
+        # protocol trace available for recovery.
+        print("CRITICAL: could not persist VitiSMS event: %r" % error, flush=True)
 
 
 # --- Reader binding by physical USB port -----------------------------------------------------
@@ -596,6 +616,10 @@ def main():
         else:
             manager.send_action({"Action": "AuthResponse", "Registration": cfg_endpoint})
         print("AuthResponse sent: material=<redacted>")
+
+    @manager.register_event("VitiSMS")
+    def on_sms_protocol(manager, message):
+        forward_sms_protocol_event(message)
 
     @manager.register_event("Newchannel")
     def on_newchannel(manager, message):

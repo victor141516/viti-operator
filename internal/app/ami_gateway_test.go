@@ -40,12 +40,12 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err != nil || !status.Ready {
 		t.Fatalf("status=%+v err=%v", status, err)
 	}
-	result, err := gateway.SendSMS(ctx, "+34987654321", "hello")
+	result, err := gateway.SendSMS(ctx, "sms-test-correlation", "+34987654321", "hello")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.State != "accepted" {
-		t.Fatalf("SMS state=%q, want accepted", result.State)
+	if result.State != "submitted" || !result.DeliveryReportExpected {
+		t.Fatalf("SMS result=%+v, want submitted with a delivery report requested", result)
 	}
 	if err := gateway.SetIMSRegistration(ctx, false); err != nil {
 		t.Fatal(err)
@@ -59,7 +59,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	for len(requests) > 0 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
-			sawMessage = first(request, "Body") == "hello" && strings.Contains(first(request, "To"), "+34987654321")
+			sawMessage = first(request, "Body") == "hello" &&
+				strings.Contains(first(request, "To"), "+34987654321") &&
+				first(request, "Variable") == "VITI_MESSAGE_ID=sms-test-correlation"
 		}
 		if first(request, "Action") == "Command" {
 			switch first(request, "Command") {
