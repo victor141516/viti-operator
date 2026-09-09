@@ -10,8 +10,8 @@ function fakeSession() {
     video,
     muteCalls: 0,
     unmuteCalls: 0,
-    mute(options) { assert.deepEqual(options, { audio: true }); this.muteCalls++ },
-    unmute(options) { assert.deepEqual(options, { audio: true }); this.unmuteCalls++ },
+    mute(options) { assert.deepEqual(options, { audio: true }); this.muteCalls++; audio.enabled = false },
+    unmute(options) { assert.deepEqual(options, { audio: true }); this.unmuteCalls++; audio.enabled = true },
     connection: { getSenders: () => [{ track: audio }, { track: video }, { track: null }] },
   }
 }

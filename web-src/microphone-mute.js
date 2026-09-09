@@ -1,17 +1,23 @@
 export function createMicrophoneMuteController(onChange = () => {}) {
   let muted = false
 
-  const setTrackState = (session) => {
+  const disableOutboundAudio = (session) => {
     for (const sender of session?.connection?.getSenders?.() || []) {
-      if (sender.track?.kind === 'audio') sender.track.enabled = !muted
+      if (sender.track?.kind === 'audio') sender.track.enabled = false
     }
   }
 
   const apply = (session) => {
     if (!session) return muted
-    if (muted) session.mute?.({ audio: true })
-    else session.unmute?.({ audio: true })
-    setTrackState(session)
+    if (muted) {
+      session.mute?.({ audio: true })
+      // JsSIP remembers its muted flag, so mute() can be a no-op after a
+      // renegotiation replaces the sender. Cover the replacement explicitly.
+      disableOutboundAudio(session)
+    } else {
+      // Let JsSIP restore media so its hold state remains authoritative.
+      session.unmute?.({ audio: true })
+    }
     return muted
   }
 
