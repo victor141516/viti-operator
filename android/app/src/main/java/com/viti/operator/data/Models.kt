@@ -32,8 +32,11 @@ data class RuntimeStatus(
     val simReady: Boolean = false,
     val tunnelReady: Boolean = false,
     val imsReady: Boolean = false,
+    val contactsVersion: Long = 0,
     val detail: String = "",
 )
+
+data class ServerContactsSnapshot(val contacts: List<PhoneContact>, val version: Long)
 
 data class ClientIdentity(
     val id: String,
@@ -101,6 +104,8 @@ data class Message(
     val text: String,
     val state: String,
     val createdAt: String,
+    val contactId: String = "",
+    val contactName: String = "",
 )
 
 data class Call(
@@ -111,6 +116,8 @@ data class Call(
     val startedAt: String,
     val endedAt: String,
     val recordingTracks: List<RecordingTrack> = emptyList(),
+    val contactId: String = "",
+    val contactName: String = "",
 )
 
 data class RecordingTrack(

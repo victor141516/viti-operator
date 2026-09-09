@@ -135,6 +135,7 @@ func (a *App) setEngineTunnelState(ready bool, args []string, recordedAtNS int64
 
 func (a *App) runtimeStatus(ctx context.Context) (RuntimeStatus, error) {
 	status, gatewayErr := a.gateway.Status(ctx)
+	status.ContactsVersion = a.store.ContactsVersion()
 	registrationEnabled := a.store.IMSRegistrationEnabled()
 	if status.UpdatedAt.IsZero() {
 		status.UpdatedAt = time.Now().UTC()

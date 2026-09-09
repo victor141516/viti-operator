@@ -114,6 +114,7 @@ The manager is the single source of truth for:
 - call history and the current carrier-call lifecycle;
 - the shared call-recording preference and recording-track metadata;
 - known client identities and last-seen metadata;
+- per-device contact snapshots, their source revisions, and the merged contact view;
 - the selected remote SIM authentication agent;
 - the desired IMS registration state.
 
@@ -125,6 +126,37 @@ The event hub retains the most recent 256 events in memory. Long-polling clients
 provide the last sequence they observed. Events accelerate refreshes, but
 clients always recover by fetching current state, so missing an old event does
 not corrupt history.
+
+## Contact synchronization and resolution
+
+Android contact access is opt-in in two distinct steps: the user accepts an
+in-app disclosure that names and phone numbers will be uploaded to the private
+Viti server, and Android grants `READ_CONTACTS`. A permission retained from an
+older local-only version does not constitute synchronization consent. The app
+persists the separate consent decision, uploads the initial address book, and
+observes the Contacts provider for later changes.
+
+Each phone replaces its own complete source snapshot. Records retain the stable
+client ID and name, source contact ID, regional context, alternative names,
+number labels, original number text, and normalized E.164 value when it can be
+determined. Per-source monotonic revisions make retries idempotent and prevent a
+slow older request from overwriting a newer snapshot. A failed atomic state-file
+write also rolls back the in-memory snapshot and revision.
+
+The manager merges records only through a shared normalized phone identity;
+equal names alone never merge people. Ambiguous numbers remain attached to their
+original source record. Removing a record from one phone therefore preserves any
+contribution from another phone. The merged view exposes all contributing
+devices and enriches shared SMS and call history without replacing the original
+telephone number.
+
+The merged view is cached. A persisted global contact version changes only when
+contact content changes and is returned by both `/status` and `/contacts`.
+Android compares the lightweight status version with its per-server cache and
+downloads the complete merged address book only on first load, after switching
+servers, or when the version changes. `/contacts` returns content and version as
+one atomic snapshot so a concurrent update cannot be cached under the wrong
+version.
 
 ## Client identity and topology
 

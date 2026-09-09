@@ -31,8 +31,10 @@ Unauthenticated liveness probe. A successful manager returns `200` with
 
 ### `GET /api/v1/status`
 
-Returns `ready`, `sim_ready`, `tunnel_ready`, `ims_ready`, `provider`, `detail`,
-and `updated_at`. `ready` means the complete line is available.
+Returns `ready`, `sim_ready`, `tunnel_ready`, `ims_ready`, `contacts_version`,
+`provider`, `detail`, and `updated_at`. `ready` means the complete line is
+available. `contacts_version` is the persisted version of the merged contact
+content; a client that already holds this version need not download `/contacts`.
 
 ### `GET /api/v1/topology`
 
@@ -107,9 +109,47 @@ adapter that cannot control registration.
 ### `GET /api/v1/events?after=<sequence>`
 
 Long-polls for events newer than the supplied sequence. Common event types are
-`status.updated`, `message.updated`, `call.updated`, and `recording.updated`. The in-memory buffer is
-bounded, so clients must refresh the corresponding resource after a wake-up
-instead of treating events as permanent storage.
+`status.updated`, `contacts.updated`, `message.updated`, `call.updated`, and
+`recording.updated`. The in-memory buffer is bounded, so clients must refresh
+the corresponding resource after a wake-up instead of treating events as
+permanent storage.
+
+## Contacts
+
+### `GET /api/v1/contacts?q=<query>`
+
+Returns an atomic `{"contacts":[...],"version":N}` snapshot. Search is optional
+and matches contact names or telephone numbers. Each merged contact contains a
+stable derived `id`, primary `name`, all `names`, all original/normalized
+`numbers`, and every contributing source in `sources`. The returned `version`
+always describes the exact contact content in that response.
+
+### `PUT /api/v1/contacts/sources/{client}`
+
+Replaces the complete address-book contribution for one trusted Android client:
+
+```json
+{
+  "client_name": "OnePlus CPH2581",
+  "region": "ES",
+  "snapshot_revision": 1725890000000,
+  "contacts": [
+    {
+      "source_contact_id": "42",
+      "names": ["Alice Example", "Example, Alice"],
+      "numbers": [
+        {"original": "612 34 56 78", "normalized": "+34612345678", "label": "Mobile"}
+      ]
+    }
+  ]
+}
+```
+
+`snapshot_revision` must increase for that client. Replayed or older revisions
+are accepted as no-ops, making retries safe. Legacy clients without a revision
+may create a source only until a versioned snapshot for that client exists.
+Successful replacements return `204`. A content change also publishes
+`contacts.updated`; a revision-only retry does not.
 
 ## Messages
 
@@ -117,6 +157,8 @@ instead of treating events as permanent storage.
 
 Returns `{"messages":[...]}` in descending creation order. Records include
 `id`, `direction`, `from`, `to`, `text`, `state`, `created_at`, and `updated_at`.
+When the peer resolves to a synchronized contact, `contact_id` and
+`contact_name` are included while the original number remains unchanged.
 
 ### `POST /api/v1/messages`
 
@@ -134,7 +176,8 @@ continues asynchronously.
 
 Returns `{"calls":[...]}` in descending start order. Records include local ID,
 end-to-end trace ID, engine call ID, direction, peer, lifecycle state, and start,
-answer, update, and end timestamps.
+answer, update, and end timestamps. Resolved peers also include `contact_id` and
+`contact_name`; `peer` continues to contain the telephone number.
 
 Recorded calls also include `recording_tracks`. Each track has a stable `id`,
 `role` (`remote` or `client`), human-readable device `label`, WAV content type,

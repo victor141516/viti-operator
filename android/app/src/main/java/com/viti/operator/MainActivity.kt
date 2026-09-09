@@ -10,6 +10,10 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.database.ContentObserver
+import android.provider.ContactsContract
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -34,14 +38,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
-    private val viewModel by viewModels<MainViewModel> { MainViewModel.Factory(SettingsStore(applicationContext)) }
+    private val settingsStore by lazy { SettingsStore(applicationContext) }
+    private val viewModel by viewModels<MainViewModel> { MainViewModel.Factory(settingsStore) }
     private lateinit var voiceClient: VoiceWebViewClient
     private lateinit var incomingCallRinger: IncomingCallRinger
     private val clientIdentity by lazy { vitiClientIdentity() }
     private var pendingMicrophoneAction: (() -> Unit)? = null
+    private var contactsObserver: ContentObserver? = null
+    private var contactReloadJob: Job? = null
     private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val action = pendingMicrophoneAction
@@ -49,7 +58,9 @@ class MainActivity : ComponentActivity() {
         if (granted) action?.invoke() else viewModel.showNotice("Microphone access is required for calls")
     }
     private val contactsPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) loadContacts() else viewModel.showNotice("Contacts permission was not granted")
+        if (granted) {
+            enableContactSync()
+        } else viewModel.showNotice("Contacts permission was not granted")
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -134,12 +145,23 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         publishClientIdentity()
-        // A permission already granted in an earlier session must populate the
-        // dialer immediately; otherwise reinstalling or reopening the activity
-        // leaves a misleading "Use contacts" prompt until it is tapped.
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            loadContacts()
+        // Existing installs may have granted READ_CONTACTS for the old local-only
+        // picker. Upload starts only after the separate Viti sync disclosure was
+        // accepted and persisted.
+        lifecycleScope.launch {
+            val permissionGranted = ContextCompat.checkSelfPermission(this@MainActivity, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED
+            if (permissionGranted && settingsStore.contactSyncConsent.first()) {
+                observeContacts()
+                loadContacts()
+            }
         }
+    }
+
+    override fun onStop() {
+        contactsObserver?.let(contentResolver::unregisterContentObserver)
+        contactsObserver = null
+        contactReloadJob?.cancel()
+        super.onStop()
     }
 
     private fun publishClientIdentity() {
@@ -240,7 +262,9 @@ class MainActivity : ComponentActivity() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val caller = peer.ifBlank { "Private number" }
+        val callerNumber = peer.ifBlank { "Private number" }
+        val callerName = viewModel.contactNameFor(peer)
+        val caller = callerName.ifBlank { callerNumber }
         val answerCall = PendingIntent.getActivity(
             this,
             ANSWER_CALL_REQUEST_CODE,
@@ -258,13 +282,13 @@ class MainActivity : ComponentActivity() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val callerPerson = Person.Builder()
-            .setName(caller)
+            .setName(if (callerName.isBlank()) caller else "$caller · $callerNumber")
             .setImportant(true)
             .build()
         val notification = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
             .setSmallIcon(com.viti.operator.R.drawable.ic_launcher_foreground)
-            .setContentTitle("Incoming call")
-            .setContentText(caller)
+            .setContentTitle(if (callerName.isBlank()) "Incoming call" else callerName)
+            .setContentText(callerNumber)
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(callerPerson, rejectCall, answerCall))
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
@@ -292,13 +316,14 @@ class MainActivity : ComponentActivity() {
             Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val sender = message.from.ifBlank { "Unknown number" }
+        val senderNumber = message.from.ifBlank { "Unknown number" }
+        val sender = message.contactName.ifBlank { senderNumber }
         val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
             .setSmallIcon(com.viti.operator.R.drawable.ic_launcher_foreground)
             .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
             .setContentTitle(sender)
-            .setContentText(message.text)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(message.text))
+            .setContentText(if (message.contactName.isBlank()) message.text else "$senderNumber · ${message.text}")
+            .setStyle(NotificationCompat.BigTextStyle().setSummaryText(if (message.contactName.isBlank()) null else senderNumber).bigText(message.text))
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -420,17 +445,42 @@ class MainActivity : ComponentActivity() {
 
     private fun requestContacts() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.READ_CONTACTS) == PackageManager.PERMISSION_GRANTED) {
-            loadContacts()
+            enableContactSync()
         } else {
             contactsPermission.launch(Manifest.permission.READ_CONTACTS)
         }
     }
 
-    private fun loadContacts() {
+    private fun enableContactSync() {
         lifecycleScope.launch {
-            val contacts = withContext(Dispatchers.IO) { ContactsRepository(applicationContext).load() }
-            viewModel.setContacts(contacts)
+            settingsStore.setContactSyncConsent(true)
+            observeContacts()
+            loadContacts()
         }
+    }
+
+    private fun loadContacts() {
+        contactReloadJob?.cancel()
+        contactReloadJob = lifecycleScope.launch {
+            runCatching { withContext(Dispatchers.IO) { ContactsRepository(applicationContext).load() } }
+                .onSuccess(viewModel::synchronizeContacts)
+                .onFailure { viewModel.showNotice(it.message ?: "Could not read contacts") }
+        }
+    }
+
+    private fun observeContacts() {
+        if (contactsObserver != null) return
+        contactsObserver = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                contactReloadJob?.cancel()
+                contactReloadJob = lifecycleScope.launch {
+                    delay(750)
+                    runCatching { withContext(Dispatchers.IO) { ContactsRepository(applicationContext).load() } }
+                        .onSuccess(viewModel::synchronizeContacts)
+                        .onFailure { viewModel.showNotice(it.message ?: "Could not read contacts") }
+                }
+            }
+        }.also { contentResolver.registerContentObserver(ContactsContract.AUTHORITY_URI, true, it) }
     }
 
     companion object {

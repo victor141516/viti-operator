@@ -385,7 +385,7 @@ private fun MessageConversationRow(
     onClick: () -> Unit,
 ) {
     val message = conversation.latest
-    val name = contactName(contacts, conversation.peer)
+    val name = message.contactName.ifBlank { contactName(contacts, conversation.peer) }
     Row(
         Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -394,6 +394,7 @@ private fun MessageConversationRow(
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
             Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (name != conversation.peer) Text(conversation.peer, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(2.dp))
             Text(
                 (if (message.direction == "outgoing") "You: " else "") + message.text,
@@ -427,7 +428,9 @@ private fun MessageComposerSheet(
     var to by rememberSaveable(initialRecipient) { mutableStateOf(initialRecipient) }
     var body by rememberSaveable { mutableStateOf("") }
     val suggestions = remember(contacts, to) {
-        contacts.filter { to.isNotBlank() && (it.name.contains(to, true) || it.number.contains(to)) }.take(3)
+        contacts.filter {
+            to.isNotBlank() && (it.name.contains(to, true) || it.alternativeNames.any { name -> name.contains(to, true) } || it.number.contains(to))
+        }.take(3)
     }
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
@@ -446,15 +449,21 @@ private fun MessageComposerSheet(
                 singleLine = true,
             )
             if (!contactsAvailable) {
-                FilledTonalButton(onClick = onRequestContacts) {
-                    Icon(Icons.Default.ContactPhone, null)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Search contacts")
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text(
+                        "Syncing uploads contact names and phone numbers to your private Viti server so every connected client can resolve them.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    FilledTonalButton(onClick = onRequestContacts) {
+                        Icon(Icons.Default.ContactPhone, null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Sync this phone's contacts")
+                    }
                 }
-            } else {
-                suggestions.forEach { contact ->
-                    ContactSuggestion(contact) { to = contact.number }
-                }
+            }
+            suggestions.forEach { contact ->
+                ContactSuggestion(contact) { to = contact.number }
             }
             OutlinedTextField(
                 value = body,
@@ -572,6 +581,13 @@ private fun ContactSuggestion(contact: PhoneContact, onClick: () -> Unit) {
         Column {
             Text(contact.name, fontWeight = FontWeight.SemiBold)
             Text(contact.number, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (contact.sourceNames.isNotEmpty()) Text(
+                "From ${contact.sourceNames.joinToString()}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -605,7 +621,9 @@ private fun CallsScreen(
         }
     }
     val filteredContacts = remember(ui.contacts, query) {
-        ui.contacts.filter { query.isBlank() || it.name.contains(query, true) || it.number.contains(query) }
+        ui.contacts.filter {
+            query.isBlank() || it.name.contains(query, true) || it.alternativeNames.any { name -> name.contains(query, true) } || it.number.contains(query)
+        }
     }
     val canStartCall = ui.status.ready && ui.voice.registered && !serverCallActive
 
@@ -660,21 +678,33 @@ private fun CallsScreen(
                         if (index != filteredCalls.lastIndex) HorizontalDivider(Modifier.padding(start = 64.dp))
                     }
                 }
-            } else if (!ui.contactsAvailable) {
-                item {
-                    EmptyListState(Icons.Default.ContactPhone, "Enable contacts", "Allow contact access to call without memorizing numbers.")
-                    FilledTonalButton(onClick = onRequestContacts, modifier = Modifier.fillMaxWidth()) {
-                        Icon(Icons.Default.ContactPhone, null)
-                        Spacer(Modifier.width(8.dp))
-                        Text("Use contacts")
+            } else {
+                if (!ui.contactsAvailable) {
+                    item {
+                        ElevatedCard(Modifier.fillMaxWidth()) {
+                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                                Text("Sync this phone's contacts", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "Names and phone numbers are uploaded to your private Viti server and shared with your connected clients.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                                FilledTonalButton(onClick = onRequestContacts, modifier = Modifier.fillMaxWidth()) {
+                                    Icon(Icons.Default.ContactPhone, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Sync contacts")
+                                }
+                            }
+                        }
                     }
                 }
-            } else if (filteredContacts.isEmpty()) {
-                item { EmptyListState(Icons.Default.Person, "No contacts", "Try a different name or number.") }
-            } else {
-                itemsIndexed(filteredContacts, key = { _, item -> "${item.id}:${item.number}" }) { index, contact ->
-                    ContactCallRow(contact, canStartCall) { onCall(contact.number) }
-                    if (index != filteredContacts.lastIndex) HorizontalDivider(Modifier.padding(start = 64.dp))
+                if (filteredContacts.isEmpty()) {
+                    item { EmptyListState(Icons.Default.Person, "No contacts", if (query.isBlank()) "Synchronize contacts from a phone to see them here." else "Try a different name or number.") }
+                } else {
+                    itemsIndexed(filteredContacts, key = { _, item -> "${item.id}:${item.number}" }) { index, contact ->
+                        ContactCallRow(contact, canStartCall) { onCall(contact.number) }
+                        if (index != filteredContacts.lastIndex) HorizontalDivider(Modifier.padding(start = 64.dp))
+                    }
                 }
             }
         }
@@ -717,7 +747,8 @@ private fun ActiveCallPanel(
     onJoin: () -> Unit,
     onOpenKeypad: () -> Unit,
 ) {
-    val peer = activeServerCall?.peer?.takeUnless { it == "*44" }.orEmpty().ifBlank { ui.voice.peer }.ifBlank { "Call" }
+    val peerNumber = activeServerCall?.peer?.takeUnless { it == "*44" }.orEmpty().ifBlank { ui.voice.peer }.ifBlank { "Call" }
+    val peer = activeServerCall?.contactName.orEmpty().ifBlank { contactName(ui.contacts, peerNumber) }
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -725,6 +756,7 @@ private fun ActiveCallPanel(
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(peer, fontWeight = FontWeight.SemiBold)
+                    if (peer != peerNumber) Text(peerNumber, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Text(
                         if (anotherClientOwnsCall) {
                             when {
@@ -778,11 +810,13 @@ private fun CallActivityRow(call: Call, contacts: List<PhoneContact>, enabled: B
         formatCallDuration(call)?.let { append(" · "); append(it) }
     }
     val rowModifier = if (call.recordingTracks.isNotEmpty()) Modifier.clickable(onClick = onRecording) else Modifier
+    val name = call.contactName.ifBlank { contactName(contacts, call.peer) }
     Row(rowModifier.fillMaxWidth().padding(vertical = 11.dp), verticalAlignment = Alignment.CenterVertically) {
-        PersonAvatar(contactName(contacts, call.peer))
+        PersonAvatar(name)
         Spacer(Modifier.width(14.dp))
         Column(Modifier.weight(1f)) {
-            Text(contactName(contacts, call.peer), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (name != call.peer) Text(call.peer, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(detail, style = MaterialTheme.typography.bodyMedium, color = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
             if (call.recordingTracks.isNotEmpty()) {
                 Text("Recording available", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
@@ -1001,6 +1035,13 @@ private fun ContactCallRow(contact: PhoneContact, enabled: Boolean, onCall: () -
         Column(Modifier.weight(1f)) {
             Text(contact.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
             Text(contact.number, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (contact.sourceNames.isNotEmpty()) Text(
+                "From ${contact.sourceNames.joinToString()}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
         IconButton(onClick = onCall, enabled = enabled) { Icon(Icons.Default.Call, "Call ${contact.name}") }
     }
@@ -1120,8 +1161,8 @@ private fun EmptyListState(icon: ImageVector, title: String, detail: String) {
 private fun messagePeer(message: Message): String = if (message.direction == "incoming") message.from else message.to
 
 private fun contactName(contacts: List<PhoneContact>, number: String): String {
-    val normalized = number.filter(Char::isDigit).takeLast(9)
-    return contacts.firstOrNull { it.number.filter(Char::isDigit).takeLast(9) == normalized }?.name ?: number
+    val normalized = number.filter(Char::isDigit)
+    return contacts.firstOrNull { it.number.filter(Char::isDigit) == normalized }?.name ?: number
 }
 
 private fun formatActivityTime(value: String): String {

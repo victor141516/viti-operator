@@ -143,6 +143,21 @@ The Android remote authentication service must remain allowed to run in the
 background. On vendor Android builds, disable battery optimization for Viti
 Operator if the agent stops polling while the screen is off.
 
+## Contact synchronization
+
+Contact synchronization is disabled until the user chooses **Sync contacts**
+and grants Android's contacts permission. The app then uploads names and phone
+numbers to the configured Viti manager and observes subsequent address-book
+changes. Revoking `READ_CONTACTS` stops further reads; already synchronized
+server data remains until that phone can publish a later source snapshot or the
+manager state is deliberately replaced.
+
+Contact source records and revision metadata are application data in
+`deploy/data/state.json`. They are included in normal state backups and shared
+with every client authorized to use that manager. Treat the state file as
+sensitive: it can contain contact names and telephone numbers in addition to SMS
+and call history. Do not commit or distribute it.
+
 ## Updates
 
 Before updating, keep a copy of:

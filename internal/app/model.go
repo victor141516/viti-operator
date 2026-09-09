@@ -10,14 +10,16 @@ const (
 )
 
 type Message struct {
-	ID        string    `json:"id"`
-	Direction Direction `json:"direction"`
-	From      string    `json:"from"`
-	To        string    `json:"to"`
-	Text      string    `json:"text"`
-	State     string    `json:"state"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID          string    `json:"id"`
+	Direction   Direction `json:"direction"`
+	From        string    `json:"from"`
+	To          string    `json:"to"`
+	Text        string    `json:"text"`
+	State       string    `json:"state"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	ContactID   string    `json:"contact_id,omitempty"`
+	ContactName string    `json:"contact_name,omitempty"`
 }
 
 type Call struct {
@@ -34,6 +36,37 @@ type Call struct {
 	EndedAt               *time.Time             `json:"ended_at,omitempty"`
 	RecordingTracks       []RecordingTrack       `json:"recording_tracks,omitempty"`
 	RecordingParticipants []RecordingParticipant `json:"recording_participants,omitempty"`
+	ContactID             string                 `json:"contact_id,omitempty"`
+	ContactName           string                 `json:"contact_name,omitempty"`
+}
+
+type ContactNumber struct {
+	Original   string `json:"original"`
+	Normalized string `json:"normalized,omitempty"`
+	Label      string `json:"label,omitempty"`
+}
+
+type ContactSourceRecord struct {
+	SourceClientID   string          `json:"source_client_id"`
+	SourceClientName string          `json:"source_client_name"`
+	SourceContactID  string          `json:"source_contact_id"`
+	Region           string          `json:"region,omitempty"`
+	Names            []string        `json:"names"`
+	Numbers          []ContactNumber `json:"numbers"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+}
+
+type ContactSource struct {
+	ClientID   string `json:"client_id"`
+	ClientName string `json:"client_name"`
+}
+
+type Contact struct {
+	ID      string          `json:"id"`
+	Name    string          `json:"name"`
+	Names   []string        `json:"names"`
+	Numbers []ContactNumber `json:"numbers"`
+	Sources []ContactSource `json:"sources"`
 }
 
 type RecordingTrack struct {
@@ -60,13 +93,14 @@ type RecordingSettings struct {
 }
 
 type RuntimeStatus struct {
-	Ready       bool      `json:"ready"`
-	SIMReady    bool      `json:"sim_ready"`
-	TunnelReady bool      `json:"tunnel_ready"`
-	IMSReady    bool      `json:"ims_ready"`
-	Provider    string    `json:"provider"`
-	Detail      string    `json:"detail,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Ready           bool      `json:"ready"`
+	SIMReady        bool      `json:"sim_ready"`
+	TunnelReady     bool      `json:"tunnel_ready"`
+	IMSReady        bool      `json:"ims_ready"`
+	ContactsVersion uint64    `json:"contacts_version"`
+	Provider        string    `json:"provider"`
+	Detail          string    `json:"detail,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type IMSRegistrationState struct {

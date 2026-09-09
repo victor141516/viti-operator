@@ -37,7 +37,7 @@
           <form class="composer" id="message-form">
             <h2>Send SMS</h2>
             <label for="message-to">Number</label>
-            <input id="message-to" name="to" inputmode="tel" autocomplete="tel" placeholder="+34…" required>
+            <input id="message-to" name="to" inputmode="tel" autocomplete="tel" list="contact-options" placeholder="+34…" required>
             <label for="message-text">Message</label>
             <textarea id="message-text" name="text" rows="5" maxlength="1000" placeholder="Write a message" required></textarea>
             <div class="form-footer"><span id="message-count">0/1000</span><button class="primary" type="submit">Send</button></div>
@@ -53,7 +53,7 @@
         <div class="panel call-layout">
           <form class="dialer" id="call-form">
             <label for="call-to">Phone number</label>
-            <input id="call-to" name="to" inputmode="tel" autocomplete="tel" placeholder="+34…" required>
+            <input id="call-to" name="to" inputmode="tel" autocomplete="tel" list="contact-options" placeholder="+34…" required>
             <div class="dial-grid" aria-label="Dial pad"></div>
             <button class="call-button" type="submit">Call</button>
             <div class="call-actions" id="call-actions" hidden>
@@ -124,7 +124,8 @@
       </section>
     </main>
   </div>
-  <dialog class="recording-dialog" id="recording-dialog" aria-labelledby="recording-dialog-title">
+    <datalist id="contact-options"></datalist>
+    <dialog class="recording-dialog" id="recording-dialog" aria-labelledby="recording-dialog-title">
     <form method="dialog" class="recording-dialog-header"><div><p class="eyebrow">Call recording</p><h2 id="recording-dialog-title">Listen to tracks</h2></div><button class="dialog-close" value="cancel" aria-label="Close">×</button></form>
     <p id="recording-dialog-peer" class="recording-dialog-peer"></p>
     <fieldset id="recording-track-list"><legend>Tracks</legend></fieldset>
@@ -142,6 +143,6 @@
   </dialog>
     <script src="/voice.bundle.js?v=20260909-recordings" defer></script>
     <script src="/recording-presence.js?v=20260909-presence" defer></script>
-    <script src="/app.js?v=20260909-presence" defer></script>
+    <script src="/app.js?v=20260909-contacts" defer></script>
 </body>
 </html>
