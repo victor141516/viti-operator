@@ -30,7 +30,6 @@ class LegacyCallAudioController(
     private var incoming = false
     private var previousMode = AudioManager.MODE_NORMAL
     private var focusOwned = false
-    private var selectedEndpointId = ""
     private var scoConnected = false
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
@@ -122,7 +121,6 @@ class LegacyCallAudioController(
     override fun requestEndpoint(endpointId: String) {
         val endpoint = endpoints().firstOrNull { it.id == endpointId }
             ?: throw IllegalStateException("The selected audio endpoint is no longer available")
-        selectedEndpointId = endpoint.id
         when (endpoint.type) {
             VoiceAudioEndpointType.SPEAKER -> {
                 audioManager.stopBluetoothSco()
@@ -131,14 +129,12 @@ class LegacyCallAudioController(
             }
             VoiceAudioEndpointType.BLUETOOTH -> {
                 audioManager.isSpeakerphoneOn = false
-                scoConnected = false
                 audioManager.startBluetoothSco()
             }
             else -> {
                 audioManager.isSpeakerphoneOn = false
                 audioManager.stopBluetoothSco()
                 audioManager.isBluetoothScoOn = false
-                scoConnected = false
             }
         }
         publishAudioState()
@@ -147,7 +143,6 @@ class LegacyCallAudioController(
     override fun end() {
         incoming = false
         active = false
-        selectedEndpointId = ""
         releaseAudio()
         updateMediaSession()
         publishAudioState()
@@ -177,7 +172,6 @@ class LegacyCallAudioController(
         focusOwned = false
         audioManager.stopBluetoothSco()
         audioManager.isBluetoothScoOn = false
-        scoConnected = false
         audioManager.isSpeakerphoneOn = false
         if (audioManager.mode == AudioManager.MODE_IN_COMMUNICATION) audioManager.mode = previousMode
     }
@@ -197,9 +191,6 @@ class LegacyCallAudioController(
 
     private fun publishAudioState() {
         val available = endpoints()
-        if (selectedEndpointId.isNotBlank() && available.none { it.id == selectedEndpointId }) {
-            selectedEndpointId = ""
-        }
         val current = selectLegacyCurrentEndpoint(
             available = available,
             speakerphoneOn = audioManager.isSpeakerphoneOn,
@@ -230,9 +221,9 @@ internal fun selectLegacyCurrentEndpoint(
     speakerphoneOn: Boolean,
     bluetoothScoConnected: Boolean,
 ): VoiceAudioEndpoint? = available.firstOrNull {
-    speakerphoneOn && it.type == VoiceAudioEndpointType.SPEAKER
-} ?: available.firstOrNull {
     bluetoothScoConnected && it.type == VoiceAudioEndpointType.BLUETOOTH
+} ?: available.firstOrNull {
+    speakerphoneOn && it.type == VoiceAudioEndpointType.SPEAKER
 } ?: available.firstOrNull { it.type == VoiceAudioEndpointType.WIRED_HEADSET }
     ?: available.firstOrNull { it.type == VoiceAudioEndpointType.EARPIECE }
     ?: available.firstOrNull { it.type == VoiceAudioEndpointType.SPEAKER }

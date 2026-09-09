@@ -33,6 +33,7 @@ class VoicePlatformPolicyTest {
 
         assertEquals(wired, selectLegacyCurrentEndpoint(available, speakerphoneOn = false, bluetoothScoConnected = false))
         assertEquals(bluetooth, selectLegacyCurrentEndpoint(available, speakerphoneOn = false, bluetoothScoConnected = true))
+        assertEquals(bluetooth, selectLegacyCurrentEndpoint(available, speakerphoneOn = true, bluetoothScoConnected = true))
     }
 
     @Test

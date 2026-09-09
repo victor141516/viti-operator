@@ -3,7 +3,10 @@ package com.viti.operator.voice
 import com.viti.operator.data.VoiceProvisioning
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -228,9 +231,10 @@ class VoiceCallRuntimeTest {
         runCurrent()
         assertTrue(runtime.snapshot.value.telecomManaged)
         assertTrue(runtime.snapshot.value.microphonePermissionRequired)
-        gateway.callbacks.onAnswer()
+        val answerResult = runCatching { gateway.callbacks.onAnswer() }
         runCurrent()
 
+        assertTrue(answerResult.isFailure)
         assertTrue(engine.commands.contains("reject:$token"))
         assertEquals(1, gateway.disconnectCount)
         assertTrue(runtime.snapshot.value.legToken.isBlank())
@@ -277,6 +281,96 @@ class VoiceCallRuntimeTest {
         runtime.close()
     }
 
+    @Test
+    fun endingLegRejectsLateSipEventsCallbacksAndAnswerActions() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway().apply { disconnectFailure = IllegalStateException("still owned") }
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "retained-ending-incoming"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000014", legToken = token))
+        runCurrent()
+        runtime.reject(token)
+        runCurrent()
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        assertEquals("ending", runtime.snapshot.value.voice.state)
+
+        runtime.answer(token)
+        runtime.onVoiceEvent(VoiceEngineEvent("ringing", legToken = token))
+        runtime.onVoiceEvent(VoiceEngineEvent("active", legToken = token))
+        gateway.callbacks.onSetActive()
+        gateway.callbacks.onSetInactive()
+        runCurrent()
+
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        assertEquals("ending", runtime.snapshot.value.voice.state)
+        assertFalse(engine.commands.any { it == "answer:$token" })
+        assertFalse(engine.commands.any { it == "inactive:$token:false" || it == "inactive:$token:true" })
+        assertEquals(0, gateway.setActiveCount)
+        runtime.close()
+    }
+
+    @Test
+    fun answerCompletionCannotUndoInactiveCallbackThatArrivedWhileItWasPending() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { answerGate = gate }
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "answer-inactive-interleaving"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000015", legToken = token))
+        runCurrent()
+        val answering = launch { gateway.callbacks.onAnswer() }
+        runCurrent()
+        gateway.callbacks.onSetInactive()
+        gate.complete(Unit)
+        answering.join()
+        runCurrent()
+
+        assertEquals(VoiceCallPhase.INACTIVE, runtime.snapshot.value.phase)
+        assertTrue(engine.commands.contains("inactive:$token:true"))
+        runtime.close()
+    }
+
+    @Test
+    fun platformAnswerTimeoutReturnsWithinBudgetAndCleansUpAsynchronously() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine().apply { answerGate = CompletableDeferred() }
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "answer-timeout"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000016", legToken = token))
+        runCurrent()
+        val result = async { runCatching { gateway.callbacks.onAnswer() } }
+        advanceTimeBy(4_501)
+        runCurrent()
+
+        assertTrue(result.await().isFailure)
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertEquals(1, gateway.disconnectCount)
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun failedInactiveSuppressionEndsTheCallInsteadOfClaimingPrivacy() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine().apply { inactiveFailure = IllegalStateException("media suppression failed") }
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "inactive-suppression-failure"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000017", legToken = token))
+        runCurrent()
+        gateway.callbacks.onAnswer()
+        val result = runCatching { gateway.callbacks.onSetInactive() }
+        runCurrent()
+
+        assertTrue(result.isFailure)
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
     private fun kotlinx.coroutines.test.TestScope.runtime(
         engine: FakeVoiceEngine,
         gateway: PlatformCallGateway?,
@@ -294,6 +388,8 @@ class VoiceCallRuntimeTest {
         val starts = mutableListOf<VoiceProvisioning>()
         var microphonePermission = true
         var callFailure: Throwable? = null
+        var answerGate: CompletableDeferred<Unit>? = null
+        var inactiveFailure: Throwable? = null
 
         override fun hasMicrophonePermission() = microphonePermission
         override fun start(provisioning: VoiceProvisioning) { starts += provisioning }
@@ -301,12 +397,18 @@ class VoiceCallRuntimeTest {
             callFailure?.let { throw it }
             commands += "call:$number"
         }
-        override suspend fun answer(legToken: String) { commands += "answer:$legToken" }
+        override suspend fun answer(legToken: String) {
+            answerGate?.await()
+            commands += "answer:$legToken"
+        }
         override suspend fun reject(legToken: String) { commands += "reject:$legToken" }
         override suspend fun hangup(legToken: String) { commands += "hangup:$legToken" }
         override suspend fun setMuted(legToken: String, muted: Boolean) { commands += "mute:$legToken:$muted" }
         override suspend fun setTelecomMuted(legToken: String, muted: Boolean) { commands += "telecom-mute:$legToken:$muted" }
-        override suspend fun setSystemInactive(legToken: String, inactive: Boolean) { commands += "inactive:$legToken:$inactive" }
+        override suspend fun setSystemInactive(legToken: String, inactive: Boolean) {
+            inactiveFailure?.takeIf { inactive }?.let { throw it }
+            commands += "inactive:$legToken:$inactive"
+        }
         override suspend fun sendDtmf(legToken: String, tone: Char) { commands += "dtmf:$legToken:$tone" }
         override fun destroy() = Unit
     }
