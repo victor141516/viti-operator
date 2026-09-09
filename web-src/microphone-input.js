@@ -34,8 +34,14 @@ export function createMicrophoneInputController({
       for (const track of stream.getTracks?.() || []) track.stop()
       throw new Error('The selected microphone did not provide an audio track.')
     }
-    if (getSession() !== current) {
+    const sessionBeforeReplacement = getSession()
+    if (sessionBeforeReplacement !== current) {
       nextTrack.stop()
+      if (sessionBeforeReplacement) {
+        const error = new Error('The call changed while switching microphones. Try the selection again.')
+        diagnose('microphone.switch-failed', { device_id: requestedDeviceId, name: error.name, message: error.message, reason: 'call-changed' }, current)
+        throw error
+      }
       deviceId = requestedDeviceId
       diagnose('microphone.preference-changed', { device_id: requestedDeviceId, applied_to_call: false, reason: 'call-changed' }, current)
       return
@@ -48,8 +54,14 @@ export function createMicrophoneInputController({
       diagnose('microphone.switch-failed', { device_id: requestedDeviceId, name: error?.name, message: error?.message }, current)
       throw error
     }
-    if (getSession() !== current) {
+    const sessionAfterReplacement = getSession()
+    if (sessionAfterReplacement !== current) {
       nextTrack.stop()
+      if (sessionAfterReplacement) {
+        const error = new Error('The call changed while switching microphones. Try the selection again.')
+        diagnose('microphone.switch-failed', { device_id: requestedDeviceId, name: error.name, message: error.message, reason: 'call-changed-after-replacement' }, current)
+        throw error
+      }
       deviceId = requestedDeviceId
       diagnose('microphone.preference-changed', { device_id: requestedDeviceId, applied_to_call: false, reason: 'call-ended-during-switch' }, current)
       return

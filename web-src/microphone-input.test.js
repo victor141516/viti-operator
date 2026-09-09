@@ -88,3 +88,27 @@ test('a call ending while replaceTrack is pending cannot leak the candidate into
   assert.equal(replacement.stopped, true)
   assert.equal(controller.deviceId, 'next-call-mic')
 })
+
+test('a replacement call starting mid-switch rejects instead of claiming an unapplied preference', async () => {
+  let markReplacementStarted
+  const replacementStarted = new Promise((resolve) => { markReplacementStarted = resolve })
+  let finishReplacement
+  const replacementGate = new Promise((resolve) => { finishReplacement = resolve })
+  const previous = track('old')
+  const replacement = track('candidate')
+  const sender = { track: previous, async replaceTrack(value) { this.track = value; markReplacementStarted(); await replacementGate } }
+  const original = { connection: { getSenders: () => [sender] } }
+  const next = { connection: { getSenders: () => [] } }
+  let session = original
+  const controller = createMicrophoneInputController({
+    mediaDevices: { async getUserMedia() { return { getAudioTracks: () => [replacement] } } },
+    getSession: () => session,
+  })
+  const switching = controller.setDevice('new-preference')
+  await replacementStarted
+  session = next
+  finishReplacement()
+  await assert.rejects(switching, /call changed while switching microphones/i)
+  assert.equal(replacement.stopped, true)
+  assert.equal(controller.deviceId, '')
+})

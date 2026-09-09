@@ -103,12 +103,14 @@ export function createAudioPreferencesController({
   const canEnumerate = Boolean(mediaDevices?.enumerateDevices)
   const inputSupported = Boolean(canEnumerate && mediaDevices?.getUserMedia)
   const outputSupported = Boolean(canEnumerate && typeof audioElement?.setSinkId === 'function')
+  const outputPickerSupported = Boolean(outputSupported && typeof mediaDevices?.selectAudioOutput === 'function')
 
   const labelsAvailable = () => devices.some((device) => device.kind.startsWith('audio') && Boolean(device.deviceId) && !RESERVED_DEVICE_IDS.has(device.deviceId) && Boolean(device.label))
   const snapshot = () => ({
     busy,
     inputSupported,
     outputSupported,
+    outputPickerSupported,
     permissionNeeded: inputSupported && !labelsAvailable(),
     permissionError: errors.permission,
     inputs: displayDevices(devices, 'audioinput'),
@@ -147,6 +149,7 @@ export function createAudioPreferencesController({
     const noun = KIND_LABELS[kind].singular
     if (!resolution.available) {
       const label = preferences[kind]?.label || `preferred ${noun}`
+      if (kind === 'audiooutput' && outputPickerSupported) return `The speaker “${label}” is unavailable or not authorized; using the system default. Reconnect it or choose a speaker.`
       return `The ${noun} “${label}” is unavailable; using the system default. It will be restored if it reconnects.`
     }
     return resolution.device ? `Using ${resolution.device.label || `the selected ${noun}`}.` : `Using the system default ${noun}.`
@@ -236,6 +239,47 @@ export function createAudioPreferencesController({
           for (const track of stream?.getTracks?.() || []) track.stop()
         }
         return refreshNow()
+      })
+    },
+    chooseOutput() {
+      if (!outputPickerSupported) return Promise.reject(new Error('This browser does not provide a speaker picker.'))
+      let selection
+      try {
+        // This must be invoked synchronously from the click handler so the
+        // browser's transient user activation is still valid.
+        selection = Promise.resolve(mediaDevices.selectAudioOutput()).then(
+          (device) => ({ device }),
+          (error) => ({ error }),
+        )
+      } catch (error) {
+        errors = { ...errors, audiooutput: error?.message || 'The speaker picker could not be opened.' }
+        publish()
+        return Promise.reject(error)
+      }
+      return enqueue(async () => {
+        let selected
+        try {
+          const outcome = await selection
+          if (outcome.error) throw outcome.error
+          selected = outcome.device
+          if (!selected?.deviceId) throw new Error('The browser did not return a usable speaker.')
+          await applyDevice('audiooutput', selected.deviceId)
+        } catch (error) {
+          errors = { ...errors, audiooutput: error?.message || 'The speaker could not be selected.' }
+          publish()
+          throw error
+        }
+        try {
+          devices = [...await mediaDevices.enumerateDevices()]
+        } catch {}
+        if (!devices.some((device) => device.kind === 'audiooutput' && device.deviceId === selected.deviceId)) devices.push(selected)
+        effective = { ...effective, audiooutput: selected.deviceId }
+        preferences = { ...preferences, audiooutput: preferenceForDevice(selected) }
+        errors = { ...errors, audiooutput: '' }
+        details = { ...details, audiooutput: `Using ${selected.label || 'the selected speaker'}.` }
+        persist()
+        publish()
+        return snapshot()
       })
     },
     select(kind, deviceId = '') {

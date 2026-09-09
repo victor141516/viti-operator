@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createAudioPreferencesController, resolveAudioDevice } from './audio-preferences.js'
+import { createMicrophoneInputController } from './microphone-input.js'
 
 function device(kind, deviceId, groupId, label) { return { kind, deviceId, groupId, label } }
 
@@ -75,6 +76,19 @@ test('restores persisted input and output preferences', async () => {
   assert.deepEqual(audioElement.calls, ['speaker-1'])
   assert.equal(controller.snapshot().audioinput.selectedId, 'mic-1')
   assert.equal(controller.snapshot().audiooutput.selectedId, 'speaker-1')
+})
+
+test('startup restoration reaches the voice-side constraint before the first call', async () => {
+  const mediaDevices = fakeMediaDevices([device('audioinput', 'persisted-mic', 'mic-group', 'Saved microphone')])
+  const microphoneInput = createMicrophoneInputController({ mediaDevices, getSession: () => null })
+  const controller = createAudioPreferencesController({
+    mediaDevices,
+    storage: fakeStorage({ audioinput: { deviceId: 'persisted-mic', groupId: 'mic-group', label: 'Saved microphone' }, audiooutput: null }),
+    audioElement: fakeAudioElement(),
+    applyInput: (deviceId) => microphoneInput.setDevice(deviceId),
+  })
+  await controller.start()
+  assert.deepEqual(microphoneInput.constraint(), { deviceId: { exact: 'persisted-mic' } })
 })
 
 test('falls back on Bluetooth departure and restores it when it returns with a new id', async () => {
@@ -155,6 +169,47 @@ test('serialized device changes remain busy until the last queued operation fini
   await refreshing
   assert.equal(controller.snapshot().busy, false)
   assert.equal(snapshots.at(-1).busy, false)
+})
+
+test('opens the native speaker picker synchronously and persists the authorized output', async () => {
+  const selected = device('audiooutput', 'private-output', 'private-group', 'Conference speaker')
+  const mediaDevices = fakeMediaDevices([])
+  let userActivation = false
+  let pickerCalled = false
+  mediaDevices.selectAudioOutput = () => {
+    assert.equal(userActivation, true, 'the picker must run directly in the user activation turn')
+    pickerCalled = true
+    return Promise.resolve(selected)
+  }
+  const storage = fakeStorage()
+  const audioElement = fakeAudioElement()
+  const controller = createAudioPreferencesController({ mediaDevices, storage, audioElement })
+  await controller.start()
+  userActivation = true
+  const choosing = controller.chooseOutput()
+  userActivation = false
+  await choosing
+  assert.equal(pickerCalled, true)
+  assert.equal(audioElement.calls.at(-1), 'private-output')
+  assert.equal(storage.read().audiooutput.deviceId, 'private-output')
+  assert.equal(controller.snapshot().audiooutput.selectedId, 'private-output')
+})
+
+test('a rejected speaker picker leaves the effective and persisted output unchanged', async () => {
+  const current = device('audiooutput', 'current-output', 'current-group', 'Current speaker')
+  const mediaDevices = fakeMediaDevices([current])
+  mediaDevices.selectAudioOutput = () => Promise.reject(new Error('picker cancelled'))
+  const storage = fakeStorage({
+    audioinput: null,
+    audiooutput: { deviceId: current.deviceId, groupId: current.groupId, label: current.label },
+  })
+  const audioElement = fakeAudioElement()
+  const controller = createAudioPreferencesController({ mediaDevices, storage, audioElement })
+  await controller.start()
+  await assert.rejects(controller.chooseOutput(), /picker cancelled/)
+  assert.equal(controller.snapshot().audiooutput.selectedId, 'current-output')
+  assert.equal(storage.read().audiooutput.deviceId, 'current-output')
+  assert.match(controller.snapshot().audiooutput.error, /picker cancelled/)
 })
 
 test('explains browsers without programmatic speaker selection', async () => {
