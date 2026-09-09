@@ -334,16 +334,14 @@ func (a *App) callsWithRecordingTiming() []Call {
 	calls := a.store.Calls()
 	for callIndex := range calls {
 		calls[callIndex].RecordingTracks = append([]RecordingTrack(nil), calls[callIndex].RecordingTracks...)
-		timingChanged := false
 		for trackIndex, track := range calls[callIndex].RecordingTracks {
 			timed := a.recordingTrackTiming(calls[callIndex], track)
 			calls[callIndex].RecordingTracks[trackIndex] = timed
-			timingChanged = timingChanged || timed.OffsetMS != track.OffsetMS || timed.DurationMS != track.DurationMS
-		}
-		// Lazily migrate completed recordings once their final WAV header is
-		// readable. Subsequent history polls then avoid reopening audio files.
-		if timingChanged && calls[callIndex].EndedAt != nil {
-			_ = a.store.SaveCall(calls[callIndex])
+			if calls[callIndex].EndedAt != nil && (timed.OffsetMS != track.OffsetMS || timed.DurationMS != track.DurationMS) {
+				// Persist only the derived fields. Async recording/participant events
+				// may have added data since Calls returned this snapshot.
+				_, _, _ = a.store.UpdateRecordingTrackTiming(calls[callIndex].ID, track.ID, timed.OffsetMS, timed.DurationMS)
+			}
 		}
 	}
 	return calls

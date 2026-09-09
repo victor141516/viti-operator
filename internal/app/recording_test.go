@@ -148,6 +148,37 @@ func TestRecordingTrackTimingUsesCallOffsetAndActualWAVDuration(t *testing.T) {
 	}
 }
 
+func TestRecordingTimingUpdateRetainsTrackAddedAfterSnapshot(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := Call{
+		ID: "call-concurrent", Instance: "default", EngineCallID: "engine-concurrent",
+		StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		RecordingTracks: []RecordingTrack{{ID: "remote", CreatedAt: time.Now().UTC()}},
+	}
+	if err := store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the stale-snapshot window: another event appends a client track
+	// after the call list was read but before derived timing is persisted.
+	_ = store.Calls()
+	if _, found, err := store.AddRecordingTrack("default", "engine-concurrent", RecordingTrack{ID: "client-new"}); err != nil || !found {
+		t.Fatalf("add concurrent track: found=%v err=%v", found, err)
+	}
+	if _, found, err := store.UpdateRecordingTrackTiming(call.ID, "remote", 250, 1_500); err != nil || !found {
+		t.Fatalf("update timing: found=%v err=%v", found, err)
+	}
+	got, ok := store.GetCall(call.ID)
+	if !ok || len(got.RecordingTracks) != 2 {
+		t.Fatalf("recording tracks = %#v; concurrent track was lost", got.RecordingTracks)
+	}
+	if got.RecordingTracks[0].OffsetMS != 250 || got.RecordingTracks[0].DurationMS != 1_500 {
+		t.Fatalf("updated timing = %#v", got.RecordingTracks[0])
+	}
+}
+
 func wavSamples(t *testing.T, wav []byte) []int16 {
 	t.Helper()
 	if len(wav) < 44 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
