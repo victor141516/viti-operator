@@ -32,7 +32,6 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 
 data class AppUiState(
     val status: RuntimeStatus = RuntimeStatus(),
@@ -189,76 +188,8 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
             }
     }
 
-    fun onVoiceEvent(type: String, peer: String = "", cause: String = "", traceId: String = "", participantId: String = "") {
-        val previous = _uiState.value.voice
-        val nextPeer = peer.ifBlank { previous.peer }
-        val detail = when (type) {
-            "connected" -> "Connecting the line…"
-            "registered" -> "Line ready for calls"
-            "incoming" -> "Incoming call from $nextPeer"
-            "calling" -> "Calling $nextPeer…"
-            "ringing" -> "Ringing…"
-            "active" -> "Call in progress"
-            "media" -> when {
-                "sent=true" in cause && "received=true" in cause -> "Call in progress · two-way audio"
-                "sent=true" in cause -> "Call in progress · sending audio"
-                else -> "Call in progress"
-            }
-            "mute-changed" -> previous.detail
-            "dtmf" -> previous.detail
-            "dtmf-failed" -> if (cause.isBlank()) "Could not send the DTMF tone" else cause
-            "ended" -> "Call ended"
-            "failed" -> if (cause.isBlank()) "The call failed" else "The call failed: $cause"
-            "registration-failed" -> if (cause.isBlank()) "Could not register the line" else "Registration failed: $cause"
-            else -> "Telephony disconnected"
-        }
-        // A failed SIP session does not unregister the UA. Return to the ready state so
-        // the user can retry without restarting the app; registration failures remain fatal.
-        val stableState = when (type) {
-            "ended", "failed" -> "registered"
-            "dtmf", "dtmf-failed", "mute-changed" -> previous.state
-            else -> type
-        }
-        _uiState.value = _uiState.value.copy(
-            voice = VoiceUiState(
-                state = stableState,
-                peer = if (type in setOf("ended", "failed")) "" else nextPeer,
-                detail = detail,
-                microphoneMuted = when {
-                    type == "mute-changed" -> cause == "muted=true"
-                    type in setOf("incoming", "calling", "ended", "failed") -> false
-                    else -> previous.microphoneMuted
-                },
-            ),
-        )
-        if (type == "active" && traceId.isNotBlank() && participantId.isNotBlank()) {
-            clientIdentity?.let { identity ->
-                viewModelScope.launch {
-                    runCatching { VitiApi(settings.value).claimRecordingParticipant(traceId, participantId, identity) }
-                }
-            }
-        }
-        recordVoiceDiagnostic(
-            JSONObject()
-                .put("at_ms", System.currentTimeMillis())
-                .put("source", "android-view-model")
-                .put("kind", "voice-state.transition")
-                .put("trace_id", traceId)
-                .put(
-                    "data",
-                    JSONObject()
-                        .put("event", type)
-                        .put("peer", peer)
-                        .put("cause", cause)
-                        .put("previous", previous.toString())
-                        .put("current", _uiState.value.voice.toString()),
-                )
-                .toString(),
-        )
-    }
-
-    fun recordVoiceDiagnostic(payload: String) = viewModelScope.launch {
-        runCatching { VitiApi(settings.value).recordDiagnostic(JSONObject(payload)) }
+    fun setVoiceState(value: VoiceUiState) {
+        _uiState.value = _uiState.value.copy(voice = value)
     }
 
     fun saveSettings(value: ServerSettings) = viewModelScope.launch {

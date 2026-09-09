@@ -1,15 +1,13 @@
 package com.viti.operator.voice
 
 import android.Manifest
-import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
-import android.media.AudioManager
-import android.net.Uri
 import android.os.Handler
 import android.os.Looper
-import android.webkit.JavascriptInterface
+import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.PermissionRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
@@ -19,28 +17,50 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewAssetLoader
-import com.viti.operator.data.VoiceProvisioning
 import com.viti.operator.data.ClientIdentity
+import com.viti.operator.data.VoiceProvisioning
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
-import java.util.UUID
+import org.json.JSONTokener
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
+data class VoiceEngineEvent(
+    val type: String,
+    val peer: String = "",
+    val cause: String = "",
+    val traceId: String = "",
+    val participantId: String = "",
+    val legToken: String = "",
+)
+
+class VoiceCommandException(message: String) : IllegalStateException(message)
+
+/**
+ * Process-owned JsSIP engine. Every command is addressed to one immutable leg
+ * token and is acknowledged by JavaScript before a Telecom callback completes.
+ */
 class VoiceWebViewClient(
-    private val activity: Activity,
+    context: Context,
     private val identity: ClientIdentity,
-    private val onEvent: (type: String, peer: String, cause: String, traceId: String, participantId: String) -> Unit,
+    private val onEvent: (VoiceEngineEvent) -> Unit,
     private val onDiagnostic: (payload: String) -> Unit,
-) {
+) : VoiceEngineControl {
+    private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
-    private val audioManager = activity.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val assetLoader = WebViewAssetLoader.Builder()
-        .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(activity))
+        .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(applicationContext))
         .build()
     private var pageReady = false
     private var pendingProvisioning: VoiceProvisioning? = null
+    private var activeProvisioning: VoiceProvisioning? = null
     private var currentTraceId = ""
 
     @Suppress("SetJavaScriptEnabled")
-    val view: WebView = WebView(activity).apply {
+    val view: WebView = WebView(applicationContext).apply {
         settings.javaScriptEnabled = true
         settings.domStorageEnabled = false
         settings.mediaPlaybackRequiresUserGesture = false
@@ -71,10 +91,13 @@ class VoiceWebViewClient(
 
             override fun onPermissionRequest(request: PermissionRequest) {
                 mainHandler.post {
-                    val canRecord = ContextCompat.checkSelfPermission(activity, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+                    val canRecord = hasMicrophonePermission()
                     val audioOnly = request.resources.filter { it == PermissionRequest.RESOURCE_AUDIO_CAPTURE }.toTypedArray()
                     val granted = canRecord && audioOnly.isNotEmpty()
-                    recordNative("webview.permission-decided", JSONObject().put("resources", request.resources.joinToString()).put("granted", granted))
+                    recordNative(
+                        "webview.permission-decided",
+                        JSONObject().put("resources", request.resources.joinToString()).put("granted", granted),
+                    )
                     if (granted) request.grant(audioOnly) else request.deny()
                 }
             }
@@ -82,39 +105,52 @@ class VoiceWebViewClient(
         loadUrl(VOICE_PAGE)
     }
 
-    fun start(provisioning: VoiceProvisioning) {
+    override fun hasMicrophonePermission(): Boolean =
+        ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    /** Avoids tearing down an active leg when a recreated Activity repeats provisioning. */
+    override fun start(provisioning: VoiceProvisioning) {
+        if (provisioning == activeProvisioning || provisioning == pendingProvisioning) return
         pendingProvisioning = provisioning
         recordNative("voice.start-requested", JSONObject().put("provisioning", provisioning.toString()))
         if (pageReady) startJavascript(provisioning)
     }
 
-    fun call(number: String) {
-        currentTraceId = UUID.randomUUID().toString()
-        recordNative("voice.call-requested", JSONObject().put("number", number))
-        evaluate("window.vitiVoiceCall(${JSONObject.quote(number)},${JSONObject.quote(currentTraceId)})")
+    override suspend fun call(legToken: String, number: String, traceId: String) =
+        command("call", legToken, JSONObject().put("number", number).put("trace_id", traceId))
+
+    override suspend fun answer(legToken: String) = command("answer", legToken)
+    override suspend fun reject(legToken: String) = command("reject", legToken)
+    override suspend fun hangup(legToken: String) = command("hangup", legToken)
+    override suspend fun setMuted(legToken: String, muted: Boolean) =
+        command("mute", legToken, JSONObject().put("muted", muted))
+
+    override suspend fun setTelecomMuted(legToken: String, muted: Boolean) =
+        command("telecom-muted", legToken, JSONObject().put("muted", muted))
+
+    override suspend fun setSystemInactive(legToken: String, inactive: Boolean) =
+        command("inactive", legToken, JSONObject().put("inactive", inactive))
+
+    override suspend fun sendDtmf(legToken: String, tone: Char) =
+        command("dtmf", legToken, JSONObject().put("tone", tone.toString()))
+
+    /** The hidden view is retained by the call service, not by an Activity. */
+    fun detachFromUi() {
+        (view.parent as? ViewGroup)?.removeView(view)
     }
 
-    fun answer() { recordNative("voice.answer-requested"); evaluate("window.vitiVoiceAnswer()") }
-    fun sendDtmf(tone: Char) {
-        recordNative("voice.dtmf-requested", JSONObject().put("tone", tone.toString()))
-        evaluate("window.vitiVoiceDtmf(${JSONObject.quote(tone.toString())})")
-    }
-    fun reject() { recordNative("voice.reject-requested"); evaluate("window.vitiVoiceReject()") }
-    fun hangup() { recordNative("voice.hangup-requested"); evaluate("window.vitiVoiceHangup()") }
-    fun setMuted(muted: Boolean) {
-        recordNative("voice.mute-requested", JSONObject().put("muted", muted))
-        evaluate("window.vitiVoiceMute($muted)")
-    }
-
-    fun destroy() {
+    override fun destroy() {
         recordNative("voice.destroy-requested")
-        evaluate("window.vitiVoiceHangup()")
-        view.removeJavascriptInterface("VitiAndroid")
-        view.destroy()
-        audioManager.mode = AudioManager.MODE_NORMAL
+        mainHandler.post {
+            view.removeJavascriptInterface("VitiAndroid")
+            (view.parent as? ViewGroup)?.removeView(view)
+            view.destroy()
+        }
     }
 
     private fun startJavascript(provisioning: VoiceProvisioning) {
+        pendingProvisioning = null
+        activeProvisioning = provisioning
         val payload = JSONObject()
             .put("enabled", provisioning.enabled)
             .put("websocket_url", provisioning.websocketUrl)
@@ -135,10 +171,44 @@ class VoiceWebViewClient(
         evaluate("window.vitiVoiceStart(${JSONObject.quote(payload)},${JSONObject.quote(identityPayload)})")
     }
 
+    private suspend fun command(action: String, legToken: String, args: JSONObject = JSONObject()) {
+        require(legToken.isNotBlank()) { "A voice leg token is required" }
+        val payload = JSONObject().put("action", action).put("leg_token", legToken).put("args", args).toString()
+        val script = "window.vitiVoiceCommand(${JSONObject.quote(payload)})"
+        recordNative("voice.command-requested", JSONObject().put("action", action).put("leg_token", legToken))
+        val raw = withTimeout(COMMAND_TIMEOUT_MS) { evaluateAwait(script) }
+        val encoded = runCatching { JSONTokener(raw).nextValue() as? String }.getOrNull()
+            ?: throw VoiceCommandException("The voice engine returned an invalid acknowledgement")
+        val response = runCatching { JSONObject(encoded) }.getOrElse {
+            throw VoiceCommandException("The voice engine returned an invalid acknowledgement")
+        }
+        if (!response.optBoolean("ok")) {
+            throw VoiceCommandException(response.optString("error", "The voice command failed"))
+        }
+        if (response.optString("leg_token") != legToken) {
+            throw VoiceCommandException("The voice engine acknowledged a different call leg")
+        }
+        recordNative("voice.command-acknowledged", JSONObject().put("action", action).put("leg_token", legToken))
+    }
+
+    private suspend fun evaluateAwait(script: String): String = withContext(Dispatchers.Main.immediate) {
+        suspendCancellableCoroutine { continuation ->
+            if (!pageReady) {
+                continuation.resumeWithException(VoiceCommandException("The voice engine is not ready"))
+                return@suspendCancellableCoroutine
+            }
+            view.evaluateJavascript(script) { result ->
+                if (continuation.isActive) continuation.resume(result)
+            }
+        }
+    }
+
     private fun evaluate(script: String) {
-        recordNative("webview.evaluate-requested", JSONObject().put("script", script))
-        view.evaluateJavascript(script) { result ->
-            recordNative("webview.evaluate-completed", JSONObject().put("script", script).put("result", result))
+        mainHandler.post {
+            recordNative("webview.evaluate-requested", JSONObject().put("script", script))
+            view.evaluateJavascript(script) { result ->
+                recordNative("webview.evaluate-completed", JSONObject().put("script", script).put("result", result))
+            }
         }
     }
 
@@ -166,29 +236,25 @@ class VoiceWebViewClient(
                 onDiagnostic(body.toString())
                 return
             }
-            val peer = body.optString("from", body.optString("to"))
-            val traceId = body.optString("trace_id")
-            val participantId = body.optString("participant_id")
             val cause = when (type) {
                 "media" -> "sent=${body.optBoolean("sent")},received=${body.optBoolean("received")}"
                 "mute-changed" -> "muted=${body.optBoolean("muted")}"
                 else -> body.optString("cause")
             }
-            mainHandler.post {
-                // Do not switch to communication routing while an incoming call
-                // is merely ringing: some devices then route or suppress the
-                // ringtone as if call audio had already started.
-                if (type in setOf("calling", "ringing", "active", "media")) {
-                    audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
-                } else if (type in setOf("ended", "failed")) {
-                    audioManager.mode = AudioManager.MODE_NORMAL
-                }
-                onEvent(type, peer, cause, traceId, participantId)
-            }
+            val event = VoiceEngineEvent(
+                type = type,
+                peer = body.optString("from", body.optString("to")),
+                cause = cause,
+                traceId = body.optString("trace_id"),
+                participantId = body.optString("participant_id"),
+                legToken = body.optString("leg_token"),
+            )
+            mainHandler.post { onEvent(event) }
         }
     }
 
     companion object {
         private const val VOICE_PAGE = "https://appassets.androidplatform.net/assets/android-voice.html"
+        private const val COMMAND_TIMEOUT_MS = 4_000L
     }
 }

@@ -7,7 +7,13 @@
          the user has allowed that behavior. -->
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_CONNECT"
+        android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
@@ -37,6 +43,15 @@
             android:name=".auth.RemoteAuthService"
             android:exported="false"
             android:foregroundServiceType="remoteMessaging" />
+
+        <service
+            android:name=".voice.VoiceCallService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Persistent private VoIP signaling for incoming Viti service calls" />
+        </service>
 
         <provider
             android:name="rikka.shizuku.ShizukuProvider"

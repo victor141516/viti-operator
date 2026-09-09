@@ -5,12 +5,15 @@ import { createMicrophoneInputController } from './microphone-input.js'
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
   let session = null
+  const sessionsByLegToken = new Map()
   let testAudio = null
   let ringback = null
   let incomingRing = null
   let incomingAudioContext = null
   let endTone = null
-  let localHangup = false
+  let pendingLegToken = ''
+  let telecomMuted = false
+  let systemInactive = false
   let iceServers = []
   const peerConfig = () => ({
     iceServers,
@@ -31,9 +34,13 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   let diagnosticsEnabled = false
   const sessionId = (value) => value?.request?.call_id || value?._request?.call_id || ''
   const requestHeader = (value, name) => value?.request?.getHeader?.(name) || value?._request?.getHeader?.(name) || ''
+  const legToken = (value = session) => value?.__vitiLegToken || ''
   const traceId = (value = session) => sessionTraceIDs.get(value) || requestHeader(value, 'X-Viti-Trace-ID') || pendingTraceID || sessionId(value)
   const participantId = (value = session) => requestHeader(value, 'X-Viti-Participant-ID') || clientId
-  const emit = (type, detail = {}) => onEvent(type, { participant_id: detail.participant_id || participantId(), client_id: clientId, ...detail, trace_id: detail.trace_id || traceId() })
+  const emit = (type, detail = {}, current = session) => onEvent(type, {
+    participant_id: detail.participant_id || participantId(current), client_id: clientId,
+    ...detail, trace_id: detail.trace_id || traceId(current), leg_token: detail.leg_token || legToken(current),
+  })
   const microphoneMute = createMicrophoneMuteController((muted) => {
     diagnose('microphone.mute-changed', { muted })
     emit('mute-changed', { muted })
@@ -44,8 +51,8 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     emit('diagnostic', {
     at: new Date().toISOString(), at_ns: Math.round((performance.timeOrigin + performance.now()) * 1e6),
     source: /Android/i.test(navigator.userAgent) ? 'android-webview' : 'web-voice',
-    client_id: clientId, session_id: sessionId(current), trace_id: traceId(current), kind, data,
-    })
+    client_id: clientId, session_id: sessionId(current), trace_id: traceId(current), leg_token: legToken(current), kind, data,
+    }, current)
   }
   const microphoneInput = createMicrophoneInputController({
     mediaDevices: navigator.mediaDevices,
@@ -53,6 +60,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     isMuted: () => microphoneMute.muted,
     diagnose,
   })
+  const applySystemAudioState = (current = session) => {
+    microphoneMute.setSuppressed(telecomMuted || systemInactive, current)
+    if (audioElement) audioElement.muted = systemInactive
+  }
 
   if (!globalThis.__vitiGlobalDiagnosticsBound) {
     globalThis.__vitiGlobalDiagnosticsBound = true
@@ -228,12 +239,17 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   }
 
   const bindSession = (next) => {
-    if (next.__vitiBound) return
+    if (next.__vitiBound) return legToken(next)
     next.__vitiBound = true
+    next.__vitiLegToken = next.__vitiLegToken || (
+      next.direction === 'outgoing' ? pendingLegToken : ''
+    ) || globalThis.crypto?.randomUUID?.() || `leg-${Date.now()}-${Math.random()}`
+    pendingLegToken = ''
+    sessionsByLegToken.set(next.__vitiLegToken, next)
     const currentTraceID = traceId(next) || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
     sessionTraceIDs.set(next, currentTraceID)
     pendingTraceID = ''
-    session = next
+    if (!session) session = next
     diagnose('session.created', {
       direction: next.direction, local_identity: next.local_identity?.toString?.(),
       remote_identity: next.remote_identity?.toString?.(), request: next.request?.toString?.(),
@@ -241,7 +257,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     if (next.direction === 'incoming') {
       const from = next.remote_identity?.uri?.user || 'Private number'
       startIncomingRing()
-      emit('incoming', { from })
+      emit('incoming', { from }, next)
     }
     for (const name of ['connecting', 'sending', 'peerconnection', 'sdp', 'icecandidate', 'getusermediafailed', 'hold', 'unhold', 'muted', 'unmuted', 'newDTMF', 'newInfo', 'reinvite', 'update', 'refer', 'replaces']) {
       next.on(name, (event = {}) => diagnose(`session.${name.toLowerCase()}`, {
@@ -274,7 +290,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       const reason = event?.response?.reason_phrase || ''
       diagnose('session.progress', { code, reason, response: event?.response?.toString?.() }, next)
       if (next.direction !== 'outgoing') return
-      emit('ringing', { code, reason })
+      emit('ringing', { code, reason }, next)
       if (code === 183) stopRingback('early-media')
       else if (code === 180) startRingback()
     })
@@ -322,14 +338,14 @@ export function createVoice(onEvent, audioElement, identity = {}) {
             if (report.type === 'inbound-rtp' && report.kind === 'audio') received += report.bytesReceived || 0
           })
           diagnose('peer.stats', { reports }, next)
-          emit('media', { sent: sent > 0, received: received > 0 })
+          emit('media', { sent: sent > 0, received: received > 0 }, next)
         } catch (error) { diagnose('peer.stats.failed', { name: error?.name, message: error?.message }, next) }
       }, 1000)
       snapshot('peer.monitoring-started')
-      microphoneMute.apply(next)
+      applySystemAudioState(next)
     }
-    next.on('accepted', (event) => { next.__vitiWasActive = true; stopRingback('accepted'); stopIncomingRing('accepted'); diagnose('session.accepted', { response: event?.response?.toString?.() }, next); microphoneMute.apply(next); emit('active'); monitorConnection(next.connection) })
-    next.on('confirmed', (event) => { next.__vitiWasActive = true; stopRingback('confirmed'); stopIncomingRing('confirmed'); diagnose('session.confirmed', { ack: event?.ack?.toString?.() }, next); microphoneMute.apply(next); emit('active'); monitorConnection(next.connection) })
+    next.on('accepted', (event) => { next.__vitiWasActive = true; stopRingback('accepted'); stopIncomingRing('accepted'); diagnose('session.accepted', { response: event?.response?.toString?.() }, next); applySystemAudioState(next); emit('active', {}, next); monitorConnection(next.connection) })
+    next.on('confirmed', (event) => { next.__vitiWasActive = true; stopRingback('confirmed'); stopIncomingRing('confirmed'); diagnose('session.confirmed', { ack: event?.ack?.toString?.() }, next); applySystemAudioState(next); emit('active', {}, next); monitorConnection(next.connection) })
     const stopTestAudio = () => {
       if (!testAudio) return
       try { testAudio.oscillator.stop() } catch {}
@@ -340,10 +356,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       if (wasCurrent) session = null
+      sessionsByLegToken.delete(legToken(next))
       if (wasCurrent) microphoneInput.release()
-      microphoneMute.reset()
-      localHangup = false
-      const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }) }
+      if (wasCurrent) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+      const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }, next) }
       if (next.__vitiWasActive) playEndTone('remote-ended').finally(finish)
       else finish()
     })
@@ -351,16 +367,22 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       if (wasCurrent) session = null
+      sessionsByLegToken.delete(legToken(next))
       if (wasCurrent) microphoneInput.release()
-      microphoneMute.reset()
-      const endedLocally = localHangup
-      localHangup = false
-      const finish = () => { if (!next.__vitiLocallyEnded) emit(endedLocally ? 'ended' : 'failed', { trace_id: traceId(next), cause: event?.cause || '' }) }
+      if (wasCurrent) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+      const finish = () => { if (!next.__vitiLocallyEnded) emit('failed', { trace_id: traceId(next), cause: event?.cause || '' }, next) }
       if (next.__vitiWasActive) playEndTone('active-call-failed').finally(finish)
       else finish()
     })
     next.on('peerconnection', ({ peerconnection }) => monitorConnection(peerconnection))
     monitorConnection(next.connection)
+    return legToken(next)
+  }
+
+  const sessionFor = (requestedLegToken = '') => {
+    const target = requestedLegToken ? sessionsByLegToken.get(requestedLegToken) : session
+    if (!target) throw new Error(requestedLegToken ? 'This call leg is no longer available' : 'There is no local call')
+    return target
   }
 
   return {
@@ -380,11 +402,17 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       ua.on('newRTCSession', ({ session: next, request }) => { diagnose('ua.new-session', { request: request?.toString?.() }, next); bindSession(next) })
       ua.start()
     },
-    call(number, suppliedTraceID = '') {
+    call(number, suppliedTraceID = '', suppliedLegToken = '') {
       if (!ua || !ua.isRegistered()) throw new Error('The WebRTC phone is not registered yet')
+      if (session) throw new Error('This client already has a call')
       microphoneMute.reset()
+      telecomMuted = false
+      systemInactive = false
+      if (audioElement) audioElement.muted = false
       stopIncomingRing('outgoing-call')
       pendingTraceID = suppliedTraceID || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
+      pendingLegToken = suppliedLegToken || globalThis.crypto?.randomUUID?.() || `leg-${Date.now()}-${Math.random()}`
+      const requestedLegToken = pendingLegToken
       const options = {
         mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(),
         extraHeaders: [`X-Viti-Trace-ID: ${pendingTraceID}`, `X-Viti-Client-ID: ${clientId}`],
@@ -396,39 +424,72 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         testAudio = { context, oscillator }; options.mediaStream = destination.stream
       }
       diagnose('action.call', { number, trace_id: pendingTraceID })
-      session = ua.call(`sip:${number}@${ua.configuration.uri.host}`, options)
-      bindSession(session)
-      emit('calling', { to: number, trace_id: traceId(session) })
+      const outgoing = ua.call(`sip:${number}@${ua.configuration.uri.host}`, options)
+      outgoing.__vitiLegToken = outgoing.__vitiLegToken || requestedLegToken
+      session = outgoing
+      bindSession(outgoing)
+      emit('calling', { to: number, trace_id: traceId(outgoing) }, outgoing)
+      return legToken(outgoing)
     },
-    answer() { if (session) { stopIncomingRing('answer'); diagnose('action.answer'); session.answer({ mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(), extraHeaders: [`X-Viti-Client-ID: ${clientId}`] }) } },
-    reject() { if (session) { stopIncomingRing('reject'); diagnose('action.reject'); session.terminate({ status_code: 603, reason_phrase: 'Decline' }) } },
-    hangup() {
-      if (!session) return
-      const ending = session
+    answer(requestedLegToken = '') { const target = sessionFor(requestedLegToken); stopIncomingRing('answer'); diagnose('action.answer', {}, target); target.answer({ mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(), extraHeaders: [`X-Viti-Client-ID: ${clientId}`] }); return true },
+    reject(requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
+      stopIncomingRing('reject')
+      diagnose('action.reject', {}, target)
+      target.__vitiLocallyEnded = true
+      try {
+        target.terminate({ status_code: 603, reason_phrase: 'Decline' })
+      } catch (error) {
+        target.__vitiLocallyEnded = false
+        throw error
+      }
+      sessionsByLegToken.delete(legToken(target))
+      if (session === target) session = null
+      emit('ended', { trace_id: traceId(target) }, target)
+      return true
+    },
+    hangup(requestedLegToken = '') {
+      const ending = sessionFor(requestedLegToken)
       diagnose('action.hangup', {}, ending)
       ending.__vitiLocallyEnded = true
-      localHangup = false
       stopRingback('local-hangup')
       stopIncomingRing('local-hangup')
-      microphoneInput.release()
+      if (session === ending) microphoneInput.release()
       if (session === ending) session = null
-      microphoneMute.reset()
+      sessionsByLegToken.delete(legToken(ending))
+      if (!session) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
       const finish = () => {
-        try { ending.terminate() } finally { emit('ended', { trace_id: traceId(ending) }) }
+        try { ending.terminate() } finally { emit('ended', { trace_id: traceId(ending) }, ending) }
       }
       if (ending.__vitiWasActive) playEndTone('local-hangup').finally(finish)
       else finish()
+      return true
     },
-    mute(value) {
-      if (!session) return microphoneMute.muted
+    mute(value, requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
       diagnose('action.mute', { value: Boolean(value) })
-      return microphoneMute.set(value, session)
+      return microphoneMute.set(value, target)
+    },
+    setTelecomMuted(value, requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
+      telecomMuted = Boolean(value)
+      applySystemAudioState(target)
+      diagnose('action.telecom-muted', { value: telecomMuted }, target)
+      return true
+    },
+    setSystemInactive(value, requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
+      systemInactive = Boolean(value)
+      applySystemAudioState(target)
+      diagnose('action.system-inactive', { value: systemInactive }, target)
+      return true
     },
     setAudioInput: (deviceId) => microphoneInput.setDevice(deviceId),
-    dtmf(tone) {
-      if (!session || !session.isEstablished()) throw new Error('The call is not connected yet')
+    dtmf(tone, requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
+      if (!target.isEstablished()) throw new Error('The call is not connected yet')
       if (!/^[0-9*#]$/.test(String(tone))) throw new Error('Invalid DTMF key')
-      const audioSender = session.connection?.getSenders?.().find((sender) => sender.track?.kind === 'audio')
+      const audioSender = target.connection?.getSenders?.().find((sender) => sender.track?.kind === 'audio')
       const dtmfSender = audioSender?.dtmf
       if (!dtmfSender?.canInsertDTMF) throw new Error('This browser cannot send DTMF tones in this call')
       if (!monitoredDTMFSenders.has(dtmfSender)) {
@@ -436,9 +497,9 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         dtmfSender.addEventListener?.('tonechange', (event) => diagnose('dtmf.tone-change', { tone: event.tone }))
       }
       diagnose('action.dtmf', { tone, transport: 'RFC4733', duration_ms: 160, inter_tone_gap_ms: 100 })
-      session.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
-      emit('dtmf', { tone: String(tone) })
+      target.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
+      emit('dtmf', { tone: String(tone) }, target)
     },
-    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); if (session) session.terminate(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null },
+    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); for (const current of sessionsByLegToken.values()) current.terminate(); sessionsByLegToken.clear(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null; telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false },
   }
 }

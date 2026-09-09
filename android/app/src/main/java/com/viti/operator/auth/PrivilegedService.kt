@@ -30,7 +30,7 @@ class PrivilegedService() : IPrivilegedService.Stub() {
     }
 
     override fun enableRemoteSimMode(): String {
-		val previousMask = parseNetworkMask(runPhoneCommand("get-allowed-network-types-for-users"))
+        val previousMask = parseNetworkMask(runPhoneCommand("get-allowed-network-types-for-users"))
         try {
             runPhoneCommand("set-allowed-network-types-for-users", LTE_NR_ONLY_MASK)
             runPhoneCommand("ims", "disable")
