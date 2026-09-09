@@ -48,6 +48,12 @@ test('muted state is applied to replacement media in the same call', () => {
   const replacement = fakeSession()
 
   controller.set(true, original)
+  // Model JsSIP's no-op when its internal audio-muted flag is already true:
+  // the replacement sender starts enabled and our fallback must mute it.
+  replacement.mute = function (options) {
+    assert.deepEqual(options, { audio: true })
+    this.muteCalls++
+  }
   controller.apply(replacement)
 
   assert.equal(controller.muted, true)
