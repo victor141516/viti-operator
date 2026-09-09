@@ -244,6 +244,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
+		EventID      string   `json:"event_id,omitempty"`
 		Instance     string   `json:"instance"`
 		Event        string   `json:"event"`
 		CallID       string   `json:"call_id,omitempty"`
@@ -267,7 +268,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if request.Event == "sms_protocol" {
-		a.ingestSMSProtocolEvent(w, request.Instance, request.Args)
+		a.ingestSMSProtocolEvent(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
 	}
 	var call Call
@@ -618,10 +619,11 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
+	deadline := now.Add(smsDeliveryReportWindow)
 	message := Message{
 		ID: id, Direction: DirectionOutgoing, To: request.To, Text: request.Text,
 		State: "sending", DeliveryState: "pending", StatusDetail: "Queued for local submission.",
-		CreatedAt: now, UpdatedAt: now,
+		DeliveryReportDeadline: &deadline, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := a.store.SaveMessage(message); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not persist message")
@@ -654,7 +656,7 @@ func (a *App) deliverMessage(message Message) {
 	}
 }
 
-func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, args []string) {
+func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, args []string, recordedAtNS int64) {
 	if len(args) < 9 {
 		writeError(w, http.StatusBadRequest, "invalid SMS protocol event")
 		return
@@ -701,13 +703,30 @@ func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, arg
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	var serviceCentreTime *time.Time
+	if len(args) > 9 {
+		raw := strings.TrimSpace(args[9])
+		if raw != "" && raw != "-1" {
+			seconds, parseErr := strconv.ParseInt(raw, 10, 64)
+			if parseErr != nil || seconds <= 0 {
+				writeError(w, http.StatusBadRequest, "invalid service-centre timestamp")
+				return
+			}
+			parsed := time.Unix(seconds, 0).UTC()
+			serviceCentreTime = &parsed
+		}
+	}
 	event := SMSProtocolEvent{
 		Instance: strings.TrimSpace(instance), Phase: strings.TrimSpace(args[0]),
 		MessageID: strings.TrimSpace(args[1]), Destination: strings.TrimSpace(args[2]),
 		Part: part, Parts: parts, RPReference: rpReference, TPReference: tpReference,
-		Status: status, Cause: cause,
+		Status: status, Cause: cause, ServiceCentreTime: serviceCentreTime,
 	}
-	message, changed, err := a.store.ApplySMSProtocolEvent(event, time.Now().UTC())
+	eventTime := time.Now().UTC()
+	if recordedAtNS > 0 {
+		eventTime = time.Unix(0, recordedAtNS).UTC()
+	}
+	message, changed, err := a.store.ApplySMSProtocolEvent(event, eventTime)
 	if errors.Is(err, ErrSMSReportNotCorrelated) || errors.Is(err, ErrSMSReportAmbiguous) {
 		a.logger.Warn("SMS protocol event was not applied", "event", event, "error", err)
 		w.WriteHeader(http.StatusNoContent)

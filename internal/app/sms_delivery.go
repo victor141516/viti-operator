@@ -11,6 +11,7 @@ import (
 )
 
 const smsDeliveryReportWindow = 24 * time.Hour
+const smsServiceCentreTimeTolerance = 15 * time.Minute
 
 var (
 	ErrSMSReportNotCorrelated = errors.New("SMS delivery report could not be correlated")
@@ -18,16 +19,17 @@ var (
 )
 
 type SMSProtocolEvent struct {
-	Instance    string
-	Phase       string
-	MessageID   string
-	Destination string
-	Part        int
-	Parts       int
-	RPReference *int
-	TPReference *int
-	Status      *int
-	Cause       *int
+	Instance          string
+	Phase             string
+	MessageID         string
+	Destination       string
+	Part              int
+	Parts             int
+	RPReference       *int
+	TPReference       *int
+	Status            *int
+	Cause             *int
+	ServiceCentreTime *time.Time
 }
 
 func cloneMessage(message Message) Message {
@@ -40,6 +42,14 @@ func cloneMessage(message Message) Message {
 		if message.Parts[index].TPReference != nil {
 			value := *message.Parts[index].TPReference
 			message.Parts[index].TPReference = &value
+		}
+		if message.Parts[index].SubmittedAt != nil {
+			value := *message.Parts[index].SubmittedAt
+			message.Parts[index].SubmittedAt = &value
+		}
+		if message.Parts[index].ServiceCentreTime != nil {
+			value := *message.Parts[index].ServiceCentreTime
+			message.Parts[index].ServiceCentreTime = &value
 		}
 	}
 	if message.DeliveryReportDeadline != nil {
@@ -94,29 +104,37 @@ func (s *Store) ApplySMSProtocolEvent(event SMSProtocolEvent, now time.Time) (Me
 
 func (s *Store) correlateSMSLocked(event SMSProtocolEvent) (string, error) {
 	if id := strings.TrimSpace(event.MessageID); id != "" {
-		if message, ok := s.messages[id]; ok && message.Direction == DirectionOutgoing {
-			if event.Destination != "" && strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
-				return "", ErrSMSReportNotCorrelated
-			}
-			return id, nil
+		message, ok := s.messages[id]
+		if !ok || message.Direction != DirectionOutgoing {
+			return "", ErrSMSReportNotCorrelated
 		}
+		if event.Destination != "" && strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
+			return "", ErrSMSReportNotCorrelated
+		}
+		if event.ServiceCentreTime != nil && messageHasConflictingSubmissionTime(message, event) {
+			return "", ErrSMSReportNotCorrelated
+		}
+		return id, nil
 	}
-	candidates := make([]Message, 0, 1)
+	candidates := make(map[string]struct{})
 	for _, message := range s.messages {
 		if message.Direction != DirectionOutgoing || strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
-			continue
-		}
-		if message.DeliveryState == "delivered" || message.DeliveryState == "failed" {
 			continue
 		}
 		for _, part := range message.Parts {
 			if event.Instance != "" && part.Instance != "" && event.Instance != part.Instance {
 				continue
 			}
-			if sameReference(part.RPReference, event.RPReference) || sameReference(part.TPReference, event.TPReference) {
-				candidates = append(candidates, message)
-				break
+			if !sameReference(part.RPReference, event.RPReference) && !sameReference(part.TPReference, event.TPReference) {
+				continue
 			}
+			if event.ServiceCentreTime != nil {
+				if part.SubmittedAt == nil || !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime) {
+					continue
+				}
+			}
+			candidates[message.ID] = struct{}{}
+			break
 		}
 	}
 	if len(candidates) == 0 {
@@ -125,11 +143,37 @@ func (s *Store) correlateSMSLocked(event SMSProtocolEvent) (string, error) {
 	if len(candidates) != 1 {
 		return "", ErrSMSReportAmbiguous
 	}
-	return candidates[0].ID, nil
+	for id := range candidates {
+		return id, nil
+	}
+	panic("unreachable SMS correlation result")
+}
+
+func messageHasConflictingSubmissionTime(message Message, event SMSProtocolEvent) bool {
+	for _, part := range message.Parts {
+		if event.Part > 0 && part.Part != event.Part {
+			continue
+		}
+		if event.Instance != "" && part.Instance != "" && event.Instance != part.Instance {
+			continue
+		}
+		if part.SubmittedAt != nil {
+			return !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime)
+		}
+	}
+	return false
 }
 
 func sameReference(left, right *int) bool {
 	return left != nil && right != nil && *left == *right
+}
+
+func smsTimesClose(left, right time.Time) bool {
+	delta := left.Sub(right)
+	if delta < 0 {
+		delta = -delta
+	}
+	return delta <= smsServiceCentreTimeTolerance
 }
 
 func applySMSProtocolEvent(message *Message, event SMSProtocolEvent, now time.Time) (bool, error) {
@@ -165,6 +209,12 @@ func applySMSProtocolEvent(message *Message, event SMSProtocolEvent, now time.Ti
 	}
 	changed = setReference(&part.RPReference, event.RPReference) || changed
 	changed = setReference(&part.TPReference, event.TPReference) || changed
+	if phase == "submitted" {
+		changed = setTime(&part.SubmittedAt, &now) || changed
+	}
+	if phase == "status_report" {
+		changed = setTime(&part.ServiceCentreTime, event.ServiceCentreTime) || changed
+	}
 
 	state, statusCode, failureCode, failureReason, detail, err := smsProtocolOutcome(event)
 	if err != nil {
@@ -238,6 +288,15 @@ func setReference(target **int, value *int) bool {
 		return false
 	}
 	copy := *value
+	*target = &copy
+	return true
+}
+
+func setTime(target **time.Time, value *time.Time) bool {
+	if value == nil || *target != nil {
+		return false
+	}
+	copy := value.UTC()
 	*target = &copy
 	return true
 }
@@ -346,12 +405,17 @@ func recomputeSMSMessage(message *Message) {
 		return
 	}
 	message.DeliveryState = "pending"
-	if delivered+accepted > 0 {
+	allSegmentsAccepted := len(message.Parts) >= expected && delivered+unknown+accepted == expected
+	if allSegmentsAccepted {
 		message.State = "accepted"
-	} else if submitted > 0 {
+	} else if submitted+delivered+unknown+accepted > 0 {
 		message.State = "submitted"
 	}
-	message.StatusDetail = latestSMSPartDetail(message.Parts)
+	if !allSegmentsAccepted && (len(message.Parts) < expected || delivered+unknown+accepted < expected) {
+		message.StatusDetail = fmt.Sprintf("Submitted %d of %d message segments; waiting for carrier acknowledgement of every segment.", len(message.Parts), expected)
+	} else {
+		message.StatusDetail = latestSMSPartDetail(message.Parts)
+	}
 }
 
 func latestSMSPartDetail(parts []SMSPartStatus) string {
@@ -405,6 +469,7 @@ func applySMSSubmitResult(message *Message, result SMSSubmitResult, submitErr er
 			}
 			if !result.DeliveryReportExpected && len(message.Parts) == 0 {
 				message.DeliveryState = "unknown"
+				message.DeliveryReportDeadline = nil
 			}
 			if len(message.Parts) == 0 {
 				message.StatusDetail = result.Detail
@@ -418,6 +483,7 @@ func applySMSSubmitResult(message *Message, result SMSSubmitResult, submitErr er
 					message.DeliveryState = "pending"
 				} else {
 					message.DeliveryState = "unknown"
+					message.DeliveryReportDeadline = nil
 				}
 				message.StatusDetail = result.Detail
 			}
@@ -425,6 +491,7 @@ func applySMSSubmitResult(message *Message, result SMSSubmitResult, submitErr er
 	}
 	if message.State == "accepted" && !result.DeliveryReportExpected && message.DeliveryState == "pending" && len(message.Parts) == 0 {
 		message.DeliveryState = "unknown"
+		message.DeliveryReportDeadline = nil
 	}
 	if !messagesEqualForSMS(before, *message) {
 		message.UpdatedAt = now
@@ -488,27 +555,36 @@ func (s *Store) ExpireSMSDeliveryReports(now time.Time) ([]Message, error) {
 }
 
 func normalizeStoredMessage(message Message, now time.Time) Message {
-	if message.Direction != DirectionOutgoing || message.DeliveryState != "" {
+	if message.Direction != DirectionOutgoing {
 		return message
 	}
-	switch message.State {
-	case "sending":
-		message.DeliveryState = "pending"
-		deadline := message.UpdatedAt.Add(smsDeliveryReportWindow)
-		if deadline.Before(now) {
+	if message.DeliveryState == "" {
+		switch message.State {
+		case "sending":
+			message.DeliveryState = "pending"
+		case "submitted", "accepted":
 			message.DeliveryState = "unknown"
-			message.StatusDetail = "No delivery report metadata exists for this legacy message."
+			message.StatusDetail = "This legacy message has no persisted destination delivery report."
+		case "delivered":
+			message.DeliveryState = "delivered"
+			message.StatusDetail = "The legacy adapter recorded verified delivery; this is not a read receipt."
+		case "failed":
+			message.DeliveryState = "failed"
+		}
+	}
+	if message.DeliveryState == "pending" && message.DeliveryReportDeadline == nil {
+		basis := message.UpdatedAt
+		if basis.IsZero() {
+			basis = message.CreatedAt
+		}
+		deadline := basis.Add(smsDeliveryReportWindow)
+		if basis.IsZero() || !deadline.After(now) {
+			message.DeliveryState = "unknown"
+			message.State = "unknown"
+			message.StatusDetail = "The manager restarted before the submission outcome was persisted; carrier submission is unknown."
 		} else {
 			message.DeliveryReportDeadline = &deadline
 		}
-	case "submitted", "accepted":
-		message.DeliveryState = "unknown"
-		message.StatusDetail = "This legacy message has no persisted destination delivery report."
-	case "delivered":
-		message.DeliveryState = "delivered"
-		message.StatusDetail = "The legacy adapter recorded verified delivery; this is not a read receipt."
-	case "failed":
-		message.DeliveryState = "failed"
 	}
 	return message
 }

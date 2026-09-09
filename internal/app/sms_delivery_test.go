@@ -51,7 +51,7 @@ func TestSMSStatusReportCanArriveBeforeSubmittedAndCompletesMultipart(t *testing
 	store, _, now := newOutgoingSMS(t)
 	first := SMSProtocolEvent{Phase: "status_report", MessageID: "sms-one", Instance: "1", Destination: "+34600000000", Part: 1, Parts: 2, TPReference: smsInt(10), Status: smsInt(0)}
 	message, changed, err := store.ApplySMSProtocolEvent(first, now.Add(time.Second))
-	if err != nil || !changed || message.State != "accepted" || message.DeliveryState != "pending" {
+	if err != nil || !changed || message.State != "submitted" || message.DeliveryState != "pending" {
 		t.Fatalf("first report=%+v changed=%t err=%v", message, changed, err)
 	}
 	lateSubmitted := SMSProtocolEvent{Phase: "submitted", MessageID: "sms-one", Instance: "1", Destination: "+34600000000", Part: 1, Parts: 2, RPReference: smsInt(9), TPReference: smsInt(10)}
@@ -161,6 +161,115 @@ func TestSMSMessageIDWithWrongDestinationIsRejected(t *testing.T) {
 	}
 }
 
+func TestSMSUnknownExplicitMessageIDNeverFallsBackToAnotherMessage(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	_, _, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "submitted", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, RPReference: smsInt(3), TPReference: smsInt(7),
+	}, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", MessageID: "does-not-exist", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0),
+	}, now.Add(2*time.Second))
+	if !errors.Is(err, ErrSMSReportNotCorrelated) || changed {
+		t.Fatalf("changed=%t err=%v", changed, err)
+	}
+}
+
+func TestSMSExplicitMessageIDWithMismatchedSCTSIsRejected(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	_, _, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "submitted", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, TPReference: smsInt(7),
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrongTime := now.Add(time.Hour)
+	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0), ServiceCentreTime: &wrongTime,
+	}, now.Add(time.Second))
+	if !errors.Is(err, ErrSMSReportNotCorrelated) || changed {
+		t.Fatalf("changed=%t err=%v", changed, err)
+	}
+}
+
+func TestSMSExplicitMessageIDAllowsStatusBeforeSubmittedWithSCTS(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	reportTime := now.Add(time.Second)
+	message, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0), ServiceCentreTime: &reportTime,
+	}, reportTime)
+	if err != nil || !changed || message.State != "delivered" {
+		t.Fatalf("message=%+v changed=%t err=%v", message, changed, err)
+	}
+}
+
+func TestSMSSCTSCorrelatesReusedReferenceToOriginalTerminalMessage(t *testing.T) {
+	store, original, now := newOutgoingSMS(t)
+	oldSubmitted := now.Add(time.Second)
+	old := original
+	old.ID = "sms-old"
+	old.State, old.DeliveryState = "delivered", "delivered"
+	old.Parts = []SMSPartStatus{{
+		Part: 1, Parts: 1, Instance: "engine-1", Recipient: old.To,
+		TPReference: smsInt(7), State: "delivered", SubmittedAt: &oldSubmitted, UpdatedAt: oldSubmitted,
+	}}
+	newSubmitted := now.Add(time.Hour)
+	newer := original
+	newer.ID = "sms-new"
+	newer.State, newer.DeliveryState = "submitted", "pending"
+	newer.Parts = []SMSPartStatus{{
+		Part: 1, Parts: 1, Instance: "engine-1", Recipient: newer.To,
+		TPReference: smsInt(7), State: "submitted", SubmittedAt: &newSubmitted, UpdatedAt: newSubmitted,
+	}}
+	if err := store.SaveMessage(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMessage(newer); err != nil {
+		t.Fatal(err)
+	}
+	reportTime := oldSubmitted.Add(20 * time.Second)
+	message, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", Instance: "engine-1", Destination: old.To,
+		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0), ServiceCentreTime: &reportTime,
+	}, now.Add(2*time.Hour))
+	if err != nil || !changed || message.ID != "sms-old" || message.State != "delivered" {
+		t.Fatalf("message=%+v changed=%t err=%v", message, changed, err)
+	}
+	if stored, _ := store.GetMessage("sms-new"); stored.State != "submitted" || stored.DeliveryState != "pending" {
+		t.Fatalf("new message was falsely updated: %+v", stored)
+	}
+}
+
+func TestSMSReusedReferenceWithoutSCTSIsAmbiguousEvenWhenOldMessageTerminal(t *testing.T) {
+	store, original, now := newOutgoingSMS(t)
+	for index, id := range []string{"sms-old", "sms-new"} {
+		message := original
+		message.ID = id
+		message.State, message.DeliveryState = "submitted", "pending"
+		if index == 0 {
+			message.State, message.DeliveryState = "delivered", "delivered"
+		}
+		message.Parts = []SMSPartStatus{{Part: 1, Parts: 1, Recipient: message.To, TPReference: smsInt(7), State: message.State, UpdatedAt: now}}
+		if err := store.SaveMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", Destination: original.To, Part: 1, Parts: 1,
+		TPReference: smsInt(7), Status: smsInt(0),
+	}, now.Add(time.Second))
+	if !errors.Is(err, ErrSMSReportAmbiguous) || changed {
+		t.Fatalf("changed=%t err=%v", changed, err)
+	}
+}
+
 func TestSMSAmbiguousFallbackDoesNotGuess(t *testing.T) {
 	store, original, now := newOutgoingSMS(t)
 	for _, id := range []string{"sms-one", "sms-two"} {
@@ -227,5 +336,46 @@ func TestVerifiedCommandDeliveryPromotesEarlierCarrierAcceptance(t *testing.T) {
 	}
 	if message.State != "delivered" || message.DeliveryState != "delivered" || message.DeliveryReportDeadline != nil {
 		t.Fatalf("message=%+v", message)
+	}
+}
+
+func TestSMSMultipartIsNotAcceptedUntilEverySegmentHasCarrierEvidence(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	message, _, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "rp_ack", MessageID: "sms-one", Destination: "+34600000000",
+		Part: 1, Parts: 2, RPReference: smsInt(1), TPReference: smsInt(11),
+	}, now.Add(time.Second))
+	if err != nil || message.State != "submitted" || message.DeliveryState != "pending" {
+		t.Fatalf("partial acknowledgement overclaimed acceptance: %+v err=%v", message, err)
+	}
+	message, _, err = store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "rp_ack", MessageID: "sms-one", Destination: "+34600000000",
+		Part: 2, Parts: 2, RPReference: smsInt(2), TPReference: smsInt(12),
+	}, now.Add(2*time.Second))
+	if err != nil || message.State != "accepted" || message.DeliveryState != "pending" {
+		t.Fatalf("complete acknowledgement was not aggregated: %+v err=%v", message, err)
+	}
+}
+
+func TestPendingMessageWithoutDeadlineIsReconciledAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-smsDeliveryReportWindow - time.Minute)
+	if err := store.SaveMessage(Message{
+		ID: "interrupted", Direction: DirectionOutgoing, To: "+34600000000", Text: "hello",
+		State: "sending", DeliveryState: "pending", CreatedAt: old, UpdatedAt: old,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, ok := reopened.GetMessage("interrupted")
+	if !ok || message.State != "unknown" || message.DeliveryState != "unknown" || message.StatusDetail == "" {
+		t.Fatalf("interrupted message remained pending: %+v", message)
 	}
 }

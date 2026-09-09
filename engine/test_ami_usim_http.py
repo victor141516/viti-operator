@@ -63,18 +63,18 @@ class HTTPAKAProviderTest(unittest.TestCase):
         event = SimpleNamespace(
             Phase="status_report", MessageID="sms-1", Destination="+34600000000",
             Part=1, Parts=2, RPReference=0, TPReference=0, Status=0, Cause=None,
+            ServiceCentreTime=1700000000,
         )
-        with mock.patch.object(self.module.subprocess, "Popen") as popen:
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
             self.module.forward_sms_protocol_event(event)
-        self.assertEqual(popen.call_args.args[0], [
-            "python3", "/usr/local/bin/notify.py", "sms_protocol", "status_report",
-            "sms-1", "+34600000000", "1", "2", "0", "0", "0", "",
-        ])
+        self.assertEqual(enqueue.call_args.args, (
+            "sms_protocol", ["status_report", "sms-1", "+34600000000", "1", "2", "0", "0", "0", "", "1700000000"],
+        ))
 
     def test_unknown_sms_protocol_event_is_not_forwarded(self):
-        with mock.patch.object(self.module.subprocess, "Popen") as popen:
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
             self.module.forward_sms_protocol_event(SimpleNamespace(Phase="bogus"))
-        popen.assert_not_called()
+        enqueue.assert_not_called()
 
 
 if __name__ == "__main__":

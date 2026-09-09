@@ -28,6 +28,12 @@ export USIM_PIN USIM_READER USIM_READER_INDEX USIM_READER_PORT USIM_IMSI VOWIFI_
 export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID
 export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 
+# Delivery reports are irreplaceable protocol evidence. They are committed to
+# the bind-mounted runtime outbox by ami_usim and retried here across manager or
+# container restarts until a 2xx acknowledgement is received.
+log "starting durable engine event outbox..."
+python3 -u /usr/local/bin/event_outbox.py &
+
 # --- 2. Start PIN keeper and wait for the SIM to be usable ------------------------
 # pin_keeper holds CHV1 verified for ami_usim's SIP IMS-AKA. swu_ike verifies the PIN itself
 # in its own connection for EAP-AKA, so both auth paths work on PIN-enabled SIMs.

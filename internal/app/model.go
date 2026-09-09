@@ -30,18 +30,20 @@ type Message struct {
 }
 
 type SMSPartStatus struct {
-	Part          int       `json:"part"`
-	Parts         int       `json:"parts"`
-	Instance      string    `json:"instance,omitempty"`
-	Recipient     string    `json:"recipient,omitempty"`
-	RPReference   *int      `json:"rp_reference,omitempty"`
-	TPReference   *int      `json:"tp_reference,omitempty"`
-	State         string    `json:"state"`
-	StatusCode    string    `json:"status_code,omitempty"`
-	FailureCode   string    `json:"failure_code,omitempty"`
-	FailureReason string    `json:"failure_reason,omitempty"`
-	Detail        string    `json:"detail,omitempty"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	Part              int        `json:"part"`
+	Parts             int        `json:"parts"`
+	Instance          string     `json:"instance,omitempty"`
+	Recipient         string     `json:"recipient,omitempty"`
+	RPReference       *int       `json:"rp_reference,omitempty"`
+	TPReference       *int       `json:"tp_reference,omitempty"`
+	State             string     `json:"state"`
+	StatusCode        string     `json:"status_code,omitempty"`
+	FailureCode       string     `json:"failure_code,omitempty"`
+	FailureReason     string     `json:"failure_reason,omitempty"`
+	Detail            string     `json:"detail,omitempty"`
+	SubmittedAt       *time.Time `json:"submitted_at,omitempty"`
+	ServiceCentreTime *time.Time `json:"service_centre_time,omitempty"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type Call struct {

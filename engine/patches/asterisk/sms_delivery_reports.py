@@ -39,13 +39,17 @@ tracking = r'''
  * manager-side correlation. */
 #define VITI_SMS_TRACK_MAX 256
 #define VITI_SMS_TRACK_TTL 86400
+#define VITI_SMS_TOMBSTONE_TTL 900
+#define VITI_SMS_SCTS_TOLERANCE 900
 
 struct viti_sms_track {
 	int active;
+	int terminal;
 	unsigned char rp_ref;
 	unsigned char tp_ref;
 	unsigned long generation;
 	time_t created;
+	time_t finished;
 	char message_id[96];
 	char destination[64];
 	int part;
@@ -62,7 +66,9 @@ static void viti_sms_prune_locked(time_t now)
 {
 	int i;
 	for (i = 0; i < VITI_SMS_TRACK_MAX; ++i) {
-		if (viti_sms_tracks[i].active && now - viti_sms_tracks[i].created > VITI_SMS_TRACK_TTL) {
+		if (viti_sms_tracks[i].active &&
+			((viti_sms_tracks[i].terminal && now - viti_sms_tracks[i].finished > VITI_SMS_TOMBSTONE_TTL) ||
+			 (!viti_sms_tracks[i].terminal && now - viti_sms_tracks[i].created > VITI_SMS_TRACK_TTL))) {
 			viti_sms_tracks[i].active = 0;
 		}
 	}
@@ -154,10 +160,9 @@ static int viti_sms_track_find_rp(unsigned char rp_ref, struct viti_sms_track *r
 }
 
 static int viti_sms_track_find_tp(unsigned char tp_ref, const char *destination,
-	struct viti_sms_track *result)
+	time_t service_centre_time, struct viti_sms_track *result)
 {
 	int i, found = 0;
-	unsigned long newest = 0;
 	ast_mutex_lock(&viti_sms_lock);
 	viti_sms_prune_locked(time(NULL));
 	for (i = 0; i < VITI_SMS_TRACK_MAX; ++i) {
@@ -167,11 +172,21 @@ static int viti_sms_track_find_tp(unsigned char tp_ref, const char *destination,
 		if (!ast_strlen_zero(destination) && strcmp(viti_sms_tracks[i].destination, destination)) {
 			continue;
 		}
-		if (!found || viti_sms_tracks[i].generation > newest) {
-			*result = viti_sms_tracks[i];
-			newest = viti_sms_tracks[i].generation;
-			found = 1;
+		if (service_centre_time != (time_t)-1) {
+			time_t delta = viti_sms_tracks[i].created - service_centre_time;
+			if (delta < 0) {
+				delta = -delta;
+			}
+			if (delta > VITI_SMS_SCTS_TOLERANCE) {
+				continue;
+			}
 		}
+		if (found) {
+			ast_mutex_unlock(&viti_sms_lock);
+			return -1; /* Collision: never guess which message owns the report. */
+		}
+		*result = viti_sms_tracks[i];
+		found = 1;
 	}
 	ast_mutex_unlock(&viti_sms_lock);
 	return found;
@@ -184,23 +199,72 @@ static void viti_sms_track_finish(unsigned char rp_ref, unsigned char tp_ref)
 	for (i = 0; i < VITI_SMS_TRACK_MAX; ++i) {
 		if (viti_sms_tracks[i].active && viti_sms_tracks[i].rp_ref == rp_ref &&
 			viti_sms_tracks[i].tp_ref == tp_ref) {
-			viti_sms_tracks[i].active = 0;
+			viti_sms_tracks[i].terminal = 1;
+			viti_sms_tracks[i].finished = time(NULL);
 		}
 	}
 	ast_mutex_unlock(&viti_sms_lock);
 }
 
 static void viti_sms_emit(const char *phase, const struct viti_sms_track *track,
-	const char *destination, int rp_ref, int tp_ref, int status, int cause)
+	const char *destination, int rp_ref, int tp_ref, int status, int cause,
+	time_t service_centre_time)
 {
 	manager_event(EVENT_FLAG_SYSTEM, "VitiSMS",
 		"Phase: %s\r\nMessageID: %s\r\nDestination: %s\r\n"
 		"Part: %d\r\nParts: %d\r\nRPReference: %d\r\nTPReference: %d\r\n"
-		"Status: %d\r\nCause: %d\r\n",
+		"Status: %d\r\nCause: %d\r\nServiceCentreTime: %ld\r\n",
 		phase, track ? track->message_id : "",
 		track && !ast_strlen_zero(track->destination) ? track->destination : S_OR(destination, ""),
 		track ? track->part : 1, track ? track->parts : 1,
-		track ? track->rp_ref : rp_ref, track ? track->tp_ref : tp_ref, status, cause);
+		track ? track->rp_ref : rp_ref, track ? track->tp_ref : tp_ref, status, cause,
+		(long)service_centre_time);
+}
+
+static int viti_sms_swapped_bcd(unsigned char value)
+{
+	int tens = value & 0x0f;
+	int units = (value >> 4) & 0x0f;
+	if (tens > 9 || units > 9) {
+		return -1;
+	}
+	return tens * 10 + units;
+}
+
+static time_t viti_sms_decode_scts(const unsigned char *value)
+{
+	struct tm decoded;
+	int year = viti_sms_swapped_bcd(value[0]);
+	int month = viti_sms_swapped_bcd(value[1]);
+	int day = viti_sms_swapped_bcd(value[2]);
+	int hour = viti_sms_swapped_bcd(value[3]);
+	int minute = viti_sms_swapped_bcd(value[4]);
+	int second = viti_sms_swapped_bcd(value[5]);
+	int zone_tens = value[6] & 0x07;
+	int zone_units = (value[6] >> 4) & 0x0f;
+	int zone_minutes;
+	time_t local;
+	if (year < 0 || month < 1 || month > 12 || day < 1 || day > 31 ||
+		hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+		second < 0 || second > 60 || zone_units > 9) {
+		return (time_t)-1;
+	}
+	memset(&decoded, 0, sizeof(decoded));
+	decoded.tm_year = year >= 70 ? year : year + 100;
+	decoded.tm_mon = month - 1;
+	decoded.tm_mday = day;
+	decoded.tm_hour = hour;
+	decoded.tm_min = minute;
+	decoded.tm_sec = second;
+	local = timegm(&decoded);
+	if (local == (time_t)-1) {
+		return (time_t)-1;
+	}
+	zone_minutes = (zone_tens * 10 + zone_units) * 15;
+	if (value[6] & 0x08) {
+		zone_minutes = -zone_minutes;
+	}
+	return local - zone_minutes * 60;
 }
 '''
 
@@ -252,6 +316,7 @@ replacement_parse = r'''static void parse_rpdata(pjsip_rx_data *rdata, struct as
 			int address_len;
 			int offset = 2;
 			int status;
+			time_t service_centre_time;
 			unsigned char tp_ref = tpdu[1];
 			struct viti_sms_track track;
 			memset(&track, 0, sizeof(track));
@@ -263,16 +328,17 @@ replacement_parse = r'''static void parse_rpdata(pjsip_rx_data *rdata, struct as
 				return;
 			}
 			offset += unpackaddress(recipient, tpdu + offset, sizeof(recipient));
+			service_centre_time = viti_sms_decode_scts(tpdu + offset);
 			offset += 14; /* TP-SCTS + TP-DT */
 			status = tpdu[offset] & 0xff;
 			ast_msg_set_var(msg, "VITI_SMS_PROTOCOL_ONLY", "1");
-			if (viti_sms_track_find_tp(tp_ref, recipient, &track)) {
-				viti_sms_emit("status_report", &track, recipient, -1, tp_ref, status, -1);
+			if (viti_sms_track_find_tp(tp_ref, recipient, service_centre_time, &track) == 1) {
+				viti_sms_emit("status_report", &track, recipient, -1, tp_ref, status, -1, service_centre_time);
 				if (status < 0x20 || status >= 0x40) {
 					viti_sms_track_finish(track.rp_ref, track.tp_ref);
 				}
 			} else {
-				viti_sms_emit("status_report", NULL, recipient, -1, tp_ref, status, -1);
+				viti_sms_emit("status_report", NULL, recipient, -1, tp_ref, status, -1, service_centre_time);
 			}
 			return;
 		}
@@ -285,9 +351,9 @@ replacement_parse = r'''static void parse_rpdata(pjsip_rx_data *rdata, struct as
 		memset(&track, 0, sizeof(track));
 		ast_msg_set_var(msg, "VITI_SMS_PROTOCOL_ONLY", "1");
 		if (viti_sms_track_find_rp(rp_ref, &track)) {
-			viti_sms_emit("rp_ack", &track, NULL, rp_ref, track.tp_ref, -1, -1);
+			viti_sms_emit("rp_ack", &track, NULL, rp_ref, track.tp_ref, -1, -1, (time_t)-1);
 		} else {
-			viti_sms_emit("rp_ack", NULL, NULL, rp_ref, -1, -1, -1);
+			viti_sms_emit("rp_ack", NULL, NULL, rp_ref, -1, -1, -1, (time_t)-1);
 		}
 		return;
 	}
@@ -298,10 +364,10 @@ replacement_parse = r'''static void parse_rpdata(pjsip_rx_data *rdata, struct as
 		memset(&track, 0, sizeof(track));
 		ast_msg_set_var(msg, "VITI_SMS_PROTOCOL_ONLY", "1");
 		if (viti_sms_track_find_rp(rp_ref, &track)) {
-			viti_sms_emit("rp_error", &track, NULL, rp_ref, track.tp_ref, -1, cause);
+			viti_sms_emit("rp_error", &track, NULL, rp_ref, track.tp_ref, -1, cause, (time_t)-1);
 			viti_sms_track_finish(track.rp_ref, track.tp_ref);
 		} else {
-			viti_sms_emit("rp_error", NULL, NULL, rp_ref, -1, -1, cause);
+			viti_sms_emit("rp_error", NULL, NULL, rp_ref, -1, -1, cause, (time_t)-1);
 		}
 		return;
 	}
@@ -346,7 +412,7 @@ replace_once(
     "\t\t\tast_copy_string(exhausted.destination, phone, sizeof(exhausted.destination));\n"
     "\t\t\texhausted.part = part + 1;\n"
     "\t\t\texhausted.parts = parts;\n"
-    "\t\t\tviti_sms_emit(\"local_failure\", &exhausted, phone, -1, -1, -1, -1);\n"
+    "\t\t\tviti_sms_emit(\"local_failure\", &exhausted, phone, -1, -1, -1, -1, (time_t)-1);\n"
     "\t\t\tast_log(LOG_ERROR, \"No free SMS RP/TP references; refusing ambiguous transmission\\n\");\n"
     "\t\t\treturn -1;\n"
     "\t\t}\n"
@@ -369,10 +435,10 @@ replace_once(
     "\t\tint status = volte_send_rp_data(mdata, orig_uri, endpoint, buf, p - buf);\n"
     "\t\tif (status < 0) {\n"
     "\t\t\toverall_status = status;\n"
-    "\t\t\tviti_sms_emit(\"local_failure\", &viti_track, phone, rp_ref, tp_ref, -1, -1);\n"
+    "\t\t\tviti_sms_emit(\"local_failure\", &viti_track, phone, rp_ref, tp_ref, -1, -1, (time_t)-1);\n"
     "\t\t\tviti_sms_track_finish(rp_ref, tp_ref);\n"
     "\t\t} else {\n"
-    "\t\t\tviti_sms_emit(\"submitted\", &viti_track, phone, rp_ref, tp_ref, -1, -1);\n"
+    "\t\t\tviti_sms_emit(\"submitted\", &viti_track, phone, rp_ref, tp_ref, -1, -1, (time_t)-1);\n"
     "\t\t}\n",
 )
 
