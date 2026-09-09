@@ -1,0 +1,23 @@
+[general]
+
+; Asterisk performs a mix-minus for every channel in this bridge: each participant receives
+; the conference mix without its own audio. Twenty milliseconds keeps interactive latency low
+; while allowing the softmix bridge to transcode WebRTC Opus/ulaw and carrier AMR centrally.
+[viti_bridge]
+type=bridge
+internal_sample_rate=auto
+mixing_interval=20
+
+[viti_client]
+type=user
+quiet=yes
+end_marked=yes
+dtmf_passthrough=yes
+
+; The carrier is the single marked participant. If it leaves, end_marked automatically removes
+; every local client. The reverse direction (last local leaves) is handled in extensions.conf.
+[viti_carrier]
+type=user
+quiet=yes
+marked=yes
+dtmf_passthrough=yes

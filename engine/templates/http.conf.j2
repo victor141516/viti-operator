@@ -1,0 +1,12 @@
+[general]
+enabled=yes
+bindaddr={{ sip_listen if webrtc_enable else '127.0.0.1' }}
+bindport={{ webrtc_ws_port }}
+{% if webrtc_enable %}
+{% if not webrtc_plain_ws %}
+tlsenable=yes
+tlsbindaddr={{ sip_listen }}:{{ webrtc_port }}
+tlscertfile=/etc/asterisk/certificate.crt
+tlsprivatekey=/etc/asterisk/certificate.key
+{% endif %}
+{% endif %}

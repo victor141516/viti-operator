@@ -1,0 +1,30 @@
+{
+  "listen": "0.0.0.0:8787",
+  "data_file": "/data/state.json",
+  "telephony": {
+    "type": "asterisk_ami",
+    "ami": {
+      "address": "engine:5038",
+      "username": "vowifi",
+      "secret": "overridden-by-environment",
+      "from_number": "+34123456789",
+      "realm": "ims.mnc000.mcc000.3gppnetwork.org"
+    }
+  },
+  "sim_auth": {
+    "type": "disabled",
+    "remote_timeout_seconds": 40
+  },
+  "voice": {
+    "enabled": true,
+    "backend_websocket_url": "ws://engine:8088/ws",
+    "username": "viti",
+    "password": "overridden-by-environment",
+    "engine_event_token": "overridden-by-environment",
+    "ice_servers": []
+  },
+  "diagnostics": {
+    "enabled": false,
+    "directory": "/diagnostics/manager"
+  }
+}

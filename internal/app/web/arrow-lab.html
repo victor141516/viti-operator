@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Arrow laboratory</title>
+  <link rel="stylesheet" href="/arrow-lab.css">
+</head>
+<body>
+  <main>
+    <header><p>Viti Operator · visual laboratory</p><h1>Connection arrowheads</h1><span>The same arrowhead is tested on straight, curved, vertical, bidirectional, and dashed paths.</span></header>
+    <svg viewBox="0 0 960 680" role="img" aria-label="Comparison of four arrowheads on different paths">
+      <defs>
+        <marker id="dart" class="lab-green" viewBox="0 0 14 14" refX="12.5" refY="7" markerWidth="14" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1.5 1.5 12.5 7 1.5 12.5 4.7 7Z"/></marker>
+        <marker id="chevron" class="lab-green" viewBox="0 0 14 14" refX="11.5" refY="7" markerWidth="14" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M2 1.8 11.5 7 2 12.2" fill="none" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round"/></marker>
+        <marker id="triangle" class="lab-green" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="13" markerHeight="13" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M2 1.7 12 7 2 12.3Z"/></marker>
+        <marker id="needle" class="lab-green" viewBox="0 0 16 14" refX="14" refY="7" markerWidth="16" markerHeight="14" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M1.5 2.2 14 7 1.5 11.8 7.2 7Z"/></marker>
+      </defs>
+      <g class="grid">
+        <path d="M40 92H920M40 252H920M40 412H920M40 572H920"/>
+      </g>
+      <g class="sample" data-choice="dart">
+        <text x="40" y="52">01 · Compact dart</text>
+        <path marker-end="url(#dart)" d="M52 104H202"/><path marker-end="url(#dart)" d="M246 112C330 38 392 154 476 96"/><path marker-end="url(#dart)" d="M535 42V146"/><path marker-start="url(#dart)" marker-end="url(#dart)" d="M595 104H735"/><path class="dashed" marker-end="url(#dart)" d="M780 104H914"/>
+      </g>
+      <g class="sample" data-choice="chevron">
+        <text x="40" y="212">02 · Open chevron</text>
+        <path marker-end="url(#chevron)" d="M52 264H202"/><path marker-end="url(#chevron)" d="M246 272C330 198 392 314 476 256"/><path marker-end="url(#chevron)" d="M535 202V306"/><path marker-start="url(#chevron)" marker-end="url(#chevron)" d="M595 264H735"/><path class="dashed" marker-end="url(#chevron)" d="M780 264H914"/>
+      </g>
+      <g class="sample" data-choice="triangle">
+        <text x="40" y="372">03 · Slim triangle</text>
+        <path marker-end="url(#triangle)" d="M52 424H202"/><path marker-end="url(#triangle)" d="M246 432C330 358 392 474 476 416"/><path marker-end="url(#triangle)" d="M535 362V466"/><path marker-start="url(#triangle)" marker-end="url(#triangle)" d="M595 424H735"/><path class="dashed" marker-end="url(#triangle)" d="M780 424H914"/>
+      </g>
+      <g class="sample" data-choice="needle">
+        <text x="40" y="532">04 · Long needle</text>
+        <path marker-end="url(#needle)" d="M52 584H202"/><path marker-end="url(#needle)" d="M246 592C330 518 392 634 476 576"/><path marker-end="url(#needle)" d="M535 522V626"/><path marker-start="url(#needle)" marker-end="url(#needle)" d="M595 584H735"/><path class="dashed" marker-end="url(#needle)" d="M780 584H914"/>
+      </g>
+    </svg>
+  </main>
+</body>
+</html>

@@ -1,0 +1,320 @@
+{% set local_eps = [] %}
+{% for acct in external_accounts %}{% set _ = local_eps.append('PJSIP/' ~ acct.username) %}{% endfor %}
+{% if webrtc_enable %}{% set _ = local_eps.append('${PJSIP_DIAL_CONTACTS(' ~ webrtc_user ~ ')}') %}{% endif %}
+{% set dialstr = local_eps | join('&') %}
+{% set msg_targets = [] %}
+{% for acct in external_accounts %}{% set _ = msg_targets.append(acct.username) %}{% endfor %}
+{% if webrtc_enable %}{% set _ = msg_targets.append(webrtc_user) %}{% endif %}
+
+; ===== Incoming call from the IMS/VoWiFi side =====
+[volte_ims]
+; MUST be _. (match anything): the IMS routes inbound calls to our REGISTERED CONTACT, whose
+; user part is a random GRUU/UUID (e.g. ef666c87-...@[v6]:port), NOT a phone number — so a
+; numeric-only pattern like _[+0-9]. never matches and every incoming call is 404-rejected.
+; The explicit h/i/t handlers below take precedence over _. , so no phantom "call to h" is
+; logged (that was the original reason _. had been narrowed).
+exten => _.,1,NoOp(Incoming call from ${CALLERID(num)})
+same => n,Set(CALLPEER=${CALLERID(num)})
+same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
+same => n,Set(VITI_TRACE_ID=${VITI_CALL_ID})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=incoming-received peer=${CALLPEER})
+same => n,Progress()
+same => n,GotoIf($["${GLOBAL(VITI_ACTIVE_CONF)}" != ""]?busy)
+; TRYLOCK is the authoritative, atomic one-call gate. GROUP_COUNT followed by
+; Set(GROUP) has a race when two clients originate at the same instant.
+same => n,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
+same => n,GotoIf($["${VITI_LOCKED}" != "1"]?busy)
+same => n,Set(GROUP(viti-call)=active)
+same => n,Set(__VITI_CALL_ID=${VITI_CALL_ID})
+same => n,Set(__VITI_TRACE_ID=${VITI_TRACE_ID})
+same => n,Set(__CALLPEER=${CALLPEER})
+same => n,Set(__VITI_DIRECTION=in)
+same => n,Set(GLOBAL(VITI_ACTIVE_CONF)=${VITI_CALL_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_TRACE)=${VITI_TRACE_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_PEER)=${CALLPEER})
+same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=in)
+{% if debug_asterisk %}same => n,Set(FILE(/logs/calls.txt,,,a)=IN call from ${CALLERID(num)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}){% endif %}
+; Persist the opening event synchronously. A very short failed call can otherwise
+; enqueue call_result before call_in and leave two contradictory history rows.
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_in "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLERID(num)}")
+same => n,Gosub(viti-start-carrier-recording,s,1)
+; One carrier line can carry one call. All registered clients ring together. The first
+; answer wins this initial fork, then both legs enter a server-side conference. Other
+; registered clients can join that same conference later through the private *44 extension.
+same => n,WaitForPrecondition(10,2000)
+same => n,Ringing()
+{% if dialstr %}
+same => n,Dial({{ dialstr }},60,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-incoming-conference^s^1))
+{% else %}
+same => n,Answer()
+same => n,Wait(30)
+{% endif %}
+same => n,Hangup()
+same => n(busy),Busy()
+same => n,Hangup()
+; i (invalid) / t (response timeout) are explicit no-ops so the broad _. never mislogs them.
+exten => i,1,Hangup()
+exten => t,1,Hangup()
+; The hangup handler ALWAYS runs (whether the caller hangs up unanswered, we decline, or the
+; call completes), so the "ringing" record is finalized to a real disposition here instead of
+; only after Dial() (which is skipped when the inbound leg is torn down first).
+; CRITICAL: keep an explicit second priority so the broad `_.` pattern cannot be selected
+; after the notifier. Hangup() cleanly terminates the handler; Return() is only valid inside
+; a Gosub and produced a noisy "Return without Gosub" error here.
+exten => h,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=incoming-hangup dialstatus=${DIALSTATUS} cause=${HANGUPCAUSE})
+same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" &)
+same => n,Hangup()
+
+; ===== Incoming SMS from the IMS/VoWiFi side =====
+[volte_ims_msg]
+exten => _.,1,NoOp(Incoming SMS from ${MESSAGE(from)})
+same => n,Set(NL=${BASE64_DECODE(Cg==)})
+{% if debug_asterisk %}same => n,Set(FILE(/logs/messages.txt,,,a)=IN SMS from ${MESSAGE(from)} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL}){% endif %}
+{% if sms_record_command %}
+same => n,TrySystem({{ sms_record_command }} --sender "${MESSAGE(from)}" --body-base64 "${BASE64_ENCODE(${MESSAGE(body)})}")
+{% endif %}
+same => n,TrySystem(python3 /usr/local/bin/notify.py sms_in "${MESSAGE(from)}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
+{% for t in msg_targets %}
+same => n,MessageSend(pjsip:{{ t }},${MESSAGE(from)},sip:{{ t }})
+{% endfor %}
+same => n,Hangup()
+
+; ===== Outgoing call from a local endpoint (softphone / external SIP) =====
+; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is
+; reported to the manager for the call log.
+[from-local]
+; Local media loopback for installation diagnostics. It never reaches the
+; carrier and lets web/Android clients prove two-way RTP before a real call.
+exten => *43,1,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
+same => n,GotoIf($["${VITI_LOCKED}" != "1"]?busy)
+same => n,Set(GROUP(viti-call)=active)
+same => n,Set(CALLPEER=*43)
+same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
+same => n,Set(VITI_TRACE_ID=${PJSIP_HEADER(read,X-Viti-Trace-ID)})
+same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER(read,Call-ID)}))
+same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${VITI_CALL_ID}))
+same => n,Set(__VITI_CLIENT_ID=${PJSIP_HEADER(read,X-Viti-Client-ID)})
+same => n,Set(__VITI_PARTICIPANT_ID=${VITI_CLIENT_ID})
+same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)}))
+same => n,Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=local-echo-received)
+; Keep diagnostics in the same authoritative history/state stream as carrier
+; calls so every client blocks while another client owns the local echo call.
+; Run these two tiny localhost notifications synchronously to preserve order.
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_out "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLPEER}")
+same => n,Answer()
+same => n,Gosub(viti-start-client-recording,s,1(${VITI_PARTICIPANT_ID},${VITI_CLIENT_ID},${VITI_RECORDING_FILE_ID}))
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_active "${VITI_CALL_ID}" "${VITI_TRACE_ID}" out "${CALLPEER}")
+same => n,Echo()
+same => n,Hangup()
+same => n(busy),Busy()
+same => n,Hangup()
+; Join the currently active carrier call. This extension is reachable only from the
+; authenticated local SIP/WebRTC endpoint and never sends a new INVITE to the operator.
+; A client that hangs up leaves only its conference leg; the carrier call remains while at
+; least one local participant is still present.
+exten => *44,1,NoOp(Join active Viti conference)
+same => n,Set(VITI_CALL_ID=${GLOBAL(VITI_ACTIVE_CONF)})
+same => n,GotoIf($["${VITI_CALL_ID}" = ""]?no_call)
+same => n,Set(VITI_TRACE_ID=${GLOBAL(VITI_ACTIVE_TRACE)})
+same => n,Set(CALLPEER=${GLOBAL(VITI_ACTIVE_PEER)})
+same => n,Set(VITI_DIRECTION=${GLOBAL(VITI_ACTIVE_DIRECTION)})
+same => n,Set(__VITI_CLIENT_ID=${PJSIP_HEADER(read,X-Viti-Client-ID)})
+same => n,Set(__VITI_PARTICIPANT_ID=${VITI_CLIENT_ID})
+same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)}))
+same => n,Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-join-requested peer=${CALLPEER})
+same => n,Goto(viti-client-conference,s,1)
+same => n(no_call),Congestion()
+same => n,Hangup()
+; _[+0-9]. (not _.) so the special h/i/t extensions never match here and log phantom calls
+exten => _[+0-9].,1,NoOp(Outgoing call to ${EXTEN} from ${CALLERID(num)})
+same => n,Set(CALLPEER=${EXTEN})
+same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
+same => n,Set(VITI_TRACE_ID=${PJSIP_HEADER(read,X-Viti-Trace-ID)})
+same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER(read,Call-ID)}))
+same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${VITI_CALL_ID}))
+same => n,Set(__VITI_CLIENT_ID=${PJSIP_HEADER(read,X-Viti-Client-ID)})
+same => n,Set(__VITI_PARTICIPANT_ID=${VITI_CLIENT_ID})
+same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)}))
+same => n,Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=outgoing-received peer=${CALLPEER})
+same => n,GotoIf($["${GLOBAL(VITI_ACTIVE_CONF)}" != ""]?busy)
+same => n,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
+same => n,GotoIf($["${VITI_LOCKED}" != "1"]?busy)
+same => n,Set(GROUP(viti-call)=active)
+same => n,Set(__VITI_CALL_ID=${VITI_CALL_ID})
+same => n,Set(__VITI_TRACE_ID=${VITI_TRACE_ID})
+same => n,Set(__CALLPEER=${CALLPEER})
+same => n,Set(__VITI_DIRECTION=out)
+same => n,Set(GLOBAL(VITI_ACTIVE_CONF)=${VITI_CALL_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_TRACE)=${VITI_TRACE_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_PEER)=${CALLPEER})
+same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=out)
+{% if debug_asterisk %}same => n,Set(FILE(/logs/calls.txt,,,a)=OUT call to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}){% endif %}
+; Preserve lifecycle ordering even when the carrier rejects immediately.
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_out "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${EXTEN}")
+; Ring timeout {{ ring_timeout }}s (configurable): if the callee never answers, Asterisk
+; CANCELs the outbound INVITE at this deadline instead of leaving it open. The carrier keeps
+; the early dialog alive and RE-ALERTS the callee (repeated 180 Ringing) for as long as our
+; INVITE is pending, so a shorter timeout bounds how many ring cycles the callee gets before
+; we give up. Most carriers roll to voicemail by ~30s; 35 is the default. (The repeated
+; ringing itself is carrier-side MMTel behaviour and can't be removed here.) A caller who
+; hangs up earlier still CANCELs immediately.
+same => n,Dial(PJSIP/${EXTEN}@volte_ims,{{ ring_timeout }},b(viti-carrier-prep^s^1)G(viti-outgoing-conference^s^1))
+; Dial only returns here when the call was NEVER answered (reject/busy/no-answer/congestion);
+; answered calls are bridged and tear down via BYE, never reaching this line.
+; Save the REAL disposition for the call log BEFORE overriding the response (PJSIPHangup does
+; not clobber HANGUPCAUSE, but Set them first so the 'h' handler is order-independent).
+same => n,Set(REALSTATUS=${DIALSTATUS})
+same => n,Set(REALCAUSE=${HANGUPCAUSE})
+; CRITICAL: on a rejected/unavailable call the carrier (Telus IMS) returns "480 Temporarily
+; Unavailable", which Asterisk forwards to the local caller. 480 is a RETRYABLE response
+; (RFC 3261 §21.4.11), so MicroSIP auto-redials forever and JsSIP hangs. Force a clean,
+; non-retryable "603 Decline" to the caller instead so the client stops and shows the call as
+; ended/declined. (ANSWER never reaches here; the guard is belt-and-suspenders.)
+same => n,ExecIf($["${DIALSTATUS}" != "ANSWER"]?PJSIPHangup(Decline))
+same => n,Hangup()
+same => n(busy),Busy()
+same => n,Hangup()
+; Report the outcome from the hangup handler, NOT inline after Dial(): when the caller
+; (softphone) hangs up mid-ring, the caller channel is destroyed and jumps straight to 'h',
+; so an inline call_result would never run and the record would stay stuck on "dialing".
+; Use REALSTATUS/REALCAUSE (captured right after Dial) so the log keeps the TRUE far-end
+; disposition (e.g. CHANUNAVAIL/31) rather than the overridden Decline; fall back to the live
+; vars when REAL* are unset (caller hung up mid-ring → jumped straight to 'h' before Set).
+exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
+same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=outgoing-hangup dialstatus=${ST} cause=${CS})
+same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" out "${CALLPEER}" "${ST}" "${CS}" &)
+same => n,Hangup()
+
+; Test-only inbound call. The Local channel answers immediately before ringing all
+; registered clients, so `channel originate` does not cancel the test after its setup
+; timeout. This never reaches the carrier or the SIM and is safe to run repeatedly.
+[viti-diagnostic]
+exten => inbound,1,Set(CALLPEER=Prueba local)
+same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
+same => n,Set(VITI_TRACE_ID=${VITI_CALL_ID})
+same => n,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
+same => n,GotoIf($["${VITI_LOCKED}" != "1"]?busy)
+same => n,Set(GROUP(viti-call)=active)
+same => n,Set(__VITI_CALL_ID=${VITI_CALL_ID})
+same => n,Set(__VITI_TRACE_ID=${VITI_TRACE_ID})
+same => n,Set(__CALLPEER=${CALLPEER})
+same => n,Set(__VITI_DIRECTION=in)
+same => n,Set(GLOBAL(VITI_ACTIVE_CONF)=${VITI_CALL_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_TRACE)=${VITI_TRACE_ID})
+same => n,Set(GLOBAL(VITI_ACTIVE_PEER)=${CALLPEER})
+same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=in)
+same => n,Answer()
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_in "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLPEER}")
+same => n,Gosub(viti-start-carrier-recording,s,1)
+same => n,Ringing()
+{% if dialstr %}
+same => n,Dial({{ dialstr }},120,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-incoming-conference^s^1))
+{% else %}
+same => n,Wait(120)
+{% endif %}
+same => n,Hangup()
+same => n(busy),Busy()
+same => n,Hangup()
+exten => h,1,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" &)
+same => n,Hangup()
+
+; ===== Multiparty carrier conference =====
+; Dial(G) sends the calling channel to priority 1 and the answered channel to priority 2.
+; Incoming and outgoing calls therefore use opposite dispatchers, then share the same two
+; role contexts below. ConfBridge performs one mix-minus stream per participant: every local
+; client hears the carrier and the other clients, never its own microphone; the carrier hears
+; the combined local side.
+[viti-incoming-conference]
+exten => s,1,Goto(viti-carrier-conference,s,1)
+same => n,Goto(viti-client-conference,s,1)
+
+[viti-outgoing-conference]
+exten => s,1,Goto(viti-client-conference,s,1)
+same => n,Goto(viti-carrier-conference,s,1)
+
+[viti-client-conference]
+exten => s,1,Answer()
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-client-enter peer=${CALLPEER})
+same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)}))
+same => n,ExecIf($["${VITI_RECORDING_FILE_ID}" = ""]?Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)}))
+same => n,Gosub(viti-start-client-recording,s,1(${VITI_PARTICIPANT_ID},${VITI_CLIENT_ID},${VITI_RECORDING_FILE_ID}))
+same => n,ConfBridge(${VITI_CALL_ID},viti_bridge,viti_client)
+same => n,Hangup()
+exten => h,1,Set(VITI_PARTIES=${CONFBRIDGE_INFO(parties,${VITI_CALL_ID})})
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-client-left parties=${VITI_PARTIES})
+; If only the marked carrier remains, remove it. That ends the operator call. With two or
+; more parties another local client is still present, so this hangup affects only this device.
+same => n,ExecIf($["${GLOBAL(VITI_ACTIVE_CONF)}" = "${VITI_CALL_ID}" & ${VITI_PARTIES} <= 1]?ConfKick(${VITI_CALL_ID},all))
+same => n,Hangup()
+
+[viti-carrier-conference]
+exten => s,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-carrier-enter direction=${VITI_DIRECTION} peer=${CALLPEER})
+; Recording is attached to the persistent carrier leg before Dial whenever possible, which
+; preserves early media and continues when the first local client leaves. This fallback also
+; covers engines/configurations where the pre-dial handler could not start it.
+same => n,Gosub(viti-start-carrier-recording,s,1)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_active "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}" &)
+same => n,ConfBridge(${VITI_CALL_ID},viti_bridge,viti_carrier)
+same => n,Hangup()
+exten => h,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-carrier-left cause=${HANGUPCAUSE})
+same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}" ANSWER "${HANGUPCAUSE}" &)
+same => n,Hangup()
+
+[viti-clear-active-call]
+exten => s,1,GotoIf($["${GLOBAL(VITI_ACTIVE_CONF)}" != "${ARG1}"]?done)
+same => n,Set(GLOBAL(VITI_ACTIVE_CONF)=)
+same => n,Set(GLOBAL(VITI_ACTIVE_TRACE)=)
+same => n,Set(GLOBAL(VITI_ACTIVE_PEER)=)
+same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=)
+same => n(done),Return()
+
+; Runs on the outgoing IMS channel before the INVITE. Starting MixMonitor here captures 180/
+; 183 early media and, because this channel becomes the marked carrier participant after G,
+; records the entire conference even if the client that initiated the call leaves first.
+[viti-carrier-prep]
+exten => s,1,Gosub(viti-start-carrier-recording,s,1)
+same => n,Return()
+
+; Propagate the server-generated trace ID to every local branch of an incoming
+; call so the Android/web client records the exact same correlation key.
+[viti-add-trace]
+exten => s,1,Set(PJSIP_HEADER(add,X-Viti-Trace-ID)=${ARG1})
+same => n,Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)})
+same => n,Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)})
+same => n,Set(PJSIP_HEADER(add,X-Viti-Participant-ID)=${VITI_PARTICIPANT_ID})
+same => n,Return()
+
+[viti-start-carrier-recording]
+exten => s,1,GotoIf($["${VITI_RECORDING_STARTED}" = "1"]?done)
+same => n,Set(VITI_RECORDING_ENABLED=${SHELL(python3 /usr/local/bin/recording_enabled.py)})
+same => n,GotoIf($["${VITI_RECORDING_ENABLED}" != "1"]?done)
+same => n,TrySystem(mkdir -p "/recordings/${VITI_CALL_ID}")
+same => n,MixMonitor(/recordings/${VITI_CALL_ID}/carrier-mix.wav,r(/recordings/${VITI_CALL_ID}/remote.wav)t(/recordings/${VITI_CALL_ID}/local-mix.wav))
+same => n,Set(__VITI_RECORDING_STARTED=1)
+same => n,TrySystem(python3 /usr/local/bin/notify.py recording_track "${VITI_CALL_ID}" "${VITI_TRACE_ID}" remote carrier "" remote.wav &)
+same => n(done),Return()
+
+[viti-start-client-recording]
+exten => s,1,Set(VITI_RECORDING_ENABLED=${SHELL(python3 /usr/local/bin/recording_enabled.py)})
+same => n,GotoIf($["${VITI_RECORDING_ENABLED}" != "1"]?done)
+same => n,TrySystem(mkdir -p "/recordings/${VITI_CALL_ID}")
+same => n,MixMonitor(/recordings/${VITI_CALL_ID}/participant-${ARG3}-mix.wav,r(/recordings/${VITI_CALL_ID}/participant-${ARG3}-input.wav)t(/recordings/${VITI_CALL_ID}/participant-${ARG3}-output.wav))
+same => n,TrySystem(python3 /usr/local/bin/notify.py recording_track "${VITI_CALL_ID}" "${VITI_TRACE_ID}" client "${ARG1}" "${ARG2}" "participant-${ARG3}-input.wav" &)
+same => n(done),Return()
+
+; ===== Outgoing SMS from a local endpoint =====
+[msg-from-local]
+exten => _.,1,NoOp(Outgoing SMS to ${MESSAGE(to)})
+same => n,Set(NL=${BASE64_DECODE(Cg==)})
+same => n,Set(EXTEN=${CUT(CUT(MESSAGE(to),@,1),:,2)})
+{% if debug_asterisk %}same => n,Set(FILE(/logs/messages.txt,,,a)=OUT SMS to ${EXTEN} at ${STRFTIME(${EPOCH},,%Y-%m-%d %H:%M:%S)}:${NL}${MESSAGE(body)}${NL}=====${NL}){% endif %}
+same => n,TrySystem(python3 /usr/local/bin/notify.py sms_out "${EXTEN}" "${BASE64_ENCODE(${MESSAGE(body)})}" &)
+same => n,MessageSend(pjsip:volte_ims/${EXTEN}@volte_ims,sip:{{ msisdn }}@{{ realm }},sip:${EXTEN}@volte_ims)

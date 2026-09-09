@@ -1,0 +1,14 @@
+{
+  "listen": "127.0.0.1:8787",
+  "data_file": "./data/state.json",
+  "api_key": "change-this-long-random-token",
+  "telephony": {
+    "type": "memory",
+    "poll_seconds": 2
+  },
+  "sim_auth": {
+    "type": "remote",
+    "android_agent": "my-phone",
+    "remote_timeout_seconds": 35
+  }
+}

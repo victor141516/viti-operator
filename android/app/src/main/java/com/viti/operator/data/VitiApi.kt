@@ -1,0 +1,328 @@
+package com.viti.operator.data
+
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.IOException
+import java.net.HttpURLConnection
+import java.net.URL
+
+class VitiApi(private val settings: ServerSettings) {
+    suspend fun status(): RuntimeStatus = request("/api/v1/status").let { body ->
+        RuntimeStatus(
+            ready = body.optBoolean("ready"),
+            simReady = body.optBoolean("sim_ready"),
+            tunnelReady = body.optBoolean("tunnel_ready"),
+            imsReady = body.optBoolean("ims_ready"),
+            detail = body.optString("detail"),
+        )
+    }
+
+    suspend fun heartbeat(identity: ClientIdentity, authActive: Boolean = false) {
+        rawRequest(
+            path = "/api/v1/clients/heartbeat",
+            method = "POST",
+            body = JSONObject()
+                .put("id", identity.id)
+                .put("kind", "android")
+                .put("name", identity.name)
+                .put("auth_agent_id", identity.id)
+                .put("has_sim", identity.hasSim)
+                .put("auth_active", authActive),
+            acceptedStatuses = setOf(204),
+        )
+    }
+
+    suspend fun setSIMAuthAssignment(identity: ClientIdentity, enabled: Boolean) {
+        rawRequest(
+            path = "/api/v1/sim-auth/assignment",
+            method = "PUT",
+            body = JSONObject()
+                .put("client_id", identity.id)
+                .put("agent_id", identity.id)
+                .put("enabled", enabled),
+            acceptedStatuses = setOf(200),
+        )
+    }
+
+    suspend fun simAuthAssignment(): SIMAuthAssignmentStatus = request("/api/v1/sim-auth/assignment").let { body ->
+        SIMAuthAssignmentStatus(
+            mode = body.optString("mode").ifBlank { "disabled" },
+            clientId = body.optString("client_id"),
+            claimedClientId = body.optString("claimed_client_id"),
+        )
+    }
+
+    suspend fun topology(): ConnectionTopology = request("/api/v1/topology").let { body ->
+        ConnectionTopology(
+            generatedAt = body.optString("generated_at"),
+            server = topologyNodeFromJson(body.optJSONObject("server")),
+            sim = body.optJSONObject("sim").let { sim ->
+                TopologySim(
+                    state = sim?.optString("state").orEmpty().ifBlank { "idle" },
+                    label = sim?.optString("label").orEmpty().ifBlank { "SIM not configured" },
+                    detail = sim?.optString("detail").orEmpty(),
+                    mode = sim?.optString("mode").orEmpty().ifBlank { "disabled" },
+                    holderClientId = sim?.optString("holder_client_id").orEmpty(),
+                    authAgentId = sim?.optString("auth_agent_id").orEmpty(),
+                )
+            },
+            epdg = topologyNodeFromJson(body.optJSONObject("epdg"), "ePDG tunnel"),
+            ims = topologyNodeFromJson(body.optJSONObject("ims"), "IMS registration"),
+            operator = topologyNodeFromJson(body.optJSONObject("operator"), "Mobile carrier"),
+            clients = body.optJSONArray("clients").mapObjects { client ->
+                TopologyClient(
+                    id = client.optString("id"),
+                    kind = client.optString("kind"),
+                    name = client.optString("name"),
+                    hasSim = client.optBoolean("has_sim"),
+                    simHolder = client.optBoolean("sim_holder"),
+                    online = client.optBoolean("online"),
+                    lastSeen = client.optString("last_seen"),
+                )
+            },
+        )
+    }
+
+	suspend fun imsRegistration(): IMSRegistrationState = request("/api/v1/ims-registration").let { body ->
+		IMSRegistrationState(
+			enabled = body.optBoolean("enabled", true),
+			registered = body.optBoolean("registered"),
+			detail = body.optString("detail"),
+		)
+	}
+
+	suspend fun setIMSRegistration(enabled: Boolean): IMSRegistrationState = request(
+		path = "/api/v1/ims-registration",
+		method = "PUT",
+		body = JSONObject().put("enabled", enabled),
+	).let { body ->
+		IMSRegistrationState(
+			enabled = body.optBoolean("enabled", enabled),
+			registered = body.optBoolean("registered"),
+			detail = body.optString("detail"),
+		)
+	}
+
+    suspend fun messages(): List<Message> = request("/api/v1/messages")
+        .optJSONArray("messages")
+        .mapObjects(::messageFromJson)
+
+    suspend fun calls(): List<Call> = request("/api/v1/calls")
+        .optJSONArray("calls")
+        .mapObjects(::callFromJson)
+
+    suspend fun recordingSettings(): RecordingSettings = request("/api/v1/recording").let {
+        RecordingSettings(it.optBoolean("enabled"))
+    }
+
+    suspend fun setRecordingEnabled(enabled: Boolean): RecordingSettings = request(
+        path = "/api/v1/recording",
+        method = "PUT",
+        body = JSONObject().put("enabled", enabled),
+    ).let { RecordingSettings(it.optBoolean("enabled")) }
+
+    suspend fun recordingAudio(callId: String, trackIds: List<String>): ByteArray = withContext(Dispatchers.IO) {
+        require(trackIds.isNotEmpty()) { "Select at least one recording track" }
+        val encodedTracks = java.net.URLEncoder.encode(trackIds.joinToString(","), Charsets.UTF_8.name())
+        val connection = URL(normalizeServerUrl(settings.serverUrl) + "/api/v1/calls/${urlSegment(callId)}/recording?tracks=$encodedTracks").openConnection() as HttpURLConnection
+        try {
+            connection.connectTimeout = 10_000
+            connection.readTimeout = 60_000
+            if (settings.apiKey.isNotBlank()) connection.setRequestProperty("Authorization", "Bearer ${settings.apiKey}")
+            val code = connection.responseCode
+            if (code != 200) {
+                val text = connection.errorStream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+                val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                throw IOException(message.ifBlank { "The server returned HTTP $code" })
+            }
+            connection.inputStream.use { it.readBytes() }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    suspend fun voice(): VoiceProvisioning = request("/api/v1/voice").let { body ->
+        VoiceProvisioning(
+            enabled = body.optBoolean("enabled"),
+            websocketUrl = body.optString("websocket_url"),
+            domain = body.optString("domain"),
+            username = body.optString("username"),
+            password = body.optString("password"),
+            diagnosticsEnabled = body.optBoolean("diagnostics_enabled"),
+            iceServers = body.optJSONArray("ice_servers").mapObjects { server ->
+                VoiceIceServer(
+                    urls = server.optJSONArray("urls").mapStrings(),
+                    username = server.optString("username"),
+                    credential = server.optString("credential"),
+                )
+            },
+        )
+    }
+
+    suspend fun sendMessage(to: String, text: String): Message = request(
+        path = "/api/v1/messages",
+        method = "POST",
+        body = JSONObject().put("to", to).put("text", text),
+        acceptedStatuses = setOf(200, 201, 202),
+    ).let(::messageFromJson)
+
+    suspend fun startCall(to: String): Call = request(
+        path = "/api/v1/calls",
+        method = "POST",
+        body = JSONObject().put("to", to),
+        acceptedStatuses = setOf(200, 201),
+    ).let(::callFromJson)
+
+    suspend fun claimRecordingParticipant(traceId: String, participantId: String, identity: ClientIdentity) {
+        rawRequest(
+            path = "/api/v1/calls/participants",
+            method = "POST",
+            body = JSONObject()
+                .put("trace_id", traceId)
+                .put("participant_id", participantId)
+                .put("client_id", identity.id)
+                .put("name", identity.name),
+            acceptedStatuses = setOf(200),
+        )
+    }
+
+    suspend fun recordDiagnostic(body: JSONObject) {
+        rawRequest(
+            path = "/api/v1/diagnostics/events",
+            method = "POST",
+            body = body,
+            acceptedStatuses = setOf(202, 204),
+        )
+    }
+
+    suspend fun pollChallenge(agentId: String): AuthChallenge? {
+        val response = rawRequest(
+            path = "/api/v1/auth/agents/${urlSegment(agentId)}/challenges",
+            acceptedStatuses = setOf(200, 204),
+            readTimeoutMs = 30_000,
+        )
+        if (response.code == 204) return null
+        val body = JSONObject(response.body)
+        return AuthChallenge(body.getString("id"), body.getString("rand"), body.getString("autn"))
+    }
+
+    suspend fun answerChallenge(agentId: String, challengeId: String, material: AuthMaterial) {
+        val body = JSONObject()
+        if (material.auts.isNotEmpty()) {
+            body.put("auts", material.auts)
+        } else {
+            body.put("res", material.res).put("ck", material.ck).put("ik", material.ik)
+        }
+        rawRequest(
+            path = "/api/v1/auth/agents/${urlSegment(agentId)}/challenges/${urlSegment(challengeId)}/response",
+            method = "POST",
+            body = body,
+            acceptedStatuses = setOf(204),
+        )
+    }
+
+    suspend fun answerChallengeError(agentId: String, challengeId: String) {
+        rawRequest(
+            path = "/api/v1/auth/agents/${urlSegment(agentId)}/challenges/${urlSegment(challengeId)}/response",
+            method = "POST",
+            body = JSONObject().put("error", "The SIM could not resolve the authentication challenge"),
+            acceptedStatuses = setOf(204),
+        )
+    }
+
+    private suspend fun request(
+        path: String,
+        method: String = "GET",
+        body: JSONObject? = null,
+        acceptedStatuses: Set<Int> = setOf(200),
+    ): JSONObject {
+        val response = rawRequest(path, method, body, acceptedStatuses)
+        return if (response.body.isBlank()) JSONObject() else JSONObject(response.body)
+    }
+
+    private suspend fun rawRequest(
+        path: String,
+        method: String = "GET",
+        body: JSONObject? = null,
+        acceptedStatuses: Set<Int>,
+        readTimeoutMs: Int = 15_000,
+    ): HttpResult = withContext(Dispatchers.IO) {
+        val connection = URL(normalizeServerUrl(settings.serverUrl) + path).openConnection() as HttpURLConnection
+        try {
+            connection.requestMethod = method
+            connection.connectTimeout = 10_000
+            connection.readTimeout = readTimeoutMs
+            connection.setRequestProperty("Accept", "application/json")
+            if (settings.apiKey.isNotBlank()) {
+                connection.setRequestProperty("Authorization", "Bearer ${settings.apiKey}")
+            }
+            if (body != null) {
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.bufferedWriter(Charsets.UTF_8).use { it.write(body.toString()) }
+            }
+            val code = connection.responseCode
+            val stream = if (code in acceptedStatuses) connection.inputStream else connection.errorStream
+            val text = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
+            if (code !in acceptedStatuses) {
+                val message = runCatching { JSONObject(text).optString("error") }.getOrNull().orEmpty()
+                throw IOException(message.ifBlank { "The server returned HTTP $code" })
+            }
+            HttpResult(code, text)
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun messageFromJson(body: JSONObject) = Message(
+        id = body.optString("id"),
+        direction = body.optString("direction"),
+        from = body.optString("from"),
+        to = body.optString("to"),
+        text = body.optString("text"),
+        state = body.optString("state"),
+        createdAt = body.optString("created_at"),
+    )
+
+    private fun callFromJson(body: JSONObject) = Call(
+        id = body.optString("id"),
+        direction = body.optString("direction"),
+        peer = body.optString("peer"),
+        state = body.optString("state"),
+        startedAt = body.optString("started_at"),
+        endedAt = body.optString("ended_at"),
+        recordingTracks = body.optJSONArray("recording_tracks").mapObjects { track ->
+            RecordingTrack(
+                id = track.optString("id"),
+                role = track.optString("role"),
+                participantId = track.optString("participant_id"),
+                clientId = track.optString("client_id"),
+                label = track.optString("label"),
+                contentType = track.optString("content_type"),
+                createdAt = track.optString("created_at"),
+            )
+        },
+    )
+
+    private fun topologyNodeFromJson(body: JSONObject?, fallbackLabel: String = "Viti server") = TopologyNode(
+        state = body?.optString("state").orEmpty().ifBlank { "idle" },
+        label = body?.optString("label").orEmpty().ifBlank { fallbackLabel },
+        detail = body?.optString("detail").orEmpty(),
+    )
+
+    private fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> {
+        if (this == null) return emptyList()
+        return List(length()) { transform(getJSONObject(it)) }
+    }
+
+    private fun JSONArray?.mapStrings(): List<String> {
+        if (this == null) return emptyList()
+        return List(length()) { getString(it) }
+    }
+
+    private fun urlSegment(value: String): String = java.net.URLEncoder.encode(value, Charsets.UTF_8.name())
+
+    private data class HttpResult(val code: Int, val body: String)
+}

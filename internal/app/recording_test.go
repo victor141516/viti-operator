@@ -1,0 +1,127 @@
+package app
+
+import (
+	"encoding/binary"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestRecordingTrackAndSettingSurviveStoreReopen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := Call{ID: "call-one", TraceID: "trace-one", EngineCallID: "engine-one", Instance: "default", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	if err := store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetCallRecordingEnabled(true); err != nil {
+		t.Fatal(err)
+	}
+	track := RecordingTrack{ID: "remote", Role: "remote", Label: "Other party", ContentType: "audio/wav", File: filepath.Join("engine-one", "remote.wav"), CreatedAt: time.Now().UTC()}
+	if _, found, err := store.AddRecordingTrack("default", "engine-one", track); err != nil || !found {
+		t.Fatalf("add track: found=%v err=%v", found, err)
+	}
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reopened.GetCall("call-one")
+	if !ok || len(got.RecordingTracks) != 1 || got.RecordingTracks[0].File != track.File {
+		t.Fatalf("persisted recording track = %#v", got.RecordingTracks)
+	}
+	if !reopened.CallRecordingEnabled() {
+		t.Fatal("recording setting was not persisted")
+	}
+}
+
+func TestMixWAVAlignsTracksAndClipsSamples(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.wav")
+	second := filepath.Join(dir, "second.wav")
+	if err := os.WriteFile(first, writePCM16WAV(1000, 1, []int16{30000, 30000, -30000}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, writePCM16WAV(1000, 1, []int16{10000, -2000}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	mixed, err := mixWAV([]recordingInput{{path: first, startedAt: start}, {path: second, startedAt: start.Add(time.Millisecond)}}, start, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mixed) != 50 {
+		t.Fatalf("WAV length = %d, want 50", len(mixed))
+	}
+	got := []int16{
+		int16(binary.LittleEndian.Uint16(mixed[44:46])),
+		int16(binary.LittleEndian.Uint16(mixed[46:48])),
+		int16(binary.LittleEndian.Uint16(mixed[48:50])),
+	}
+	want := []int16{30000, 32767, -32000}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("sample %d = %d, want %d", index, got[index], want[index])
+		}
+	}
+}
+
+func TestMixWAVKeepsTheFullCallTimelineForLateAndShortTracks(t *testing.T) {
+	dir := t.TempDir()
+	short := filepath.Join(dir, "short.wav")
+	late := filepath.Join(dir, "late.wav")
+	if err := os.WriteFile(short, writePCM16WAV(1000, 1, []int16{100, 100, 100}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(late, writePCM16WAV(1000, 1, []int16{200, 200}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	end := start.Add(10 * time.Millisecond)
+
+	mixed, err := mixWAV([]recordingInput{
+		{path: short, startedAt: start},
+		{path: late, startedAt: start.Add(5 * time.Millisecond)},
+	}, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := wavSamples(t, mixed)
+	want := []int16{100, 100, 100, 0, 0, 200, 200, 0, 0, 0}
+	if len(got) != len(want) {
+		t.Fatalf("samples = %d, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("sample %d = %d, want %d", index, got[index], want[index])
+		}
+	}
+
+	lateOnly, err := mixWAV([]recordingInput{{path: late, startedAt: start.Add(5 * time.Millisecond)}}, start, end)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = wavSamples(t, lateOnly)
+	want = []int16{0, 0, 0, 0, 0, 200, 200, 0, 0, 0}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("late-only sample %d = %d, want %d", index, got[index], want[index])
+		}
+	}
+}
+
+func wavSamples(t *testing.T, wav []byte) []int16 {
+	t.Helper()
+	if len(wav) < 44 || string(wav[:4]) != "RIFF" || string(wav[8:12]) != "WAVE" {
+		t.Fatal("invalid WAV data")
+	}
+	samples := make([]int16, (len(wav)-44)/2)
+	for index := range samples {
+		samples[index] = int16(binary.LittleEndian.Uint16(wav[44+index*2 : 46+index*2]))
+	}
+	return samples
+}

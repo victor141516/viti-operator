@@ -1,0 +1,30 @@
+{
+  "id": "line-1",
+  "imsi": "001010123456789",
+  "mcc": "001",
+  "mnc": "001",
+  "imei": "490154203237518",
+  "msisdn": "+34123456789",
+  "smsc": "+34123456780",
+  "reader_index": 0,
+  "pin": "",
+  "ami_user": "vowifi",
+  "ami_secret": "overridden-by-environment",
+  "manager_url": "http://manager:8787",
+  "rtp_start": 10000,
+  "rtp_end": 10059,
+  "sip": {
+    "listen_addr": "0.0.0.0",
+    "transport": "udp",
+    "webrtc": {
+      "enable": true,
+      "plain_ws": true,
+      "username": "viti",
+      "password": "overridden-by-environment",
+      "ws_port": 8088
+    }
+  },
+  "debug": {
+    "asterisk": false
+  }
+}

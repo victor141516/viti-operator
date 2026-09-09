@@ -1,0 +1,13 @@
+{
+  "name": "viti-operator-web-assets",
+  "private": true,
+  "scripts": {
+    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify"
+  },
+  "dependencies": {
+    "jssip": "3.10.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}

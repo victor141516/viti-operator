@@ -1,0 +1,169 @@
+name: viti-operator
+
+services:
+  manager:
+    image: viti-operator-manager
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    environment:
+      VITI_LISTEN: 0.0.0.0:8787
+      VITI_API_KEY: ${VITI_API_KEY:?Set VITI_API_KEY in .env}
+      VITI_AMI_ADDRESS: engine:5038
+      VITI_AMI_USERNAME: vowifi
+      VITI_AMI_SECRET: ${VITI_AMI_SECRET:?Set VITI_AMI_SECRET in .env}
+      VITI_AMI_FROM_NUMBER: ${VITI_LINE_NUMBER:?Set VITI_LINE_NUMBER in E.164 format}
+      VITI_AMI_REALM: ${VITI_IMS_REALM:?Set VITI_IMS_REALM in .env}
+      VITI_VOICE_PASSWORD: ${VITI_VOICE_PASSWORD:?Set VITI_VOICE_PASSWORD in .env}
+      # The ICE endpoint stays inside Tailscale. A fixed TURN route also works
+      # in embedded browsers that intentionally suppress host candidates.
+      VITI_VOICE_ICE_URLS: turn:${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}:3479?transport=udp
+      VITI_VOICE_ICE_USERNAME: viti
+      VITI_VOICE_ICE_CREDENTIAL: ${VITI_VOICE_PASSWORD}
+      VITI_ENGINE_EVENT_TOKEN: ${VITI_ENGINE_EVENT_TOKEN:?Set VITI_ENGINE_EVENT_TOKEN in .env}
+      VITI_SIM_AUTH_TYPE: ${VITI_SIM_AUTH_TYPE:-auto}
+      VITI_ADB: /usr/bin/adb
+      VITI_ADB_SERIAL: ${VITI_ADB_SERIAL:-}
+      ADB_SERVER_SOCKET: ${VITI_ADB_SERVER_SOCKET:-tcp:host.docker.internal:5037}
+      VITI_DIAGNOSTICS_DIR: /diagnostics/manager
+      VITI_DIAGNOSTICS_ENABLED: ${VITI_DIAGNOSTICS_ENABLED:-0}
+      VITI_RECORDINGS_DIR: /recordings
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./deploy/viti.json:/config/viti.json:ro
+      - ./deploy/data:/data
+      - ./deploy/data/recordings:/recordings
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}
+        target: /diagnostics
+    ports:
+      # Services listen on all container interfaces. Exposure is restricted
+      # here to the explicitly selected Tailscale address.
+      - ${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}:${VITI_HTTP_PORT:-18787}:8787/tcp
+    networks: [viti]
+
+  loopback-proxy:
+    image: viti-operator-manager
+    restart: unless-stopped
+    init: true
+    depends_on:
+      manager:
+        condition: service_healthy
+    entrypoint: [/usr/local/bin/viti-loopback-proxy]
+    environment:
+      VITI_API_KEY: ${VITI_API_KEY:?Set VITI_API_KEY in .env}
+      VITI_PROXY_UPSTREAM: http://manager:8787
+    ports:
+      - 127.0.0.1:${VITI_LOCAL_HTTP_PORT:-18788}:8788/tcp
+    networks: [viti]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8788/api/v1/health]
+      interval: 10s
+      timeout: 3s
+      start_period: 3s
+      retries: 6
+
+  turn:
+    image: coturn/coturn:4.17.2-r0-alpine
+    restart: unless-stopped
+    init: true
+    command:
+      - --listening-ip=0.0.0.0
+      - --listening-port=3479
+      - --fingerprint
+      - --lt-cred-mech
+      - --realm=viti.local
+      - --user=viti:${VITI_VOICE_PASSWORD:?Set VITI_VOICE_PASSWORD in .env}
+      - --min-port=49160
+      - --max-port=49219
+      - --no-tcp
+      - --no-tls
+      - --pidfile=/tmp/turnserver.pid
+      - --log-file=stdout
+    ports:
+      - ${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}:3479:3479/udp
+    networks: [viti]
+
+  engine:
+    build:
+      context: ./engine
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      manager:
+        condition: service_healthy
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      VOWIFI_MANAGER_URL: http://manager:8787
+      VOWIFI_MANAGER_TOKEN: ${VITI_ENGINE_EVENT_TOKEN:?Set VITI_ENGINE_EVENT_TOKEN in .env}
+      VOWIFI_AMI_SECRET: ${VITI_AMI_SECRET:?Set VITI_AMI_SECRET in .env}
+      VOWIFI_WEBRTC_PASSWORD: ${VITI_VOICE_PASSWORD:?Set VITI_VOICE_PASSWORD in .env}
+      VOWIFI_ADVERTISE_ADDR: ${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}
+      # Both SWu EAP-AKA and SIP IMS-AKA use the manager's selected provider:
+      # OpenStick, Android remote, or a generic command adapter.
+      SWU_HTTP_AKA_URL: http://manager:8787/api/v1/authenticate
+      SWU_HTTP_AKA_TOKEN: ${VITI_API_KEY:?Set VITI_API_KEY in .env}
+      VOWIFI_DIAGNOSTICS_ENABLED: ${VITI_DIAGNOSTICS_ENABLED:-0}
+    volumes:
+      - ./deploy/instance.json:/config/instance.json:ro
+      - ./deploy/data/recordings:/recordings
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}/engine
+        target: /logs
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}/engine/asterisk
+        target: /var/log/asterisk
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}/engine/runtime
+        target: /run/vowifi
+    ports:
+      - ${VITI_BIND_IP}:5060:5060/udp
+      - ${VITI_BIND_IP}:5061:5061/tcp
+      - ${VITI_BIND_IP}:10000-10059:10000-10059/udp
+    networks: [viti]
+    stop_grace_period: 20s
+
+  capture-manager:
+    build:
+      context: diagnostics
+    restart: unless-stopped
+    network_mode: service:manager
+    depends_on: [manager]
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      CAPTURE_NAME: manager
+      VITI_DIAGNOSTICS_ENABLED: ${VITI_DIAGNOSTICS_ENABLED:-0}
+    volumes:
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}
+        target: /diagnostics
+
+  capture-engine:
+    build:
+      context: diagnostics
+    restart: unless-stopped
+    network_mode: service:engine
+    depends_on: [engine]
+    cap_add: [NET_ADMIN, NET_RAW]
+    environment:
+      CAPTURE_NAME: engine
+      VITI_DIAGNOSTICS_ENABLED: ${VITI_DIAGNOSTICS_ENABLED:-0}
+    volumes:
+      - type: bind
+        source: ${VITI_DIAGNOSTICS_DIR:?Set VITI_DIAGNOSTICS_DIR to a directory outside the repository}
+        target: /diagnostics
+
+networks:
+  viti:
+    driver: bridge
+    ipam:
+      config:
+        # Keep the container network away from Docker Desktop/WSL host ranges;
+        # otherwise OpenStick's private host-side ADB bridge becomes unroutable.
+        - subnet: ${VITI_DOCKER_SUBNET:-172.31.250.0/24}

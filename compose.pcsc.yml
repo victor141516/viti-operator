@@ -1,0 +1,10 @@
+services:
+  manager:
+    environment:
+      VITI_SIM_AUTH_TYPE: disabled
+  engine:
+    environment:
+      SWU_HTTP_AKA_URL: ""
+      SWU_HTTP_AKA_TOKEN: ""
+    volumes:
+      - ${PCSC_SOCKET:-/run/pcscd/pcscd.comm}:/run/pcscd/pcscd.comm

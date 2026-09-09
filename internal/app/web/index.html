@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f7f7fb">
+  <title>Viti Operator</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#content">Skip to content</a>
+  <div class="shell">
+    <header class="topbar">
+      <a class="brand" href="#messages" aria-label="Viti Operator, home">
+        <span class="brand-mark" aria-hidden="true">V</span>
+        <span><strong>Viti</strong><small>Operator</small></span>
+      </a>
+      <div class="connection" id="connection" role="status" aria-live="polite">
+        <span class="status-dot"></span><span>Connecting…</span>
+      </div>
+    </header>
+
+    <nav class="nav" aria-label="Sections">
+      <button class="nav-item active" data-view="messages" aria-current="page"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v11H8l-4 3V5Z"/><path d="M8 9h8M8 12h5"/></svg><span>Messages</span></button>
+      <button class="nav-item" data-view="calls"><svg aria-hidden="true" viewBox="0 0 24 24"><path d="M7 3l3 5-2 2c1.4 3 3.6 5.2 6.6 6.6l2-2 5 3c-.5 2.2-2.5 3.8-4.8 3.4C9.4 19.7 4.3 14.6 3 7.2 2.6 4.9 4.2 3 7 3Z"/></svg><span>Calls</span></button>
+      <button class="nav-item" data-view="settings"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3M4.9 4.9 7 7m10 10 2.1 2.1M19.1 4.9 17 7M7 17l-2.1 2.1"/></svg><span>Connection</span></button>
+    </nav>
+
+    <main id="content">
+      <section class="view active" id="messages-view" aria-labelledby="messages-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">SMS over IMS</p><h1 id="messages-title">Messages</h1></div>
+          <button class="primary" id="new-message">New message</button>
+        </div>
+        <div class="panel message-layout">
+          <div class="thread-list" id="message-list" aria-live="polite"></div>
+          <form class="composer" id="message-form">
+            <h2>Send SMS</h2>
+            <label for="message-to">Number</label>
+            <input id="message-to" name="to" inputmode="tel" autocomplete="tel" placeholder="+34…" required>
+            <label for="message-text">Message</label>
+            <textarea id="message-text" name="text" rows="5" maxlength="1000" placeholder="Write a message" required></textarea>
+            <div class="form-footer"><span id="message-count">0/1000</span><button class="primary" type="submit">Send</button></div>
+            <p class="form-status" id="message-status" role="status"></p>
+          </form>
+        </div>
+      </section>
+
+      <section class="view" id="calls-view" aria-labelledby="calls-title">
+        <div class="section-heading">
+          <div><p class="eyebrow">Voice over IMS</p><h1 id="calls-title">Calls</h1></div>
+        </div>
+        <div class="panel call-layout">
+          <form class="dialer" id="call-form">
+            <label for="call-to">Phone number</label>
+            <input id="call-to" name="to" inputmode="tel" autocomplete="tel" placeholder="+34…" required>
+            <div class="dial-grid" aria-label="Dial pad"></div>
+            <button class="call-button" type="submit">Call</button>
+            <div class="call-actions" id="call-actions" hidden>
+              <button type="button" class="answer-button" id="answer-call">Answer</button>
+              <button type="button" class="join-button" id="join-call" hidden>Join</button>
+              <button type="button" class="hangup-button" id="hangup-call">Hang up</button>
+            </div>
+            <p class="form-status" id="call-status" role="status"></p>
+            <audio id="remote-audio" autoplay playsinline></audio>
+          </form>
+          <div><h2>Recent</h2><div class="call-list" id="call-list"></div></div>
+        </div>
+      </section>
+
+      <section class="view" id="settings-view" aria-labelledby="settings-title">
+        <div class="section-heading connection-heading">
+          <div>
+            <p class="eyebrow">Infrastructure</p>
+            <h1 id="settings-title">Connection</h1>
+            <p class="section-subtitle">Real-time topology of the line and its clients.</p>
+          </div>
+          <div class="topology-summary" aria-live="polite">
+            <span class="summary-pill" id="topology-overall"><i></i>Checking…</span>
+            <time id="topology-time"></time>
+          </div>
+        </div>
+        <div class="panel settings-grid">
+          <article class="topology-card" aria-labelledby="topology-title">
+            <div class="topology-heading">
+              <div><h2 id="topology-title">Line path</h2><p>Live state from the SIM to the carrier and connected clients.</p></div>
+            </div>
+            <div id="topology" class="topology-embed-host">
+              <iframe
+                id="topology-frame"
+                class="topology-frame"
+                src="/topology.html?embed=web"
+                title="Interactive line-status map"
+              ></iframe>
+              <div id="topology-error" class="topology-embed-error" role="status" hidden></div>
+            </div>
+          </article>
+          <article class="status-card"><span>SIM</span><strong id="sim-state">—</strong></article>
+          <article class="status-card"><span>ePDG tunnel</span><strong id="tunnel-state">—</strong></article>
+          <article class="status-card"><span>IMS</span><strong id="ims-state">—</strong></article>
+          <article class="recording-setting">
+            <div>
+              <h2>Call recording</h2>
+              <p>Store the other party and every connected device as separate lossless tracks on this server.</p>
+            </div>
+            <label class="setting-switch" for="record-calls">
+              <input id="record-calls" type="checkbox" role="switch">
+              <span aria-hidden="true"></span>
+              <b>Record calls</b>
+            </label>
+            <p class="form-status" id="recording-status" role="status"></p>
+          </article>
+          <form class="token-form" id="token-form">
+            <h2>Access key</h2>
+            <label for="api-key">Server token</label>
+            <div class="compound"><input id="api-key" type="password" autocomplete="off"><button type="submit">Save</button></div>
+            <p>Stored only in this browser.</p>
+          </form>
+        </div>
+      </section>
+    </main>
+  </div>
+  <dialog class="recording-dialog" id="recording-dialog" aria-labelledby="recording-dialog-title">
+    <form method="dialog" class="recording-dialog-header"><div><p class="eyebrow">Call recording</p><h2 id="recording-dialog-title">Listen to tracks</h2></div><button class="dialog-close" value="cancel" aria-label="Close">×</button></form>
+    <p id="recording-dialog-peer" class="recording-dialog-peer"></p>
+    <fieldset id="recording-track-list"><legend>Tracks</legend></fieldset>
+    <audio id="recording-player" preload="metadata"></audio>
+    <section class="recording-transport" aria-label="Recording player">
+      <button class="recording-play-toggle" id="recording-play" type="button" aria-label="Play recording" disabled><span aria-hidden="true">▶</span></button>
+      <div class="recording-timeline">
+        <input class="recording-seek" id="recording-seek" type="range" min="0" max="0" value="0" step="0.01" aria-label="Recording position" disabled>
+        <div class="recording-time" aria-live="off"><output id="recording-current-time">0:00</output><span aria-hidden="true">/</span><span id="recording-duration">0:00</span></div>
+      </div>
+      <button class="recording-speed" id="recording-speed" type="button" aria-label="Playback speed 1 times" disabled>1×</button>
+    </section>
+    <p class="form-status" id="recording-player-status" role="status"></p>
+    <div class="recording-dialog-actions"><button class="primary" id="download-recording" type="button">Download selected WAV</button></div>
+  </dialog>
+  <script src="/voice.bundle.js?v=20260909-recordings" defer></script>
+  <script src="/app.js?v=20260909-player" defer></script>
+</body>
+</html>
