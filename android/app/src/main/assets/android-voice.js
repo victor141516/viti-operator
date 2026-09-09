@@ -21,4 +21,5 @@
   }
   window.vitiVoiceReject = () => voice?.reject()
   window.vitiVoiceHangup = () => voice?.hangup()
+  window.vitiVoiceMute = (muted) => voice?.mute(Boolean(muted))
 })()

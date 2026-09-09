@@ -1,8 +1,10 @@
 {
   "name": "viti-operator-web-assets",
   "private": true,
+  "type": "module",
   "scripts": {
-    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify"
+    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify",
+    "test": "node --test microphone-mute.test.js"
   },
   "dependencies": {
     "jssip": "3.10.1"

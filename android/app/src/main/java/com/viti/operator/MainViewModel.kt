@@ -172,6 +172,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
                 "sent=true" in cause -> "Call in progress · sending audio"
                 else -> "Call in progress"
             }
+            "mute-changed" -> previous.detail
             "dtmf" -> previous.detail
             "dtmf-failed" -> if (cause.isBlank()) "Could not send the DTMF tone" else cause
             "ended" -> "Call ended"
@@ -183,11 +184,20 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         // the user can retry without restarting the app; registration failures remain fatal.
         val stableState = when (type) {
             "ended", "failed" -> "registered"
-            "dtmf", "dtmf-failed" -> previous.state
+            "dtmf", "dtmf-failed", "mute-changed" -> previous.state
             else -> type
         }
         _uiState.value = _uiState.value.copy(
-            voice = VoiceUiState(stableState, if (type in setOf("ended", "failed")) "" else nextPeer, detail),
+            voice = VoiceUiState(
+                state = stableState,
+                peer = if (type in setOf("ended", "failed")) "" else nextPeer,
+                detail = detail,
+                microphoneMuted = when {
+                    type == "mute-changed" -> cause == "muted=true"
+                    type in setOf("incoming", "calling", "ended", "failed") -> false
+                    else -> previous.microphoneMuted
+                },
+            ),
         )
         if (type == "active" && traceId.isNotBlank() && participantId.isNotBlank()) {
             clientIdentity?.let { identity ->

@@ -53,6 +53,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.ContactPhone
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -152,6 +153,7 @@ fun VitiApp(
     onAnswerCall: () -> Unit,
     onRejectCall: () -> Unit,
     onHangupCall: () -> Unit,
+    onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
     onPrepareShizuku: () -> Unit,
     onStartAuthAgent: () -> Unit,
@@ -227,6 +229,7 @@ fun VitiApp(
                         onAnswer = onAnswerCall,
                         onReject = onRejectCall,
                         onHangup = onHangupCall,
+                        onSetMuted = onSetMuted,
                         onSendDtmf = onSendDtmf,
                         onRequestContacts = onRequestContacts,
                     )
@@ -582,6 +585,7 @@ private fun CallsScreen(
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onHangup: () -> Unit,
+    onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
     onRequestContacts: () -> Unit,
 ) {
@@ -634,6 +638,7 @@ private fun CallsScreen(
                         onAnswer = onAnswer,
                         onReject = onReject,
                         onHangup = onHangup,
+                        onSetMuted = onSetMuted,
                         onJoin = { onCall("*44") },
                         onOpenKeypad = { dialerOpen = true },
                     )
@@ -690,6 +695,7 @@ private fun CallsScreen(
             onAnswer = onAnswer,
             onReject = onReject,
             onHangup = onHangup,
+            onSetMuted = onSetMuted,
             onSendDtmf = onSendDtmf,
         )
     }
@@ -707,6 +713,7 @@ private fun ActiveCallPanel(
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onHangup: () -> Unit,
+    onSetMuted: (Boolean) -> Unit,
     onJoin: () -> Unit,
     onOpenKeypad: () -> Unit,
 ) {
@@ -737,7 +744,21 @@ private fun ActiveCallPanel(
                     Button(onClick = onAnswer, modifier = Modifier.weight(1f)) { Icon(Icons.AutoMirrored.Filled.CallReceived, null); Spacer(Modifier.width(6.dp)); Text("Answer") }
                     OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f)) { Icon(Icons.Default.CallEnd, null); Spacer(Modifier.width(6.dp)); Text("Reject") }
                 }
-                ui.voice.inCall -> Button(onClick = onHangup, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Default.CallEnd, null); Spacer(Modifier.width(6.dp)); Text("Hang up") }
+                ui.voice.inCall -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FilledTonalButton(
+                        onClick = { onSetMuted(!ui.voice.microphoneMuted) },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                    ) {
+                        Icon(if (ui.voice.microphoneMuted) Icons.Default.Mic else Icons.Default.MicOff, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (ui.voice.microphoneMuted) "Unmute" else "Mute")
+                    }
+                    Button(onClick = onHangup, modifier = Modifier.weight(1f).height(52.dp)) {
+                        Icon(Icons.Default.CallEnd, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text("Hang up")
+                    }
+                }
                 canJoinCall -> Button(onClick = onJoin, modifier = Modifier.fillMaxWidth()) {
                     Icon(Icons.AutoMirrored.Filled.CallReceived, null)
                     Spacer(Modifier.width(6.dp))
@@ -986,6 +1007,7 @@ private fun DialerSheet(
     onAnswer: () -> Unit,
     onReject: () -> Unit,
     onHangup: () -> Unit,
+    onSetMuted: (Boolean) -> Unit,
     onSendDtmf: (Char) -> Unit,
 ) {
     var number by rememberSaveable(initialNumber) { mutableStateOf(initialNumber) }
@@ -1029,8 +1051,18 @@ private fun DialerSheet(
                     Button(onClick = onAnswer, modifier = Modifier.weight(1f).height(52.dp)) { Text("Answer") }
                     OutlinedButton(onClick = onReject, modifier = Modifier.weight(1f).height(52.dp)) { Text("Reject") }
                 }
-                ui.voice.inCall -> Button(onClick = onHangup, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                    Icon(Icons.Default.CallEnd, null); Spacer(Modifier.width(8.dp)); Text("Hang up")
+                ui.voice.inCall -> Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    FilledTonalButton(
+                        onClick = { onSetMuted(!ui.voice.microphoneMuted) },
+                        modifier = Modifier.weight(1f).height(52.dp),
+                    ) {
+                        Icon(if (ui.voice.microphoneMuted) Icons.Default.Mic else Icons.Default.MicOff, null)
+                        Spacer(Modifier.width(6.dp))
+                        Text(if (ui.voice.microphoneMuted) "Unmute" else "Mute")
+                    }
+                    Button(onClick = onHangup, modifier = Modifier.weight(1f).height(52.dp)) {
+                        Icon(Icons.Default.CallEnd, null); Spacer(Modifier.width(8.dp)); Text("Hang up")
+                    }
                 }
                 else -> Button(
                     onClick = { onCall(number) },

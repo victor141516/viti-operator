@@ -72,6 +72,7 @@ class MainActivity : ComponentActivity() {
                     onAnswerCall = ::answerCall,
                     onRejectCall = voiceClient::reject,
                     onHangupCall = voiceClient::hangup,
+                    onSetMuted = voiceClient::setMuted,
                     onSendDtmf = voiceClient::sendDtmf,
                     onPrepareShizuku = ::prepareShizuku,
                     onStartAuthAgent = ::startAuthAgent,
