@@ -107,7 +107,8 @@ func (s *Store) ApplySMSProtocolEvent(event SMSProtocolEvent, now time.Time) (Me
 func (s *Store) correlateSMSLocked(event SMSProtocolEvent, eventTime time.Time) (string, error) {
 	id := strings.TrimSpace(event.MessageID)
 	phase := strings.ToLower(strings.TrimSpace(event.Phase))
-	if id != "" {
+	isRPResponse := phase == "rp_ack" || phase == "rp_error"
+	if id != "" && !isRPResponse {
 		message, ok := s.messages[id]
 		if !ok || message.Direction != DirectionOutgoing {
 			return "", ErrSMSReportNotCorrelated
@@ -142,7 +143,11 @@ func (s *Store) smsCorrelationCandidatesLocked(event SMSProtocolEvent, eventTime
 		if message.Direction != DirectionOutgoing {
 			continue
 		}
-		if event.Destination != "" && strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
+		// RP-ACK and RP-ERROR carry no destination on the wire. Asterisk can
+		// only infer it from volatile track state, so it must never constrain
+		// persistent ownership after a restart.
+		if phase != "rp_ack" && phase != "rp_error" && event.Destination != "" &&
+			strings.TrimSpace(message.To) != strings.TrimSpace(event.Destination) {
 			continue
 		}
 		for _, part := range message.Parts {
@@ -275,8 +280,18 @@ func referenceConflicts(current, next *int) bool {
 }
 
 func smsPartIndex(parts []SMSPartStatus, event SMSProtocolEvent) int {
+	phase := strings.ToLower(strings.TrimSpace(event.Phase))
 	for index, part := range parts {
-		if sameReference(part.RPReference, event.RPReference) || sameReference(part.TPReference, event.TPReference) {
+		matched := false
+		switch phase {
+		case "rp_ack", "rp_error":
+			matched = sameReference(part.RPReference, event.RPReference)
+		case "status_report":
+			matched = sameReference(part.TPReference, event.TPReference)
+		default:
+			matched = sameReference(part.RPReference, event.RPReference) || sameReference(part.TPReference, event.TPReference)
+		}
+		if matched {
 			return index
 		}
 	}

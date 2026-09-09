@@ -171,11 +171,12 @@ func TestSMSMultipartReportUsesReferenceBeforeDefaultPartAfterRestart(t *testing
 	}
 }
 
-func TestSMSMessageIDWithWrongDestinationIsRejected(t *testing.T) {
+func TestSMSStatusMessageIDWithWrongDestinationIsRejected(t *testing.T) {
 	store, _, now := newOutgoingSMS(t)
+	submitSMSPart(t, store, "sms-one", "engine-1", "+34600000000", 1, 1, 4, 5, now)
 	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
-		Phase: "rp_ack", MessageID: "sms-one", Destination: "+34999999999",
-		Part: 1, Parts: 1, RPReference: smsInt(4), TPReference: smsInt(5),
+		Phase: "status_report", MessageID: "sms-one", Instance: "engine-1", Destination: "+34999999999",
+		Part: 1, Parts: 1, TPReference: smsInt(5), Status: smsInt(0),
 	}, now.Add(time.Second))
 	if !errors.Is(err, ErrSMSReportNotCorrelated) || changed {
 		t.Fatalf("changed=%t err=%v", changed, err)
@@ -259,6 +260,37 @@ func TestSMSRestartRejectsStaleRPACKMislabelledAsNewMessage(t *testing.T) {
 	}
 }
 
+func TestSMSRestartDoesNotTrustInferredRPDestination(t *testing.T) {
+	store, original, now := newOutgoingSMS(t)
+	old := original
+	old.ID = "sms-old"
+	old.To = "+34600000000"
+	old.Parts = []SMSPartStatus{{
+		Part: 1, Parts: 1, Instance: "engine-1", Recipient: old.To,
+		RPReference: smsInt(1), TPReference: smsInt(0), State: "submitted", SubmittedAt: &now, UpdatedAt: now,
+	}}
+	newer := original
+	newer.ID = "sms-new"
+	newer.To = "+34999999999"
+	newer.Parts = []SMSPartStatus{{
+		Part: 1, Parts: 1, Instance: "engine-1", Recipient: newer.To,
+		RPReference: smsInt(1), TPReference: smsInt(1), State: "submitted", SubmittedAt: &now, UpdatedAt: now,
+	}}
+	if err := store.SaveMessage(old); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveMessage(newer); err != nil {
+		t.Fatal(err)
+	}
+	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "rp_ack", MessageID: "sms-new", Instance: "engine-1", Destination: newer.To,
+		Part: 1, Parts: 1, RPReference: smsInt(1), TPReference: smsInt(1),
+	}, now.Add(time.Second))
+	if !errors.Is(err, ErrSMSReportAmbiguous) || changed {
+		t.Fatalf("inferred destination hid reused RP reference: changed=%t err=%v", changed, err)
+	}
+}
+
 func TestSMSRestartCorrelatesRPACKWithoutVolatileTrack(t *testing.T) {
 	store, _, now := newOutgoingSMS(t)
 	_, _, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
@@ -323,6 +355,26 @@ func TestSMSResponseDoesNotCrossReferenceTypesOrEngineInstances(t *testing.T) {
 				t.Fatalf("changed=%t err=%v", changed, err)
 			}
 		})
+	}
+}
+
+func TestSMSMultipartResponseSelectsPartByPhaseReferenceOnly(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	submitSMSPart(t, store, "sms-one", "engine-1", "+34600000000", 1, 2, 1, 9, now)
+	submitSMSPart(t, store, "sms-one", "engine-1", "+34600000000", 2, 2, 2, 10, now.Add(time.Second))
+	message, _, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "rp_ack", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 2, RPReference: smsInt(2), TPReference: smsInt(9),
+	}, now.Add(2*time.Second))
+	if err != nil || message.Parts[0].State != "submitted" || message.Parts[1].State != "accepted" {
+		t.Fatalf("RP response selected part by auxiliary TP reference: %+v err=%v", message.Parts, err)
+	}
+	message, _, err = store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
+		Part: 2, Parts: 2, RPReference: smsInt(2), TPReference: smsInt(9), Status: smsInt(0),
+	}, now.Add(3*time.Second))
+	if err != nil || message.Parts[0].State != "delivered" || message.Parts[1].State != "accepted" {
+		t.Fatalf("status report selected part by auxiliary RP reference: %+v err=%v", message.Parts, err)
 	}
 }
 
