@@ -4,6 +4,10 @@ import com.viti.operator.data.VoiceProvisioning
 
 enum class VoiceCallDirection { INCOMING, OUTGOING }
 
+// PackageManager.FEATURE_TELECOM was only exposed as an SDK constant much
+// later than the feature itself, so use its stable platform feature name.
+internal const val TELECOM_FEATURE = "android.software.telecom"
+
 enum class VoiceCallPhase { SETUP, RINGING, DIALING, ACTIVE, INACTIVE, ENDING }
 
 enum class VoiceAudioEndpointType { EARPIECE, SPEAKER, WIRED_HEADSET, BLUETOOTH, STREAMING, UNKNOWN }

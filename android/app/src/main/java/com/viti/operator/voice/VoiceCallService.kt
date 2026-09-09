@@ -6,7 +6,6 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
 import android.media.RingtoneManager
@@ -14,6 +13,7 @@ import android.net.Uri
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.viti.operator.IncomingCallRinger
@@ -53,6 +53,8 @@ class VoiceCallService : Service() {
         private set
     lateinit var voiceClient: VoiceWebViewClient
         private set
+    var coreTelecomAvailable: Boolean = false
+        private set
     val snapshot get() = runtime.snapshot
 
     override fun onCreate() {
@@ -62,13 +64,15 @@ class VoiceCallService : Service() {
         showIdleForegroundNotification()
         val identity = vitiClientIdentity()
         lateinit var runtimeReference: VoiceCallRuntime
-        val telecom = if (
+        coreTelecomAvailable =
             Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
             supportsCoreTelecom(
                 Build.VERSION.SDK_INT,
-                packageManager.hasSystemFeature(PackageManager.FEATURE_TELECOM),
+                packageManager.hasSystemFeature(TELECOM_FEATURE),
             )
-        ) {
+        // Keep the API check at the construction site so both the runtime and
+        // static analysis can prove this API-26 class is unreachable on 24-25.
+        val telecom = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && coreTelecomAvailable) {
             CoreTelecomGateway(applicationContext)
         } else {
             null
@@ -116,6 +120,12 @@ class VoiceCallService : Service() {
             },
         )
         runtime = runtimeReference
+        serviceScope.launchVoiceProvisioningSupervisor(
+            settings = settingsStore.settings,
+            load = { settings -> VitiApi(settings).voice() },
+            apply = runtime::start,
+            onFailure = { error -> Log.w(TAG, "Could not refresh voice provisioning; retrying", error) },
+        )
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -327,6 +337,7 @@ class VoiceCallService : Service() {
         private const val ANSWER_REQUEST = 4403
         private const val REJECT_REQUEST = 4404
         private const val HANGUP_REQUEST = 4405
+        private const val TAG = "VitiVoiceService"
     }
 }
 
