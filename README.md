@@ -8,6 +8,8 @@ IMS and conference audio.
 ## Features
 
 - Shared SMS and call history across web and Android.
+- Explicitly authorized Android contact synchronization with cross-device name
+  resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.
 - Per-participant audio mixing and independent departure.
 - Client-local microphone mute on web and Android; other participants and
