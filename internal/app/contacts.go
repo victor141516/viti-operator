@@ -178,7 +178,10 @@ func contactMatches(contact Contact, query string) bool {
 }
 
 func (a *App) contacts(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"contacts": a.store.Contacts(r.URL.Query().Get("q"))})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"contacts": a.store.Contacts(r.URL.Query().Get("q")),
+		"version":  a.store.ContactsVersion(),
+	})
 }
 
 func (a *App) replaceContactSource(w http.ResponseWriter, r *http.Request) {

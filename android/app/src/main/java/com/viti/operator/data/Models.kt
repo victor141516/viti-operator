@@ -32,8 +32,11 @@ data class RuntimeStatus(
     val simReady: Boolean = false,
     val tunnelReady: Boolean = false,
     val imsReady: Boolean = false,
+    val contactsVersion: Long = 0,
     val detail: String = "",
 )
+
+data class ServerContactsSnapshot(val contacts: List<PhoneContact>, val version: Long)
 
 data class ClientIdentity(
     val id: String,

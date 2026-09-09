@@ -21,6 +21,7 @@ type diskState struct {
 	CallRecordingEnabled   *bool                 `json:"call_recording_enabled,omitempty"`
 	Contacts               []ContactSourceRecord `json:"contacts,omitempty"`
 	ContactSourceRevisions map[string]int64      `json:"contact_source_revisions,omitempty"`
+	ContactsVersion        uint64                `json:"contacts_version,omitempty"`
 }
 
 type Store struct {
@@ -35,6 +36,7 @@ type Store struct {
 	contacts               map[string]ContactSourceRecord
 	contactSourceRevisions map[string]int64
 	contactView            []Contact
+	contactsVersion        uint64
 	diag                   *DiagnosticRecorder
 }
 
@@ -73,6 +75,7 @@ func OpenStore(path string) (*Store, error) {
 		s.contactSourceRevisions[clientID] = revision
 	}
 	s.contactView = mergedContacts(contactSourcesFromMap(s.contacts), "")
+	s.contactsVersion = state.ContactsVersion
 	s.simAuthAssignment = state.SIMAuthAssignment
 	if state.IMSRegistrationEnabled != nil {
 		s.imsRegistrationEnabled = *state.IMSRegistrationEnabled
@@ -176,14 +179,15 @@ func (s *Store) ReplaceContactSource(clientID, clientName, region string, revisi
 	if revision > 0 {
 		nextRevisions[clientID] = revision
 	}
-	previousContacts, previousRevisions, previousView := s.contacts, s.contactSourceRevisions, s.contactView
+	previousContacts, previousRevisions, previousView, previousVersion := s.contacts, s.contactSourceRevisions, s.contactView, s.contactsVersion
 	s.contacts = nextContacts
 	s.contactSourceRevisions = nextRevisions
 	if contentChanged {
 		s.contactView = mergedContacts(contactSourcesFromMap(nextContacts), "")
+		s.contactsVersion++
 	}
 	if err := s.flushLocked(); err != nil {
-		s.contacts, s.contactSourceRevisions, s.contactView = previousContacts, previousRevisions, previousView
+		s.contacts, s.contactSourceRevisions, s.contactView, s.contactsVersion = previousContacts, previousRevisions, previousView, previousVersion
 		return false, err
 	}
 	return contentChanged, nil
@@ -219,6 +223,12 @@ func (s *Store) Contacts(query string) []Contact {
 		result = append(result, contact)
 	}
 	return result
+}
+
+func (s *Store) ContactsVersion() uint64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.contactsVersion
 }
 
 func (s *Store) SIMAuthAssignment() SIMAuthAssignment {
@@ -491,6 +501,7 @@ func (s *Store) flushLocked() error {
 		state.Contacts = append(state.Contacts, item)
 	}
 	state.ContactSourceRevisions = s.contactSourceRevisions
+	state.ContactsVersion = s.contactsVersion
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

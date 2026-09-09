@@ -93,13 +93,14 @@ type RecordingSettings struct {
 }
 
 type RuntimeStatus struct {
-	Ready       bool      `json:"ready"`
-	SIMReady    bool      `json:"sim_ready"`
-	TunnelReady bool      `json:"tunnel_ready"`
-	IMSReady    bool      `json:"ims_ready"`
-	Provider    string    `json:"provider"`
-	Detail      string    `json:"detail,omitempty"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	Ready           bool      `json:"ready"`
+	SIMReady        bool      `json:"sim_ready"`
+	TunnelReady     bool      `json:"tunnel_ready"`
+	IMSReady        bool      `json:"ims_ready"`
+	ContactsVersion uint64    `json:"contacts_version"`
+	Provider        string    `json:"provider"`
+	Detail          string    `json:"detail,omitempty"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type IMSRegistrationState struct {

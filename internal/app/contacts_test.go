@@ -79,10 +79,16 @@ func TestReplacingIdenticalContactSourceIsANoOp(t *testing.T) {
 	if err != nil || !changed {
 		t.Fatalf("first replace changed=%v err=%v", changed, err)
 	}
+	if version := store.ContactsVersion(); version != 1 {
+		t.Fatalf("contacts version after first replace = %d, want 1", version)
+	}
 	first := store.ContactSources()[0].UpdatedAt
 	changed, err = store.ReplaceContactSource("phone-a", "OnePlus", "ES", 2, records)
 	if err != nil || changed {
 		t.Fatalf("identical replace changed=%v err=%v", changed, err)
+	}
+	if version := store.ContactsVersion(); version != 1 {
+		t.Fatalf("identical snapshot changed contacts version to %d", version)
 	}
 	if second := store.ContactSources()[0].UpdatedAt; !second.Equal(first) {
 		t.Fatalf("no-op replace changed timestamp from %s to %s", first, second)
@@ -100,6 +106,9 @@ func TestReplacingIdenticalContactSourceIsANoOp(t *testing.T) {
 	}
 	if contacts := reopened.Contacts(""); len(contacts) != 1 || contacts[0].Name != "Alice" {
 		t.Fatalf("stale snapshot replaced current contacts: %#v", contacts)
+	}
+	if version := reopened.ContactsVersion(); version != 1 {
+		t.Fatalf("persisted contacts version = %d, want 1", version)
 	}
 }
 
@@ -121,6 +130,9 @@ func TestFailedContactPersistenceRollsBackMemoryAndRevision(t *testing.T) {
 	}
 	if contacts := store.ContactSources(); len(contacts) != 0 {
 		t.Fatalf("failed persistence leaked contacts into memory: %#v", contacts)
+	}
+	if version := store.ContactsVersion(); version != 0 {
+		t.Fatalf("failed persistence leaked contacts version %d", version)
 	}
 	store.path = validPath
 	if changed, err := store.ReplaceContactSource("phone-a", "OnePlus", "ES", 7, records); err != nil || !changed {
@@ -156,6 +168,28 @@ func TestContactSyncAPIIsRepeatableAndEnrichesSharedHistory(t *testing.T) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("sync status = %d: %s", response.Code, response.Body.String())
 		}
+	}
+	contactsRequest := httptest.NewRequest(http.MethodGet, "/api/v1/contacts", nil)
+	contactsResponse := httptest.NewRecorder()
+	application.Handler().ServeHTTP(contactsResponse, contactsRequest)
+	var contactsPayload struct {
+		Version uint64 `json:"version"`
+	}
+	if err := json.Unmarshal(contactsResponse.Body.Bytes(), &contactsPayload); err != nil {
+		t.Fatal(err)
+	}
+	if contactsPayload.Version != 1 {
+		t.Fatalf("contacts API version = %d, want 1", contactsPayload.Version)
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/status", nil)
+	statusResponse := httptest.NewRecorder()
+	application.Handler().ServeHTTP(statusResponse, statusRequest)
+	var status RuntimeStatus
+	if err := json.Unmarshal(statusResponse.Body.Bytes(), &status); err != nil {
+		t.Fatal(err)
+	}
+	if status.ContactsVersion != contactsPayload.Version {
+		t.Fatalf("status contacts version = %d, want %d", status.ContactsVersion, contactsPayload.Version)
 	}
 	now := time.Now().UTC()
 	if err := application.store.SaveMessage(Message{ID: "message-one", Direction: DirectionIncoming, From: "+34612345678", State: "received", CreatedAt: now, UpdatedAt: now}); err != nil {

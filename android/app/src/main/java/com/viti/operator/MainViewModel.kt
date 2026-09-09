@@ -13,6 +13,7 @@ import com.viti.operator.data.PhoneContact
 import com.viti.operator.data.asPhoneContacts
 import com.viti.operator.data.RuntimeStatus
 import com.viti.operator.data.ServerSettings
+import com.viti.operator.data.ServerContactsSnapshot
 import com.viti.operator.data.SettingsStore
 import com.viti.operator.data.IMSRegistrationState
 import com.viti.operator.data.PhoneRoutingSettings
@@ -50,6 +51,13 @@ data class AppUiState(
     val notice: String = "",
 )
 
+internal fun shouldReloadContacts(
+    cachedSettings: ServerSettings?,
+    cachedVersion: Long?,
+    currentSettings: ServerSettings,
+    serverVersion: Long,
+): Boolean = cachedSettings != currentSettings || cachedVersion != serverVersion
+
 class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     val settings: StateFlow<ServerSettings> = settingsStore.settings.stateIn(
         viewModelScope,
@@ -74,6 +82,8 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     private var contactRevisionJob: Job? = null
     private var contactSyncJob: Job? = null
     private var contactSyncSettings: ServerSettings? = null
+    private var contactsCacheSettings: ServerSettings? = null
+    private var contactsCacheVersion: Long? = null
     private val incomingMessageTracker = IncomingMessageTracker()
 
     init {
@@ -96,18 +106,25 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
 
     fun refresh(silent: Boolean = false) = viewModelScope.launch {
         if (!silent) _uiState.value = _uiState.value.copy(refreshing = true)
-        val api = VitiApi(settings.value)
+        val refreshSettings = settings.value
+        val api = VitiApi(refreshSettings)
         runCatching {
             clientIdentity?.let { api.heartbeat(it) }
-            RefreshData(api.status(), api.messages(), api.calls(), api.contacts(), api.voice(), api.imsRegistration(), api.recordingSettings(), api.topology())
+            val status = api.status()
+            val contacts = if (shouldReloadContacts(contactsCacheSettings, contactsCacheVersion, refreshSettings, status.contactsVersion)) api.contacts() else null
+            RefreshData(status, api.messages(), api.calls(), contacts, api.voice(), api.imsRegistration(), api.recordingSettings(), api.topology())
         }.onSuccess { data ->
             val currentMessageSource = settings.value.serverUrl.trim().trimEnd('/')
             val newIncomingMessages = incomingMessageTracker.update(currentMessageSource, data.messages)
+            data.contacts?.let {
+                contactsCacheSettings = refreshSettings
+                contactsCacheVersion = it.version
+            }
             _uiState.value = _uiState.value.copy(
                 status = data.status,
                 messages = data.messages,
                 calls = data.calls,
-                contacts = data.contacts,
+                contacts = data.contacts?.contacts ?: _uiState.value.contacts,
                 voiceProvisioning = data.voice,
 				serverIMS = data.serverIMS,
                 recording = data.recording,
@@ -330,7 +347,9 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
                     if (settings.value == attemptedSettings) {
                         if (pendingContactSnapshot == snapshot) pendingContactSnapshot = null
                         contactSyncSettings = attemptedSettings
-                        _uiState.value = _uiState.value.copy(contacts = contacts, notice = "Contacts synchronized")
+                        contactsCacheSettings = attemptedSettings
+                        contactsCacheVersion = contacts.version
+                        _uiState.value = _uiState.value.copy(contacts = contacts.contacts, notice = "Contacts synchronized")
                     }
                     retryDelay = 1_000L
                 }.onFailure { error ->
@@ -355,7 +374,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         val status: RuntimeStatus,
         val messages: List<Message>,
         val calls: List<Call>,
-        val contacts: List<PhoneContact>,
+        val contacts: ServerContactsSnapshot?,
         val voice: VoiceProvisioning,
 		val serverIMS: IMSRegistrationState,
         val recording: RecordingSettings,

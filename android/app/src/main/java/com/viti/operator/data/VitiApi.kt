@@ -15,6 +15,7 @@ class VitiApi(private val settings: ServerSettings) {
             simReady = body.optBoolean("sim_ready"),
             tunnelReady = body.optBoolean("tunnel_ready"),
             imsReady = body.optBoolean("ims_ready"),
+            contactsVersion = body.optLong("contacts_version"),
             detail = body.optString("detail"),
         )
     }
@@ -113,9 +114,10 @@ class VitiApi(private val settings: ServerSettings) {
         .optJSONArray("calls")
         .mapObjects(::callFromJson)
 
-    suspend fun contacts(query: String = ""): List<PhoneContact> {
+    suspend fun contacts(query: String = ""): ServerContactsSnapshot {
         val suffix = if (query.isBlank()) "" else "?q=${java.net.URLEncoder.encode(query, Charsets.UTF_8.name())}"
-        return request("/api/v1/contacts$suffix").optJSONArray("contacts").mapObjects { contact ->
+        val body = request("/api/v1/contacts$suffix")
+        val contacts = body.optJSONArray("contacts").mapObjects { contact ->
             val id = contact.optString("id")
             val name = contact.optString("name")
             val names = contact.optJSONArray("names").mapStrings()
@@ -130,6 +132,7 @@ class VitiApi(private val settings: ServerSettings) {
                 )
             }
         }.flatten()
+        return ServerContactsSnapshot(contacts, body.optLong("version"))
     }
 
     suspend fun replaceContacts(identity: ClientIdentity, snapshot: DeviceContactsSnapshot) {
