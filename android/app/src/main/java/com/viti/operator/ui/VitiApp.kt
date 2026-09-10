@@ -136,6 +136,7 @@ import com.viti.operator.data.CellularTelemetryMonitor
 import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.PhoneContact
 import com.viti.operator.data.VitiApi
+import com.viti.operator.data.VoiceCallQuality
 import com.viti.operator.voice.VoiceCallRuntime
 import com.viti.operator.voice.IncomingCallPresentationStatus
 import com.viti.operator.voice.VoiceCallSnapshot
@@ -1162,7 +1163,7 @@ private fun DialerSheet(
     val dialRows = if (ui.voice.inCall) listOf("123", "456", "789", "*0#") else listOf("123", "456", "789", "+0⌫")
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).padding(horizontal = 24.dp),
+            Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -1205,6 +1206,10 @@ private fun DialerSheet(
             Spacer(Modifier.height(12.dp))
             if (ui.voice.inCall) {
                 AudioRouteButton(callSnapshot, onSelectAudioEndpoint)
+                if (ui.voice.quality != null) {
+                    Spacer(Modifier.height(12.dp))
+                    CallQualityCard(ui.voice.quality, callSnapshot.legToken)
+                }
                 Spacer(Modifier.height(12.dp))
             }
             when {
@@ -1246,6 +1251,77 @@ private fun DialerSheet(
         }
     }
 }
+
+@Composable
+private fun CallQualityCard(quality: VoiceCallQuality?, legToken: String) {
+    if (quality == null) return
+    var expanded by rememberSaveable(legToken) { mutableStateOf(false) }
+    val status = when (quality.status) {
+        "connecting" -> "Connecting media…"
+        "collecting" -> "Collecting measurements…"
+        "reconnecting" -> "Media reconnecting…"
+        "unsupported" -> "Live statistics unavailable"
+        "unavailable" -> "Measurements unavailable"
+        else -> "Live media quality"
+    }
+    val route = quality.route?.let {
+        "${if (it.mode == "turn-relay") "TURN relay" else "ICE direct"} · ${it.protocol.uppercase()}"
+    }.orEmpty()
+    val intervalDetail = listOfNotNull(
+        quality.inboundWindowMs?.let { "Incoming loss interval: ${it.toLong()} ms." },
+        quality.outboundWindowMs?.let { "Outgoing loss interval: ${it.toLong()} ms." }
+            ?: if (quality.outboundLossPercent != null) "Outgoing loss uses the latest peer RTCP report; its interval is unavailable." else null,
+    ).joinToString(" ")
+    Card(
+        onClick = { expanded = !expanded },
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(status, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    if (route.isNotBlank()) Text(route, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Text(if (expanded) "Hide details" else "Details", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+            }
+            if (expanded) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    QualityMetric("Incoming loss", qualityPercent(quality.inboundLossPercent), Modifier.weight(1f))
+                    QualityMetric("Outgoing loss", qualityPercent(quality.outboundLossPercent), Modifier.weight(1f))
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    QualityMetric("Incoming jitter", qualityMilliseconds(quality.inboundJitterMs), Modifier.weight(1f))
+                    QualityMetric(
+                        if (quality.roundTripScope == "media-peer") "Media RTT" else if (quality.roundTripScope == "ice-path") "ICE path RTT" else "Round-trip time",
+                        qualityMilliseconds(quality.roundTripTimeMs),
+                        Modifier.weight(1f),
+                    )
+                }
+                Text(
+                    "Incoming values describe RTP received by this device. Outgoing loss is reported by the media peer. $intervalDetail RTT covers only the WebRTC media path, not the mobile operator or PSTN leg.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun QualityMetric(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(modifier = modifier, shape = RoundedCornerShape(12.dp), color = MaterialTheme.colorScheme.surface) {
+        Column(Modifier.padding(10.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(value, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+private fun qualityPercent(value: Double?): String = value?.let { "${qualityNumber(it)} %" } ?: "Unavailable"
+private fun qualityMilliseconds(value: Double?): String = value?.let { "${qualityNumber(it)} ms" } ?: "Unavailable"
+private fun qualityNumber(value: Double): String = if (value < 10) "%.1f".format(value) else "%.0f".format(value)
 
 @Composable
 private fun AudioRouteButton(

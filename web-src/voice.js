@@ -1,6 +1,7 @@
 import JsSIP from 'jssip'
 import { createMicrophoneMuteController } from './microphone-mute.js'
 import { createMicrophoneInputController } from './microphone-input.js'
+import { createCallQualitySampler } from './call-quality.js'
 
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
@@ -41,6 +42,20 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     participant_id: detail.participant_id || participantId(current), client_id: clientId,
     ...detail, trace_id: detail.trace_id || traceId(current), leg_token: detail.leg_token || legToken(current),
   })
+  const emitQuality = (sample, current) => {
+    current.__vitiQualitySequence = (current.__vitiQualitySequence || 0) + 1
+    emit('quality', { quality: { ...sample, sequence: current.__vitiQualitySequence } }, current)
+  }
+  const stopQuality = (current, status = '') => {
+    if (!current) return
+    current.__vitiQualitySampler?.stop()
+    current.__vitiQualitySampler = null
+    current.__vitiQualityPeer = null
+    if (status) emitQuality({
+      status, sampledAtMs: Date.now(), inboundLossPercent: null, outboundLossPercent: null,
+      inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', inboundWindowMs: null, outboundWindowMs: null, route: null,
+    }, current)
+  }
   const microphoneMute = createMicrophoneMuteController((muted) => {
     diagnose('microphone.mute-changed', { muted })
     emit('mute-changed', { muted })
@@ -297,6 +312,8 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     const monitorConnection = (peerconnection) => {
       if (!peerconnection || monitoredConnections.has(peerconnection)) return
       monitoredConnections.add(peerconnection)
+      if (next.__vitiQualityPeer && next.__vitiQualityPeer !== peerconnection) stopQuality(next, 'connecting')
+      next.__vitiQualityPeer = peerconnection
       const snapshot = (kind) => diagnose(kind, {
         connection_state: peerconnection.connectionState,
         ice_connection_state: peerconnection.iceConnectionState,
@@ -326,10 +343,11 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         }, next))
         attachAudio(streams?.[0] || new MediaStream([track]), next)
       }
-      const mediaTimer = setInterval(async () => {
-        if (session !== next) { clearInterval(mediaTimer); return }
-        try {
-          const stats = await peerconnection.getStats()
+      const qualitySampler = createCallQualitySampler({
+        peerConnection: peerconnection,
+        onSample: (sample) => emitQuality(sample, next),
+        onError: (error) => diagnose('peer.stats.failed', { name: error?.name, message: error?.message }, next),
+        onStats: (stats) => {
           const reports = []
           let sent = 0, received = 0
           stats.forEach((report) => {
@@ -339,8 +357,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
           })
           diagnose('peer.stats', { reports }, next)
           emit('media', { sent: sent > 0, received: received > 0 }, next)
-        } catch (error) { diagnose('peer.stats.failed', { name: error?.name, message: error?.message }, next) }
-      }, 1000)
+        },
+      })
+      next.__vitiQualitySampler = qualitySampler
+      qualitySampler.start()
       snapshot('peer.monitoring-started')
       applySystemAudioState(next)
     }
@@ -353,7 +373,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       testAudio = null
     }
     next.on('ended', (event) => {
-      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       if (wasCurrent) session = null
       sessionsByLegToken.delete(legToken(next))
@@ -364,7 +384,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       else finish()
     })
     next.on('failed', (event) => {
-      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       if (wasCurrent) session = null
       sessionsByLegToken.delete(legToken(next))
@@ -444,6 +464,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         throw error
       }
       sessionsByLegToken.delete(legToken(target))
+      stopQuality(target)
       if (session === target) session = null
       emit('ended', { trace_id: traceId(target) }, target)
       return true
@@ -457,6 +478,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       if (session === ending) microphoneInput.release()
       if (session === ending) session = null
       sessionsByLegToken.delete(legToken(ending))
+      stopQuality(ending)
       if (!session) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
       const finish = () => {
         try { ending.terminate() } finally { emit('ended', { trace_id: traceId(ending) }, ending) }
@@ -500,6 +522,6 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       target.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
       emit('dtmf', { tone: String(tone) }, target)
     },
-    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); for (const current of sessionsByLegToken.values()) current.terminate(); sessionsByLegToken.clear(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null; telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false },
+    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); for (const current of sessionsByLegToken.values()) { stopQuality(current); current.terminate() } sessionsByLegToken.clear(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null; telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false },
   }
 }

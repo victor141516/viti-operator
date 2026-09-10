@@ -278,6 +278,13 @@ class VoiceCallRuntime(
             "ringing" -> updateLegPhase(event, VoiceCallPhase.RINGING, "Ringing…")
             "active" -> activateFromSip(event)
             "media" -> updateVoice(event, if ("sent=true" in event.cause && "received=true" in event.cause) "Call in progress · two-way audio" else "Call in progress")
+            "quality" -> {
+                val quality = event.quality
+                if (quality != null && quality.sequence > (voice.quality?.sequence ?: 0)) {
+                    voice = voice.copy(quality = quality)
+                    publish()
+                }
+            }
             "mute-changed" -> {
                 voice = voice.copy(microphoneMuted = event.cause == "muted=true")
                 publish()
@@ -789,6 +796,6 @@ class VoiceCallRuntime(
 
     private companion object {
         const val PLATFORM_CALLBACK_TIMEOUT_MS = 4_500L
-        val NON_TERMINAL_CALL_EVENTS = setOf("calling", "ringing", "active", "media", "mute-changed", "dtmf", "dtmf-failed")
+        val NON_TERMINAL_CALL_EVENTS = setOf("calling", "ringing", "active", "media", "quality", "mute-changed", "dtmf", "dtmf-failed")
     }
 }

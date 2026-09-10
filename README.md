@@ -30,6 +30,9 @@ IMS and conference audio.
   distribution.
 - Browser-local microphone and speaker preferences with safe default fallback
   and automatic restoration when a remembered device reconnects.
+- Expandable live WebRTC quality details on web and Android, including
+  direction-specific packet loss, incoming jitter, scoped RTT, and the observed
+  direct or TURN media route with its transport protocol.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
 - Established carrier sessions survive temporary loss of the SIM authentication
   source; new operations remain unavailable until fresh AKA can be served.
