@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 
 const cdpPort = process.env.VITI_CDP_PORT || "9239";
@@ -5,7 +6,17 @@ const pageURL = process.env.VITI_WEB_URL || "http://127.0.0.1:18788/?testTone=1#
 const apiKey = process.env.VITI_TEST_API_KEY || "";
 const destination = process.env.VITI_TEST_DESTINATION || "";
 const barrier = process.env.VITI_BARRIER_PATH || "";
+const requireRinging = process.env.VITI_REQUIRE_RINGING === "1";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
+const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
+const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
+
+const composeExec = (...args) => execFileSync("docker", ["compose", "exec", "-T", "engine", ...args], {
+  cwd: composeRoot,
+  encoding: "utf8",
+});
+const asterisk = command => composeExec("asterisk", "-rx", command);
+const asteriskLog = command => composeExec("sh", "-lc", command);
 
 if (!/^\+[1-9][0-9]{7,14}$/.test(destination)) throw new Error("carrier destination is not E.164");
 if (!barrier) throw new Error("VITI_BARRIER_PATH is required");
@@ -63,11 +74,15 @@ const callsFetch = `fetch('/api/v1/calls', {
     : {}
 }).then(response => response.json())`;
 let registered = false;
+let progressed = false;
 let ringing = false;
 let active = false;
 let bidirectional = false;
+let dtmfForwarded = false;
 let historyFinalized = false;
 let initialFinalized = 0;
+let asteriskLogStart = 0;
+let rtpDebugEnabled = false;
 try {
   await command("Runtime.enable");
   await waitFor("web application", () => evaluate("document.readyState === 'complete' && typeof state !== 'undefined'"));
@@ -86,6 +101,9 @@ try {
     state.globalCall === false &&
     document.querySelector('.call-button')?.disabled === false
   `), 30000);
+  asteriskLogStart = Number(asteriskLog("wc -l < /var/log/asterisk/full").trim());
+  asterisk("rtp set debug on");
+  rtpDebugEnabled = true;
   initialFinalized = await evaluate(`${callsFetch}.then(value => value.calls.filter(call =>
     call.peer === ${JSON.stringify(destination)} && Boolean(call.ended_at)).length)`);
   await evaluate(`(() => {
@@ -96,21 +114,41 @@ try {
     return true;
   })()`);
   await waitFor("carrier call start", () => evaluate("state.localCall === true"), 20000);
-  ringing = await waitFor(
-    "carrier ringing progress",
-    () => evaluate("document.querySelector('#call-status').textContent.includes('Ringing')"),
+  progressed = await waitFor(
+    "carrier call progress",
+    () => evaluate(`
+      state.localCall === true && (
+        state.callEstablished === true ||
+        document.querySelector('#call-status').textContent.includes('Ringing')
+      )
+    `),
     45000,
   );
+  ringing = await evaluate("document.querySelector('#call-status').textContent.includes('Ringing')");
   writeFileSync(`${barrier}.web-ringing`, "ready\n", { encoding: "utf8", mode: 0o600 });
   await waitFor("carrier phone answer", () => existsSync(`${barrier}.phone-active`), 45000);
-  active = await waitFor("active carrier call", () => evaluate("state.localCall === true"), 10000);
+  active = await waitFor(
+    "active carrier call",
+    () => evaluate("state.localCall === true && state.callEstablished === true"),
+    20000,
+  );
   bidirectional = await waitFor(
     "bidirectional carrier media",
     () => evaluate("document.querySelector('#call-status').textContent.includes('two-way audio')"),
     45000,
   );
+  await evaluate("state.voice.startDTMF('5'); true");
+  await delay(240);
+  await evaluate("state.voice.stopDTMF('5'); true");
+  await delay(500);
+  const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
+  dtmfForwarded = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
+    && /Sent RTP DTMF packet to/.test(newAsteriskLog);
   await delay(1500);
 } finally {
+  if (rtpDebugEnabled) {
+    try { asterisk("rtp set debug off"); } catch {}
+  }
   try {
     await evaluate("document.querySelector('#hangup-call').click(); true");
     await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
@@ -124,10 +162,14 @@ try {
 
 const result = {
   registered: Boolean(registered),
+  progressed: Boolean(progressed),
   ringing: Boolean(ringing),
   active: Boolean(active),
   bidirectional: Boolean(bidirectional),
+  dtmf_forwarded: Boolean(dtmfForwarded),
   history_finalized: Boolean(historyFinalized),
 };
 console.log(JSON.stringify(result));
-if (!Object.values(result).every(Boolean)) process.exitCode = 1;
+const required = result.registered && result.progressed && result.active
+  && result.bidirectional && result.dtmf_forwarded && result.history_finalized;
+if (!required || (requireRinging && !result.ringing)) process.exitCode = 1;
