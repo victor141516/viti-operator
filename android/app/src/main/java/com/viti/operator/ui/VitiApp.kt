@@ -1179,7 +1179,7 @@ private fun DialerSheet(
                 value = number,
                 onValueChange = { number = it; onNumberChange(it) },
                 modifier = Modifier.fillMaxWidth(),
-                placeholder = { Text(if (ui.voice.inCall) "DTMF tones" else "+34…") },
+                placeholder = { Text(if (ui.voice.inCall) "DTMF tones" else "Phone number") },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
                 readOnly = ui.voice.inCall || ending,
                 singleLine = true,
@@ -1235,7 +1235,7 @@ private fun DialerSheet(
                 }
                 else -> Button(
                     onClick = { onCall(number) },
-                    enabled = ui.status.ready && ui.voice.registered && !serverCallActive && (number.startsWith("+") || number == "*43"),
+                    enabled = ui.status.ready && ui.voice.registered && !serverCallActive && number.isNotBlank(),
                     modifier = Modifier.fillMaxWidth().height(52.dp),
                 ) {
                     Icon(Icons.Default.Call, null); Spacer(Modifier.width(8.dp))

@@ -3,10 +3,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify && esbuild recording-presence.js --bundle --format=iife --global-name=VitiRecordingPresence --outfile=../internal/app/web/recording-presence.js --minify && esbuild audio-preferences.js --bundle --format=iife --global-name=VitiAudioPreferences --outfile=../internal/app/web/audio-preferences.bundle.js --minify && esbuild topology-inspector.js --bundle --format=iife --global-name=VitiTopologyInspector --outfile=../internal/app/web/topology-inspector.bundle.js --minify",
+    "build": "npm run build:voice && npm run build:recording && npm run build:audio && npm run build:topology && npm run build:country",
+    "build:voice": "esbuild voice.js --bundle --format=iife --global-name=VitiVoiceBundle --outfile=../internal/app/web/voice.bundle.js --minify",
+    "build:recording": "esbuild recording-presence.js --bundle --format=iife --global-name=VitiRecordingPresence --outfile=../internal/app/web/recording-presence.js --minify",
+    "build:audio": "esbuild audio-preferences.js --bundle --format=iife --global-name=VitiAudioPreferences --outfile=../internal/app/web/audio-preferences.bundle.js --minify",
+    "build:topology": "esbuild topology-inspector.js --bundle --format=iife --global-name=VitiTopologyInspector --outfile=../internal/app/web/topology-inspector.bundle.js --minify",
+    "build:country": "esbuild country-detector.js --bundle --format=iife --global-name=VitiCountryDetector --outfile=../internal/app/web/country-detector.bundle.js --minify",
     "test": "node --test *.test.js"
   },
   "dependencies": {
+    "countries-and-timezones": "^3.10.0",
     "jssip": "3.10.1"
   },
   "devDependencies": {

@@ -46,6 +46,9 @@ func TestTopologyViewerIsEmbeddedAndSameOriginEmbeddable(t *testing.T) {
 	if !strings.Contains(csp, "style-src 'self' 'unsafe-inline'") {
 		t.Fatalf("viewer cannot apply calculated map coordinates: %q", csp)
 	}
+	if !strings.Contains(csp, "connect-src 'self' https://api.country.is ws: wss:") {
+		t.Fatalf("country detection must permit only its exact external API host: %q", csp)
+	}
 }
 
 func TestClientHeartbeatIdentifiesRemoteSIMHolder(t *testing.T) {

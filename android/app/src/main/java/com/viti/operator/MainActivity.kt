@@ -34,6 +34,7 @@ import androidx.lifecycle.lifecycleScope
 import com.viti.operator.auth.RemoteAuthService
 import com.viti.operator.auth.ShizukuSetup
 import com.viti.operator.data.SettingsStore
+import com.viti.operator.data.SessionCountryDetector
 import com.viti.operator.data.ContactsRepository
 import com.viti.operator.data.PhoneRoutingSettings
 import com.viti.operator.data.Message
@@ -51,9 +52,13 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import org.json.JSONObject
 
+internal fun isInternalCallTarget(value: String): Boolean = value.trim() in setOf("*43", "*44")
+
 class MainActivity : ComponentActivity() {
     private val settingsStore by lazy { SettingsStore(applicationContext) }
-    private val viewModel by viewModels<MainViewModel> { MainViewModel.Factory(settingsStore) }
+    private val viewModel by viewModels<MainViewModel> {
+        MainViewModel.Factory(settingsStore, SessionCountryDetector(applicationContext))
+    }
     private var voiceService by mutableStateOf<VoiceCallService?>(null)
     private var voiceServiceBound = false
     private var voiceSnapshotJob: Job? = null
@@ -61,6 +66,7 @@ class MainActivity : ComponentActivity() {
     private var pendingMicrophoneAction: (() -> Unit)? = null
     private var contactsObserver: ContentObserver? = null
     private var contactReloadJob: Job? = null
+    private var outgoingCallPreparation: Job? = null
     private var callPresentationStatus by mutableStateOf(IncomingCallPresentationStatus())
     private val voiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: android.os.IBinder) {
@@ -221,7 +227,33 @@ class MainActivity : ComponentActivity() {
         viewModel.setClientIdentity(clientIdentity)
     }
 
-    private fun placeCall(number: String) = withMicrophonePermission { voiceService?.runtime?.placeCall(number) }
+    private fun placeCall(number: String) = withMicrophonePermission {
+        val internalTarget = number.trim().takeIf(::isInternalCallTarget)
+        if (internalTarget != null) {
+            voiceService?.runtime?.placeCall(internalTarget)
+            return@withMicrophonePermission
+        }
+        if (outgoingCallPreparation?.isActive == true) {
+            viewModel.showNotice("A destination is already being prepared")
+            return@withMicrophonePermission
+        }
+        outgoingCallPreparation = lifecycleScope.launch {
+            viewModel.showNotice("Preparing destination…")
+            runCatching { viewModel.normalizeCallDestination(number) }
+                .onSuccess { normalized ->
+                    val service = voiceService
+                    if (service == null) {
+                        viewModel.showNotice("The calling service is not connected")
+                    } else if (service.snapshot.value.voice.incoming || service.snapshot.value.voice.inCall) {
+                        viewModel.showNotice("Another call started while the destination was being prepared")
+                    } else {
+                        val displayName = viewModel.contactNameFor(normalized).ifBlank { normalized }
+                        service.runtime.placeCall(normalized, displayName)
+                    }
+                }
+                .onFailure { error -> viewModel.showNotice(error.message ?: "Could not prepare the destination") }
+        }
+    }
 
     private fun answerCall(expectedToken: String? = null) = withMicrophonePermission { voiceService?.runtime?.answer(expectedToken) }
 

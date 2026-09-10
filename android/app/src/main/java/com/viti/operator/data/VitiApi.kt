@@ -228,6 +228,24 @@ class VitiApi(private val settings: ServerSettings) {
         acceptedStatuses = setOf(200, 201),
     ).let(::callFromJson)
 
+    suspend fun normalizeCallDestination(number: String, country: String): String {
+        val trimmed = number.trim()
+        if (isCanonicalE164(trimmed)) return trimmed
+        return try {
+            request(
+                path = "/api/v1/calls/normalize",
+                method = "POST",
+                body = JSONObject().put("number", trimmed).put("country", country),
+            ).optString("number").takeIf(::isCanonicalE164)
+                ?: throw IOException("The server returned an invalid dialing destination")
+        } catch (error: IOException) {
+            if (error.message.orEmpty().contains("HTTP 404") || error.message.orEmpty().contains("HTTP 405")) {
+                throw IOException("This server cannot normalize this number yet. Enter a canonical international number beginning with +.", error)
+            }
+            throw error
+        }
+    }
+
     suspend fun claimRecordingParticipant(traceId: String, participantId: String, identity: ClientIdentity) {
         rawRequest(
             path = "/api/v1/calls/participants",
