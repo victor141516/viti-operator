@@ -460,6 +460,35 @@ challenge that cannot be answered may still end the carrier session. Reconnectin
 the modem restores future AKA service; the manager never fabricates or replays
 authentication material.
 
+### Client network changed or local audio disappeared
+
+Do not end the conference merely because the web or Android media leg vanished.
+The marked Asterisk carrier channel is the authoritative live call. The client
+should show **Media reconnecting**, register SIP again when reachable, and join
+the existing conference through `*44` with a fresh connection generation. This
+recovery has no local timeout; the remote party or carrier may still hang up.
+
+1. Confirm the call remains open in `GET /api/v1/calls` and that the marked
+   carrier is still present with `asterisk -rx "confbridge list"`.
+2. Check manager traces for `participant_left`, the client's repeated recovery,
+   and a later admitted `participant_joined` with the same trace ID but a new
+   connection ID.
+3. If admission received no successful synchronous response, expect a durable
+   `participant_join_aborted` event and, while delivery is pending, its outbox
+   file. Do not remove it; replay must compensate manager state before the client
+   tries another generation.
+4. A remote `call_result`, confirmed current-generation tunnel down, or newer
+   engine-process boundary is terminal. Clients must stop retrying that trace.
+5. When the user presses End, the client retries
+   `POST /api/v1/calls/participants/leave` with the same operation ID until it
+   succeeds or the call is already terminal. Do not substitute a raw SIP BYE:
+   transport loss intentionally preserves logical membership.
+
+The manager's participation registry is volatile. Restarting it during an active
+call may preserve the history row and Asterisk carrier channel, but does not
+promise the same logical ownership, predecessor fencing, or leave idempotency.
+Collect logs and finish the call before a planned manager or engine restart.
+
 ### UI says another device has a call
 
 Check Asterisk channels, the durable engine event outbox, the persisted tunnel
@@ -579,6 +608,8 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
 ## Known constraints
 
 - One physical carrier line and one carrier call at a time.
+- Client network loss is recoverable without a local timeout, but seamless
+  logical-participant recovery across manager or engine restart is not promised.
 - One active SIM authentication agent; local USB is fallback, not concurrent.
 - Trusted-tailnet authentication model; no per-user roles.
 - HTTP on the tailnet; no application-layer TLS termination in this Compose

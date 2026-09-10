@@ -301,6 +301,33 @@ Associates a live Asterisk participant ID with the stable client identity and
 display name. Clients call this after media becomes active so microphone tracks
 are labelled with the actual browser or Android device.
 
+### `POST /api/v1/calls/participants/leave`
+
+Records an explicit user departure independently from SIP/WebRTC transport loss:
+
+```json
+{
+  "trace_id": "2bbcad44-550b-4d52-aef9-0d7f7fa78721",
+  "client_id": "browser-7a9b",
+  "connection_id": "connection-current",
+  "previous_connection_id": "connection-admitted",
+  "operation_id": "leave-10bd"
+}
+```
+
+`client_id` is the stable logical device identity. `connection_id` identifies
+one SIP/WebRTC attempt and must not be reused. During an in-flight recovery,
+`previous_connection_id` optionally identifies the last admitted generation so
+the user can still leave before the replacement admission completes.
+
+The successful response contains the same `operation_id` and `carrier_ended`.
+The latter is true only when this operation removed the last logical participant.
+If the carrier call has already ended, the response also contains
+`"already_ended":true`. An active-call request returns `409` if neither supplied
+generation owns that participant or if an operation ID is reused with different
+arguments. Gateway/AMI failure returns `502`; retry the exact same body and
+operation ID. Completed retries are idempotent and do not act on a later leg.
+
 ### `GET /api/v1/calls/{id}/recording?tracks=<id,id>`
 
 Streams a lossless PCM WAV containing the selected tracks aligned and mixed by
@@ -384,6 +411,12 @@ include:
 - `tunnel_start`, `tunnel_up`, `tunnel_down`;
 - `sms_in`;
 - `call_in`, `call_out`, `call_active`, `call_result`;
+- `participant_joined`, a synchronous fail-closed admission request carrying
+  `[client_id, participant_id, connection_id, channel]`;
+- `participant_join_aborted`, the durable compensation when Asterisk did not
+  receive a successful admission response;
+- `participant_left`, a durable observation that one admitted media channel
+  disappeared unexpectedly or normally, but not evidence of explicit user intent;
 - `recording_track`, which attaches a validated recording storage key and
   source timestamp to the correlated call.
 
@@ -403,6 +436,15 @@ A private `call_active` or `call_result` event may omit its peer when the call I
 already exists. If its matching start event is not yet durable, the manager
 returns 409 and the outbox retains it for retry. Informational engine events are
 accepted without creating history rows.
+
+`participant_joined` is deliberately not queued or replayed: its Asterisk
+channel is blocked waiting for the response, and only a synchronous `204` may
+enter ConfBridge. A missing, transport-error, or non-2xx response fails closed;
+Asterisk then durably queues `participant_join_aborted`. The manager correlates
+client, connection generation, exact Asterisk channel, source timestamp, and
+predecessor history so delayed abort/leave events cannot revoke a newer leg.
+`410` rejects a terminal, reused, colliding, or otherwise stale admission; an
+exact replay of the still-current generation remains idempotent.
 
 ### `GET /api/engine/recording`
 
