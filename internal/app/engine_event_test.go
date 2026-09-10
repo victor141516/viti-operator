@@ -343,6 +343,71 @@ func TestHistoricalTunnelTransitionDoesNotInterruptALaterCall(t *testing.T) {
 	}
 }
 
+func TestDelayedCallStartUsesEngineTimeBeforeTunnelFailure(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	tunnelUpAt := time.Date(2026, 9, 10, 10, 0, 0, 0, time.UTC)
+	callStartedAt := tunnelUpAt.Add(time.Second)
+	tunnelDownAt := tunnelUpAt.Add(2 * time.Second)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, tunnelUpAt, http.StatusNoContent)
+
+	// The manager receives this start after the engine produced both it and the
+	// tunnel failure. Its recorded time, not HTTP arrival time, determines which
+	// side of the transport failure the call belongs to.
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_out", "call_id": "delayed-call",
+		"recorded_at_ns": callStartedAt.UnixNano(), "args": []string{"+15555550105"},
+	}, http.StatusOK)
+	postTunnelEvent(t, server.URL, "process-one", 2, false, tunnelDownAt, http.StatusNoContent)
+
+	call, ok := app.store.GetCallByEngineID("engine-1", "delayed-call")
+	if !ok {
+		t.Fatal("delayed call event did not create a call")
+	}
+	if !call.StartedAt.Equal(callStartedAt) {
+		t.Fatalf("started at %v, want engine event time %v", call.StartedAt, callStartedAt)
+	}
+	if call.State != "interrupted" || call.EndedAt == nil || !call.EndedAt.Equal(tunnelDownAt) {
+		t.Fatalf("transport failure did not interrupt the pre-existing call: %#v", call)
+	}
+}
+
+func TestDelayedTerminalCallResultUsesEngineTime(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	startedAt := time.Date(2026, 9, 10, 11, 0, 0, 0, time.UTC)
+	endedAt := startedAt.Add(5 * time.Minute)
+	base := map[string]any{"instance": "engine-1", "call_id": "durable-result"}
+	base["event"], base["recorded_at_ns"], base["args"] = "call_out", startedAt.UnixNano(), []string{"+15555550106"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_result", endedAt.UnixNano(), []string{"out", "+15555550106", "ANSWER", "16"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+
+	call, ok := app.store.GetCallByEngineID("engine-1", "durable-result")
+	if !ok || call.EndedAt == nil {
+		t.Fatalf("terminal result did not finalize the call: %#v", call)
+	}
+	if !call.StartedAt.Equal(startedAt) || !call.UpdatedAt.Equal(endedAt) || !call.EndedAt.Equal(endedAt) {
+		t.Fatalf("delayed lifecycle did not retain engine timestamps: %#v", call)
+	}
+}
+
 func assertRuntimeReady(t *testing.T, baseURL string, want bool) {
 	t.Helper()
 	status := runtimeStatusForTest(t, baseURL)

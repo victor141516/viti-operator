@@ -265,6 +265,10 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now().UTC()
+	eventAt := now
+	if request.RecordedAtNS > 0 {
+		eventAt = time.Unix(0, request.RecordedAtNS).UTC()
+	}
 	request.Instance = strings.TrimSpace(request.Instance)
 	request.CallID = strings.TrimSpace(request.CallID)
 	request.TraceID = strings.TrimSpace(request.TraceID)
@@ -296,7 +300,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return Call{}, err
 		}
-		call := Call{ID: id, TraceID: request.TraceID, EngineCallID: request.CallID, Instance: request.Instance, Direction: direction, Peer: peer, StartedAt: now}
+		call := Call{ID: id, TraceID: request.TraceID, EngineCallID: request.CallID, Instance: request.Instance, Direction: direction, Peer: peer, StartedAt: eventAt}
 		a.diag.RecordTrace("manager.call", "allocated", request.TraceID, call)
 		return call, nil
 	}
@@ -373,7 +377,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		previousState := call.State
 		call.State = map[Direction]string{DirectionIncoming: "ringing", DirectionOutgoing: "dialing"}[direction]
-		call.UpdatedAt = now
+		call.UpdatedAt = eventAt
 		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "call": call})
 	case "call_active":
 		if len(request.Args) < 2 {
@@ -410,9 +414,9 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		previousState := call.State
 		call.State = "active"
 		if call.AnsweredAt == nil {
-			call.AnsweredAt = &now
+			call.AnsweredAt = &eventAt
 		}
-		call.UpdatedAt = now
+		call.UpdatedAt = eventAt
 		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "call": call})
 	case "call_result":
 		if len(request.Args) < 4 {
@@ -448,8 +452,8 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		}
 		previousState := call.State
 		call.State = callResultState(request.Args[2], call.State, request.Args[3])
-		call.UpdatedAt = now
-		call.EndedAt = &now
+		call.UpdatedAt = eventAt
+		call.EndedAt = &eventAt
 		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "dial_status": request.Args[2], "hangup_cause": request.Args[3], "call": call})
 	default:
 		// Informational engine events do not belong in call or message history.
