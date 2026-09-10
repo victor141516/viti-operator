@@ -4,6 +4,7 @@ import android.content.Context
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -28,6 +29,11 @@ internal data class SessionCountrySignals(
     val localeCountry: String = "",
 )
 
+internal data class ServingCountryObservation(
+    val country: String = "",
+    val pending: Boolean = false,
+)
+
 internal fun canonicalCountry(value: String): String = value.trim().uppercase(Locale.ROOT)
     .takeIf { it.length == 2 && it.all(Char::isLetter) }
     .orEmpty()
@@ -47,6 +53,27 @@ internal fun resolveSessionCountry(sessionGeneration: String, signals: SessionCo
     return SessionCountryDetection(sessionGeneration, reason = if (locale.isEmpty()) "insufficient-evidence" else "ip-locale-conflict")
 }
 
+internal suspend fun detectSessionCountryWithProbes(
+    sessionGeneration: String,
+    servingAttempts: Int = 21,
+    servingRetryDelayMs: Long = 100,
+    servingProbe: suspend () -> ServingCountryObservation,
+    fallbackSignals: suspend () -> SessionCountrySignals,
+    pause: suspend (Long) -> Unit = { delay(it) },
+): SessionCountryDetection {
+    require(servingAttempts > 0)
+    repeat(servingAttempts) { attempt ->
+        val serving = servingProbe()
+        val country = canonicalCountry(serving.country)
+        if (country.isNotEmpty()) {
+            return SessionCountryDetection(sessionGeneration, country, "serving-network")
+        }
+        if (!serving.pending) return resolveSessionCountry(sessionGeneration, fallbackSignals())
+        if (attempt < servingAttempts - 1) pause(servingRetryDelayMs)
+    }
+    return SessionCountryDetection(sessionGeneration, reason = "serving-network-pending")
+}
+
 internal fun isCanonicalE164(value: String): Boolean = value.trim().matches(Regex("^\\+[1-9][0-9]{7,14}$"))
 
 class SessionCountryDetector(
@@ -56,32 +83,43 @@ class SessionCountryDetector(
     private val appContext = context.applicationContext
 
     suspend fun detect(sessionGeneration: String): SessionCountryDetection = withContext(Dispatchers.IO) {
-        val serving = currentServingCountry()
-        if (serving.isNotEmpty()) {
-            return@withContext resolveSessionCountry(sessionGeneration, SessionCountrySignals(servingCountry = serving))
-        }
-        val timezone = runCatching {
-            android.icu.util.TimeZone.getRegion(TimeZone.getDefault().id)
-        }.getOrDefault("").takeUnless { it == "001" }.orEmpty()
-        resolveSessionCountry(
+        CellularTelemetryMonitor.get(appContext).refreshRegistration()
+        detectSessionCountryWithProbes(
             sessionGeneration,
-            SessionCountrySignals(
-                ipCountry = runCatching { ipCountryLookup() }.getOrDefault(""),
-                timezoneCountry = timezone,
-                localeCountry = Locale.getDefault().country,
-            ),
+            servingProbe = { currentServingCountry() },
+            fallbackSignals = {
+                val timezone = runCatching {
+                    android.icu.util.TimeZone.getRegion(TimeZone.getDefault().id)
+                }.getOrDefault("").takeUnless { it == "001" }.orEmpty()
+                SessionCountrySignals(
+                    ipCountry = runCatching { ipCountryLookup() }.getOrDefault(""),
+                    timezoneCountry = timezone,
+                    localeCountry = Locale.getDefault().country,
+                )
+            },
         )
     }
 
-    private fun currentServingCountry(): String {
-        val observation = CellularTelemetryMonitor.get(appContext).snapshot() ?: return ""
-        if (observation.service.registration != "in_service") return ""
-        val observedAt = runCatching { Instant.parse(observation.service.measuredAt) }.getOrNull() ?: return ""
-        if (Duration.between(observedAt, Instant.now()).abs() > Duration.ofMinutes(2)) return ""
+    private fun currentServingCountry(): ServingCountryObservation {
+        if (simAuthSubscriptionId() == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
+            return ServingCountryObservation()
+        }
+        val observation = CellularTelemetryMonitor.get(appContext).snapshot()
+            ?: return ServingCountryObservation(pending = true)
+        if (observation.service.availability == "unknown") return ServingCountryObservation(pending = true)
+        if (observation.service.registration.isBlank()) return ServingCountryObservation(pending = true)
+        if (observation.service.registration != "in_service") return ServingCountryObservation()
+        val observedAt = runCatching { Instant.parse(observation.service.measuredAt) }.getOrNull()
+            ?: return ServingCountryObservation(pending = true)
+        if (Duration.between(observedAt, Instant.now()).abs() > Duration.ofMinutes(2)) {
+            return ServingCountryObservation(pending = true)
+        }
         val subscriptionId = simAuthSubscriptionId()
-        if (subscriptionId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) return ""
-        val manager = appContext.getSystemService(TelephonyManager::class.java) ?: return ""
-        return runCatching { manager.createForSubscriptionId(subscriptionId).networkCountryIso }.getOrDefault("")
+        if (subscriptionId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) return ServingCountryObservation()
+        val manager = appContext.getSystemService(TelephonyManager::class.java)
+            ?: return ServingCountryObservation(pending = true)
+        val country = runCatching { manager.createForSubscriptionId(subscriptionId).networkCountryIso }.getOrDefault("")
+        return ServingCountryObservation(country, pending = country.isBlank())
     }
 }
 

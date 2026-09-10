@@ -3,6 +3,7 @@ package com.viti.operator.data
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class SessionCountryDetectorTest {
     @Test
@@ -56,5 +57,52 @@ class SessionCountryDetectorTest {
 
         assertEquals(SessionCountryDetection("session-in-spain", "ES", "ip+timezone"), first)
         assertEquals(SessionCountryDetection("session-in-britain", "GB", "ip+timezone"), next)
+    }
+
+    @Test
+    fun initialPendingCellularObservationWaitsForTheStrongSignal() = runBlocking {
+        val observations = ArrayDeque(
+            listOf(
+                ServingCountryObservation(pending = true),
+                ServingCountryObservation(pending = true),
+                ServingCountryObservation(country = "US"),
+            ),
+        )
+        var fallbackRequested = false
+
+        val result = detectSessionCountryWithProbes(
+            sessionGeneration = "cold-start",
+            servingAttempts = 3,
+            servingRetryDelayMs = 0,
+            servingProbe = { observations.removeFirst() },
+            fallbackSignals = {
+                fallbackRequested = true
+                SessionCountrySignals(ipCountry = "RU", timezoneCountry = "RU")
+            },
+            pause = {},
+        )
+
+        assertEquals(SessionCountryDetection("cold-start", "US", "serving-network"), result)
+        assertFalse(fallbackRequested)
+    }
+
+    @Test
+    fun unresolvedCellularInitializationFailsClosedInsteadOfUsingWeakSignals() = runBlocking {
+        var fallbackRequested = false
+        val result = detectSessionCountryWithProbes(
+            sessionGeneration = "cold-start-timeout",
+            servingAttempts = 2,
+            servingRetryDelayMs = 0,
+            servingProbe = { ServingCountryObservation(pending = true) },
+            fallbackSignals = {
+                fallbackRequested = true
+                SessionCountrySignals(ipCountry = "RU", timezoneCountry = "RU")
+            },
+            pause = {},
+        )
+
+        assertEquals("serving-network-pending", result.reason)
+        assertEquals("", result.country)
+        assertFalse(fallbackRequested)
     }
 }

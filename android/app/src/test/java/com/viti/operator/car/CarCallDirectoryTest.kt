@@ -2,8 +2,10 @@ package com.viti.operator.car
 
 import com.viti.operator.data.Call
 import com.viti.operator.data.PhoneContact
+import com.viti.operator.data.SessionCountryDetection
 import org.junit.Assert.assertEquals
 import org.junit.Test
+import kotlinx.coroutines.runBlocking
 
 class CarCallDirectoryTest {
     @Test
@@ -46,6 +48,35 @@ class CarCallDirectoryTest {
 
         assertEquals(targets.take(6), limitCarDialTargets(targets, hostLimit = 6))
         assertEquals(emptyList<CarDialTarget>(), limitCarDialTargets(targets, hostLimit = 0))
+    }
+
+    @Test
+    fun androidAutoNormalizesNationalTargetsBeforeDialing() = runBlocking {
+        var request = "" to ""
+        val normalized = normalizeCarDialTarget(
+            CarDialTarget("Alice", "612 345 678"),
+            SessionCountryDetection("car-session", "ES", "serving-network"),
+        ) { number, country ->
+            request = number to country
+            "+34612345678"
+        }
+
+        assertEquals("612 345 678" to "ES", request)
+        assertEquals(CarDialTarget("Alice", "+34612345678"), normalized)
+    }
+
+    @Test
+    fun androidAutoDoesNotApplySessionCountryToExplicitInternationalTargets() = runBlocking {
+        var requestedCountry = "not-called"
+        normalizeCarDialTarget(
+            CarDialTarget("Alice", "+34 612 345 678"),
+            SessionCountryDetection("car-session", "US", "serving-network"),
+        ) { _, country ->
+            requestedCountry = country
+            "+34612345678"
+        }
+
+        assertEquals("", requestedCountry)
     }
 
     private fun call(peer: String, contactName: String) = Call(

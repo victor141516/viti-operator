@@ -2,11 +2,22 @@ package com.viti.operator.car
 
 import com.viti.operator.data.Call
 import com.viti.operator.data.PhoneContact
+import com.viti.operator.data.SessionCountryDetection
 
 internal data class CarDialTarget(
     val name: String,
     val number: String,
 )
+
+internal suspend fun normalizeCarDialTarget(
+    target: CarDialTarget,
+    detection: SessionCountryDetection,
+    normalize: suspend (number: String, country: String) -> String,
+): CarDialTarget {
+    val number = target.number.trim()
+    val country = detection.country.takeUnless { number.startsWith("+") }.orEmpty()
+    return target.copy(number = normalize(number, country))
+}
 
 /** Produces a bounded, deterministic driving-safe directory with no free-form dialer. */
 internal fun buildCarDialTargets(
