@@ -4,11 +4,58 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type authReadinessFixture struct {
+	err error
+}
+
+func (f authReadinessFixture) AuthenticateAKA(context.Context, []byte, []byte) (AKAResult, error) {
+	return AKAResult{}, errors.New("not used")
+}
+
+func (f authReadinessFixture) CheckSIMReady(context.Context) error {
+	return f.err
+}
+
+func TestAuthenticateReadyReportsProviderStateWithoutIssuingAChallenge(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		ready  bool
+		detail string
+	}{
+		{name: "ready", ready: true},
+		{name: "SIM absent", err: errors.New("OpenStick SIM is not ready: state is ABSENT"), detail: "ABSENT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := &App{auth: authReadinessFixture{err: test.err}}
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/authenticate/ready", nil)
+			response := httptest.NewRecorder()
+			application.authenticateReady(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d", response.Code)
+			}
+			var payload struct {
+				Ready  bool   `json:"ready"`
+				Detail string `json:"detail"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Ready != test.ready || !strings.Contains(payload.Detail, test.detail) {
+				t.Fatalf("unexpected readiness payload: %#v", payload)
+			}
+		})
+	}
+}
 
 func TestAuthBrokerRoundTrip(t *testing.T) {
 	broker := NewAuthBroker()

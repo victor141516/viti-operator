@@ -23,6 +23,32 @@ def environment(**extra):
 
 
 class StrongSwanAdapterTest(unittest.TestCase):
+    def test_auth_readiness_url_is_derived_from_broker_contract(self):
+        self.assertEqual(
+            strongswan_adapter.auth_readiness_url({
+                "SWU_HTTP_AKA_URL": "http://manager:8787/api/v1/authenticate",
+            }),
+            "http://manager:8787/api/v1/authenticate/ready",
+        )
+
+    def test_auth_readiness_requires_a_boolean(self):
+        self.assertEqual(
+            strongswan_adapter.parse_auth_readiness(
+                b'{"ready":false,"detail":"SIM absent"}'
+            ),
+            (False, "SIM absent"),
+        )
+        with self.assertRaisesRegex(ValueError, "boolean ready"):
+            strongswan_adapter.parse_auth_readiness(b'{"ready":"yes"}')
+
+    def test_adapter_waits_without_starting_ike_until_provider_recovers(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(environment())
+        observations = iter([(False, "SIM absent"), (True, "")])
+        adapter.fetch_auth_readiness = lambda: next(observations)
+        adapter.env["SWU_HTTP_AKA_READY_INTERVAL"] = "0.01"
+        self.assertTrue(adapter.wait_auth_ready())
+        self.assertTrue(adapter.auth_waiting)
+
     def test_vici_failure_preserves_partial_control_records(self):
         class Session:
             class Transport:

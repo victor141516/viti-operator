@@ -18,6 +18,7 @@ import socket
 import subprocess
 import sys
 import time
+from urllib import request as urlrequest
 import uuid
 
 import event_outbox
@@ -64,6 +65,22 @@ def classify_failure(error, env):
         "reason_code": "strongswan_failure",
         "reason_policy": "transient",
     }
+
+
+def auth_readiness_url(env):
+    explicit = str(env.get("SWU_HTTP_AKA_READY_URL", "")).strip()
+    if explicit:
+        return explicit
+    authenticate = str(env.get("SWU_HTTP_AKA_URL", "")).strip().rstrip("/")
+    return authenticate + "/ready" if authenticate else ""
+
+
+def parse_auth_readiness(encoded):
+    payload = json.loads(encoded.decode("utf-8"))
+    ready = payload.get("ready")
+    if not isinstance(ready, bool):
+        raise ValueError("AKA readiness response is missing a boolean ready field")
+    return ready, str(payload.get("detail", "")).strip()
 
 
 def required(env, name):
@@ -289,6 +306,7 @@ class StrongSwanAdapter:
         self.stop_requested = False
         self.signal_received = None
         self.was_established = False
+        self.auth_waiting = False
 
     def log(self, message):
         print(f"[strongswan-adapter] {message}", flush=True)
@@ -300,6 +318,50 @@ class StrongSwanAdapter:
         sock.settimeout(10)
         sock.connect(str(self.vici_socket))
         return vici.Session(sock)
+
+    def fetch_auth_readiness(self):
+        url = auth_readiness_url(self.env)
+        if not url:
+            return True, ""
+        headers = {"Accept": "application/json"}
+        token = str(self.env.get("SWU_HTTP_AKA_TOKEN", "")).strip()
+        if token:
+            headers["Authorization"] = "Bearer " + token
+        timeout = positive_float(
+            self.env, "SWU_HTTP_AKA_READY_TIMEOUT", "5"
+        )
+        with urlrequest.urlopen(
+            urlrequest.Request(url, headers=headers), timeout=timeout
+        ) as response:
+            if response.status != 200:
+                raise RuntimeError(f"AKA readiness returned HTTP {response.status}")
+            return parse_auth_readiness(response.read(64 * 1024))
+
+    def wait_auth_ready(self):
+        interval = positive_float(
+            self.env, "SWU_HTTP_AKA_READY_INTERVAL", "2"
+        )
+        last_detail = None
+        while not self.stop_requested:
+            try:
+                ready, detail = self.fetch_auth_readiness()
+            except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as error:
+                ready, detail = False, f"readiness check failed: {error}"
+            if ready:
+                if self.auth_waiting:
+                    self.log("SIM authentication provider is ready; starting IKE")
+                return True
+            self.auth_waiting = True
+            if detail != last_detail:
+                self.log(
+                    "waiting for SIM authentication provider: "
+                    + (detail or "not ready")
+                )
+                last_detail = detail
+            deadline = time.monotonic() + interval
+            while not self.stop_requested and time.monotonic() < deadline:
+                time.sleep(min(0.1, deadline - time.monotonic()))
+        return False
 
     @staticmethod
     def close_session(session):
@@ -516,11 +578,12 @@ class StrongSwanAdapter:
             except FileNotFoundError:
                 pass
         try:
-            self.start_charon()
-            self.load_and_initiate()
-            self.wait_connected()
-            self.open_control()
-            self.monitor()
+            if self.wait_auth_ready():
+                self.start_charon()
+                self.load_and_initiate()
+                self.wait_connected()
+                self.open_control()
+                self.monitor()
             if self.signal_received is not None:
                 reason = "signal"
             failure = {"reason_code": reason, "reason_policy": "transient"}
