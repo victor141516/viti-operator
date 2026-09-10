@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from pathlib import Path
 
 import strongswan_adapter
 import tunnel_contract
@@ -67,6 +68,39 @@ class StrongSwanAdapterTest(unittest.TestCase):
         self.assertFalse(strongswan_adapter.sa_loss_expired(None, 20.0, 5.0))
         self.assertFalse(strongswan_adapter.sa_loss_expired(16.0, 20.0, 5.0))
         self.assertTrue(strongswan_adapter.sa_loss_expired(15.0, 20.0, 5.0))
+
+    def test_charon_config_uses_requested_natt_keepalive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = f"{directory}/base.conf"
+            with open(base, "w", encoding="utf-8") as output:
+                output.write("charon {\n  load_modular = no\n}\n")
+            adapter = strongswan_adapter.StrongSwanAdapter(environment(
+                VOWIFI_RUNDIR=directory,
+                SWU_STRONGSWAN_BASE_CONFIG=base,
+                SWU_NATT_KEEPALIVE="1",
+            ))
+            adapter.charon_command = ["true"]
+
+            class Process:
+                returncode = 0
+
+                @staticmethod
+                def poll():
+                    return 0
+
+            original_popen = strongswan_adapter.subprocess.Popen
+            adapter.wait_for_vici = lambda: None
+            try:
+                strongswan_adapter.subprocess.Popen = lambda *args, **kwargs: Process()
+                adapter.start_charon()
+            finally:
+                strongswan_adapter.subprocess.Popen = original_popen
+            generated_path = Path(directory) / "strongswan.conf"
+            generated = generated_path.read_text(encoding="utf-8")
+            self.assertIn("keep_alive = 1s", generated)
+            self.assertEqual(
+                adapter.env["STRONGSWAN_CONF"], str(generated_path)
+            )
 
     def test_runtime_emits_one_lifecycle_per_generation(self):
         with tempfile.TemporaryDirectory() as directory:

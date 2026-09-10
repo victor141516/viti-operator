@@ -13,7 +13,7 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "test" / "swu-lab" / "compose.yml"
-COMMON_SERVICES = ("epdg", "aka-broker")
+COMMON_SERVICES = ("epdg", "aka-broker", "nat-gateway")
 COMPOSE_OVERRIDES = {}
 BACKEND_SERVICES = {
     "python": (
@@ -257,7 +257,7 @@ def run_liveness_and_natt(backend, connected_probe, lifecycle_probe):
     start_protocol_lab(
         backend,
         connected_probe,
-        LAB_SWU_LIVENESS_PERIOD=1,
+        LAB_SWU_LIVENESS_PERIOD=0,
         LAB_SWU_NATT_KEEPALIVE=1,
         LAB_SWU_CHILD_REKEY_MINUTES=0,
         LAB_SWU_IKE_REKEY_MINUTES=0,
@@ -272,6 +272,17 @@ def run_liveness_and_natt(backend, connected_probe, lifecycle_probe):
     )
     if "1 packet captured" not in capture.stderr and "1 packet captured" not in capture.stdout:
         raise AssertionError("no RFC 3948 NAT-T keepalive was captured")
+    compose("run", "--rm", connected_probe)
+    finish_protocol_lab(backend, lifecycle_probe)
+
+    start_protocol_lab(
+        backend,
+        connected_probe,
+        LAB_SWU_LIVENESS_PERIOD=1,
+        LAB_SWU_NATT_KEEPALIVE=20,
+        LAB_SWU_CHILD_REKEY_MINUTES=0,
+        LAB_SWU_IKE_REKEY_MINUTES=0,
+    )
     wait_for_log("epdg", "parsed INFORMATIONAL request")
     compose("run", "--rm", connected_probe)
     finish_protocol_lab(backend, lifecycle_probe)

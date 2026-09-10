@@ -13,5 +13,7 @@ COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
 COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
 COPY test/swu-lab/aka_broker.py /opt/swu-lab/aka_broker.py
 COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py
+COPY test/swu-lab/backend-entrypoint.sh /usr/local/bin/backend-entrypoint.sh
 
-ENTRYPOINT ["python3", "/usr/local/bin/tunnel_backend.py"]
+RUN chmod +x /usr/local/bin/backend-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/backend-entrypoint.sh"]

@@ -15,6 +15,7 @@ RUNDIR = Path(os.environ.get("VOWIFI_RUNDIR", "/run/vowifi"))
 EXPECTED_BACKEND = os.environ["LAB_EXPECTED_BACKEND"]
 EXPECTED_INNER = os.environ.get("LAB_EXPECTED_INNER", "2001:db8:39:100::1")
 EXPECTED_PCSCF = os.environ.get("LAB_EXPECTED_PCSCF", "2001:db8:39:200::10")
+EPDG_ADDRESS = os.environ.get("LAB_EPDG", os.environ.get("SWU_EPDG", "172.30.40.10"))
 ECHO_PORT = int(os.environ.get("LAB_ECHO_PORT", "18080"))
 TIMEOUT = float(os.environ.get("LAB_ATTACH_TIMEOUT", "30"))
 MODE = os.environ.get("LAB_PROBE_MODE", "connected")
@@ -130,7 +131,7 @@ def probe_transport():
     addresses = command("ip", "-6", "addr", "show", "dev", observation.iface)
     assert EXPECTED_INNER in addresses
 
-    outer_route = command("ip", "route", "get", "172.30.39.10")
+    outer_route = command("ip", "route", "get", EPDG_ADDRESS)
     assert "dev ipsec0" not in outer_route
     broker_address = socket.gethostbyname("aka-broker")
     broker_route = command("ip", "route", "get", broker_address)

@@ -35,6 +35,7 @@ COPY engine/strongswan_adapter.py /usr/local/bin/strongswan_adapter.py
 COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
 COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
 COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py
+COPY test/swu-lab/backend-entrypoint.sh /usr/local/bin/backend-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/strongswan_adapter.py
-ENTRYPOINT ["python3", "/usr/local/bin/strongswan_adapter.py"]
+RUN chmod +x /usr/local/bin/strongswan_adapter.py /usr/local/bin/backend-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/backend-entrypoint.sh"]

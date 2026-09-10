@@ -15,6 +15,12 @@ IPv6 fragmentation and a large TCP stream), authentication faults, NAT-T,
 keepalive/DPD, rekeys and an operator-initiated deletion. Every scenario uses
 the same Compose topology rather than special-casing either backend.
 
+The backend and AKA broker live on a client-side network while the ePDG lives
+on a separate operator-side network. A dedicated, health-checked gateway
+routes and masquerades traffic between them. Consequently NAT detection and
+RFC 3948 keepalive assertions exercise a real translated UDP flow instead of
+relying only on forced encapsulation between peers on one Docker bridge.
+
 Run the external suite from the repository root:
 
 ```console

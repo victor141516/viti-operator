@@ -9,8 +9,26 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     networks:
+      operator:
+        ipv4_address: 172.30.40.10
+
+  nat-gateway:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/nat-gateway.Dockerfile
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    healthcheck:
+      test: ["CMD", "test", "-f", "/run/nat-ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 10
+    networks:
       outer:
-        ipv4_address: 172.30.39.10
+        ipv4_address: 172.30.39.254
+      operator:
+        ipv4_address: 172.30.40.254
 
   aka-broker:
     build:
@@ -26,14 +44,21 @@ services:
     build:
       context: ../..
       dockerfile: test/swu-lab/python-backend.Dockerfile
-    depends_on: [epdg, aka-broker]
+    depends_on:
+      epdg:
+        condition: service_started
+      aka-broker:
+        condition: service_started
+      nat-gateway:
+        condition: service_healthy
     cap_add: [NET_ADMIN, NET_RAW]
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
       SWU_BACKEND: python
       SWU_SOURCE: 172.30.39.20
-      SWU_EPDG: 172.30.39.10
+      SWU_EPDG: 172.30.40.10
+      LAB_NAT_GATEWAY: 172.30.39.254
       SWU_APN: ims
       USIM_IMSI: "001010123456789"
       SWU_MCC: "001"
@@ -121,14 +146,21 @@ services:
     build:
       context: ../..
       dockerfile: test/swu-lab/strongswan-backend.Dockerfile
-    depends_on: [epdg, aka-broker]
+    depends_on:
+      epdg:
+        condition: service_started
+      aka-broker:
+        condition: service_started
+      nat-gateway:
+        condition: service_healthy
     cap_add: [NET_ADMIN, NET_RAW]
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
       SWU_BACKEND: strongswan
       SWU_SOURCE: 172.30.39.20
-      SWU_EPDG: 172.30.39.10
+      SWU_EPDG: 172.30.40.10
+      LAB_NAT_GATEWAY: 172.30.39.254
       SWU_APN: ims
       USIM_IMSI: "001010123456789"
       SWU_MCC: "001"
@@ -138,6 +170,7 @@ services:
       SWU_HTTP_AKA_TIMEOUT: "1"
       SWU_TUN_MTU: "1400"
       SWU_LIVENESS_PERIOD: "${LAB_SWU_LIVENESS_PERIOD:-20}"
+      SWU_NATT_KEEPALIVE: "${LAB_SWU_NATT_KEEPALIVE:-20}"
       SWU_CHILD_REKEY_MINUTES: "${LAB_SWU_CHILD_REKEY_MINUTES:-30}"
       SWU_IKE_REKEY_MINUTES: "${LAB_SWU_IKE_REKEY_MINUTES:-45}"
       SWU_REDACT_SECRETS: "1"
@@ -211,6 +244,11 @@ networks:
     ipam:
       config:
         - subnet: 172.30.39.0/24
+  operator:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.40.0/24
 
 volumes:
   python-runtime:

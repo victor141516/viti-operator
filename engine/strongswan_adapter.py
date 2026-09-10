@@ -299,6 +299,24 @@ class StrongSwanAdapter:
         raise TimeoutError("charon VICI socket did not become ready")
 
     def start_charon(self):
+        base_path = Path(self.env.get(
+            "SWU_STRONGSWAN_BASE_CONFIG", "/etc/strongswan.conf"
+        ))
+        base = base_path.read_text(encoding="utf-8")
+        marker = "charon {"
+        if marker not in base:
+            raise ValueError(f"{base_path} does not contain a charon section")
+        keep_alive = positive_float(
+            self.env, "SWU_NATT_KEEPALIVE", "20", allow_zero=True
+        )
+        generated = base.replace(
+            marker, f"{marker}\n  keep_alive = {duration(keep_alive)}", 1
+        )
+        config_path = self.runtime.rundir / "strongswan.conf"
+        temporary = config_path.with_suffix(".conf.tmp")
+        temporary.write_text(generated, encoding="utf-8")
+        os.replace(temporary, config_path)
+        self.env["STRONGSWAN_CONF"] = str(config_path)
         try:
             self.vici_socket.unlink()
         except FileNotFoundError:
