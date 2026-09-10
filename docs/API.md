@@ -350,21 +350,34 @@ contains `instance`, `event`, optional call/trace IDs, argument strings, and an
 optional nanosecond source timestamp. Supported authoritative lifecycle events
 include:
 
-- `tunnel_up`, `tunnel_down`;
+- `tunnel_start`, `tunnel_up`, `tunnel_down`;
 - `sms_in`;
 - `call_in`, `call_out`, `call_active`, `call_result`;
 - `recording_track`, which attaches a validated recording storage key and
   source timestamp to the correlated call.
+
+Tunnel events carry a process generation and monotonic sequence. An unseen
+generation may claim the current data plane only when its source timestamp is
+newer than the persisted checkpoint. The latest causal down boundary remains
+persisted after a later up event and across manager restart.
+
+The manager atomically correlates call ID and engine instance, applies lifecycle
+or tunnel reconciliation, and replaces the state file. Source timestamps, not
+HTTP arrival order, determine lifecycle chronology. When local outbox storage is
+writable, all four call lifecycle hooks are committed before delivery is
+attempted, making network and manager failures retry-safe. A local outbox write
+failure instead uses a direct best-effort HTTP fallback.
+
+A private `call_active` or `call_result` event may omit its peer when the call ID
+already exists. If its matching start event is not yet durable, the manager
+returns 409 and the outbox retains it for retry. Informational engine events are
+accepted without creating history rows.
 
 ### `GET /api/engine/recording`
 
 Engine-only endpoint authenticated with `X-Viti-Engine-Token`. Asterisk checks
 this shared setting when each carrier or local participant channel starts and
 fails closed if the manager cannot be reached.
-
-The manager correlates events by engine call ID and instance, persists the
-result, and publishes a client event. Informational engine events are accepted
-without creating history rows.
 
 ## Compatibility policy
 

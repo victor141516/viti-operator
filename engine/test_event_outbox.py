@@ -42,6 +42,28 @@ class EventOutboxTest(unittest.TestCase):
             self.assertFalse(event_outbox.deliver_file(path, "http://manager", "", session))
             self.assertTrue(path.exists())
 
+    def test_tunnel_ordering_metadata_is_persisted_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = event_outbox.enqueue_event(
+                "tunnel_up", [], recorded_at_ns=456, outbox=directory,
+                extra={"tunnel_generation": "process-one", "tunnel_sequence": 7},
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["tunnel_generation"], "process-one")
+            self.assertEqual(payload["tunnel_sequence"], 7)
+
+    def test_terminal_call_identity_is_persisted_for_retry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = event_outbox.enqueue_event(
+                "call_result", ["out", "+34123456789", "ANSWER", "16"],
+                recorded_at_ns=789, outbox=directory,
+                extra={"call_id": "linked-42", "trace_id": "trace-99"},
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["call_id"], "linked-42")
+            self.assertEqual(payload["trace_id"], "trace-99")
+            self.assertEqual(payload["args"][2:], ["ANSWER", "16"])
+
     def test_uncorrelated_early_event_does_not_block_later_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
             early = event_outbox.enqueue_event("sms_protocol", ["status_report"], recorded_at_ns=1, outbox=directory)

@@ -3,7 +3,7 @@
 
 Files are written atomically below the bind-mounted runtime directory before an
 AMI callback returns.  A separate worker retries transient failures until the
-manager has durably accepted the event.  The manager's SMS state machine is
+manager has durably accepted the event.  The manager's event handlers are
 idempotent, so losing the HTTP response and retrying is safe.
 """
 import json
@@ -69,7 +69,7 @@ def _sync_directory(directory):
         pass
 
 
-def enqueue_event(event, args, recorded_at_ns=None, outbox=None):
+def enqueue_event(event, args, recorded_at_ns=None, outbox=None, extra=None):
     """Persist one event and return only after its final filename is durable."""
     directory = Path(outbox or OUTBOX)
     directory.mkdir(parents=True, exist_ok=True)
@@ -82,6 +82,9 @@ def enqueue_event(event, args, recorded_at_ns=None, outbox=None):
         "args": [str(value) for value in args],
         "recorded_at_ns": int(recorded_at_ns or time.time_ns()),
     }
+    for key in ("tunnel_generation", "tunnel_sequence", "call_id", "trace_id"):
+        if extra and key in extra:
+            payload[key] = extra[key]
     final_path = directory / ("%020d-%s.json" % (payload["recorded_at_ns"], event_id))
     temporary = directory / (".%s.tmp" % event_id)
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

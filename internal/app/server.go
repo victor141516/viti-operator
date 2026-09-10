@@ -55,8 +55,8 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-	if err := store.CloseStaleCalls(time.Now().UTC().Add(-2 * time.Minute)); err != nil {
-		return nil, fmt.Errorf("reconcile stale calls: %w", err)
+	if err := store.ReconcilePersistedCalls(); err != nil {
+		return nil, fmt.Errorf("reconcile persisted calls: %w", err)
 	}
 	broker := NewAuthBroker()
 	var gateway TelephonyGateway
@@ -115,6 +115,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment()}
+	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
+		a.tunnel = engineTunnelState{
+			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
+			Instance: checkpoint.Instance, Generation: checkpoint.Generation, Sequence: checkpoint.Sequence,
+		}
+	}
 	if !strings.EqualFold(strings.TrimSpace(cfg.SIMAuth.Type), "disabled") {
 		a.adaptiveAuth = &AdaptiveAuthenticator{
 			Broker: broker, Fallback: fallbackAuthenticator, FallbackMode: fallbackMode,
@@ -244,19 +250,25 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		EventID      string   `json:"event_id,omitempty"`
-		Instance     string   `json:"instance"`
-		Event        string   `json:"event"`
-		CallID       string   `json:"call_id,omitempty"`
-		TraceID      string   `json:"trace_id,omitempty"`
-		Args         []string `json:"args"`
-		RecordedAtNS int64    `json:"recorded_at_ns,omitempty"`
+		EventID          string   `json:"event_id,omitempty"`
+		Instance         string   `json:"instance"`
+		Event            string   `json:"event"`
+		CallID           string   `json:"call_id,omitempty"`
+		TraceID          string   `json:"trace_id,omitempty"`
+		Args             []string `json:"args"`
+		RecordedAtNS     int64    `json:"recorded_at_ns,omitempty"`
+		TunnelGeneration string   `json:"tunnel_generation,omitempty"`
+		TunnelSequence   uint64   `json:"tunnel_sequence,omitempty"`
 	}
 	if err := readJSON(r, &request, 16<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	now := time.Now().UTC()
+	eventAt := now
+	if request.RecordedAtNS > 0 {
+		eventAt = time.Unix(0, request.RecordedAtNS).UTC()
+	}
 	request.Instance = strings.TrimSpace(request.Instance)
 	request.CallID = strings.TrimSpace(request.CallID)
 	request.TraceID = strings.TrimSpace(request.TraceID)
@@ -271,33 +283,42 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		a.ingestSMSProtocolEvent(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
 	}
-	var call Call
-	var ok bool
-	findCall := func(direction Direction, peer string) (Call, bool) {
-		if request.CallID != "" {
-			found, exists := a.store.GetCallByEngineID(request.Instance, request.CallID)
-			a.diag.RecordTrace("manager.call", "lookup", request.TraceID, map[string]any{"strategy": "engine_call_id", "instance": request.Instance, "engine_call_id": request.CallID, "found": exists, "call": found})
-			return found, exists
-		}
-		found, exists := a.openCall(direction, peer)
-		a.diag.RecordTrace("manager.call", "lookup", request.TraceID, map[string]any{"strategy": "legacy_direction_peer", "direction": direction, "peer": peer, "found": exists, "call": found})
-		return found, exists
-	}
-	newCall := func(direction Direction, peer string) (Call, error) {
-		id, err := randomID("call")
-		if err != nil {
-			return Call{}, err
-		}
-		call := Call{ID: id, TraceID: request.TraceID, EngineCallID: request.CallID, Instance: request.Instance, Direction: direction, Peer: peer, StartedAt: now}
-		a.diag.RecordTrace("manager.call", "allocated", request.TraceID, call)
-		return call, nil
-	}
+	var callUpdate *engineCallUpdate
 	switch request.Event {
 	case "sms_in":
 		a.ingestEngineSMS(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
-	case "tunnel_up", "tunnel_down":
-		a.setEngineTunnelState(request.Event == "tunnel_up", request.Args, request.RecordedAtNS)
+	case "tunnel_start", "tunnel_up", "tunnel_down":
+		generation := strings.TrimSpace(request.TunnelGeneration)
+		sequence := request.TunnelSequence
+		if generation == "" {
+			if request.RecordedAtNS > 0 {
+				sequence = uint64(request.RecordedAtNS)
+			} else {
+				sequence = uint64(now.UnixNano())
+			}
+			// Pre-generation engines can be rolled back to after a modern engine.
+			// Each legacy up event begins a distinct era; its following down event
+			// is correlated to that era rather than a permanently retired token.
+			if request.Event == "tunnel_down" {
+				if checkpoint, ok := a.store.EngineTunnelCheckpoint(request.Instance); ok && strings.HasPrefix(checkpoint.Generation, "legacy:") {
+					generation = checkpoint.Generation
+				}
+			}
+			if generation == "" {
+				generation = fmt.Sprintf("legacy:%d", sequence)
+			}
+		}
+		if !topologyIdentifierPattern.MatchString(generation) || sequence == 0 || request.Instance == "" {
+			writeError(w, http.StatusBadRequest, "tunnel events require instance, generation, and sequence")
+			return
+		}
+		ready := request.Event == "tunnel_up"
+		claimsGeneration := request.Event != "tunnel_down"
+		if err := a.setEngineTunnelState(request.Instance, generation, sequence, ready, claimsGeneration, request.Args, request.RecordedAtNS); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not persist tunnel transition")
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "call_in", "call_out":
@@ -313,31 +334,14 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		if direction == DirectionIncoming && peer == "" {
 			peer = "Private number"
 		}
-		call, ok = findCall(direction, peer)
-		if !ok {
-			if peer == "" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			var err error
-			call, err = newCall(direction, peer)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "could not allocate call")
-				return
-			}
-		}
-		if call.TraceID == "" {
-			call.TraceID = request.TraceID
-		}
-		if call.EndedAt != nil {
-			a.diag.RecordTrace("manager.call", "late-event.ignored", call.TraceID, map[string]any{"event": request.Event, "call": call})
-			writeJSON(w, http.StatusOK, call)
+		if peer == "" && request.CallID == "" {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		previousState := call.State
-		call.State = map[Direction]string{DirectionIncoming: "ringing", DirectionOutgoing: "dialing"}[direction]
-		call.UpdatedAt = now
-		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "call": call})
+		callUpdate = &engineCallUpdate{
+			Instance: request.Instance, EngineCallID: request.CallID, TraceID: request.TraceID,
+			Event: request.Event, Direction: direction, Peer: peer, At: eventAt,
+		}
 	case "call_active":
 		if len(request.Args) < 2 {
 			writeError(w, http.StatusBadRequest, "invalid active call event")
@@ -349,34 +353,14 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		peer := strings.TrimSpace(request.Args[1])
-		call, ok = findCall(direction, peer)
-		if !ok {
-			if peer == "" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			var err error
-			call, err = newCall(direction, peer)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "could not allocate call")
-				return
-			}
-		}
-		if call.TraceID == "" {
-			call.TraceID = request.TraceID
-		}
-		if call.EndedAt != nil {
-			a.diag.RecordTrace("manager.call", "late-event.ignored", call.TraceID, map[string]any{"event": request.Event, "call": call})
-			writeJSON(w, http.StatusOK, call)
+		if peer == "" && request.CallID == "" {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		previousState := call.State
-		call.State = "active"
-		if call.AnsweredAt == nil {
-			call.AnsweredAt = &now
+		callUpdate = &engineCallUpdate{
+			Instance: request.Instance, EngineCallID: request.CallID, TraceID: request.TraceID,
+			Event: request.Event, Direction: direction, Peer: peer, At: eventAt,
 		}
-		call.UpdatedAt = now
-		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "call": call})
 	case "call_result":
 		if len(request.Args) < 4 {
 			writeError(w, http.StatusBadRequest, "invalid call result")
@@ -388,43 +372,39 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		peer := strings.TrimSpace(request.Args[1])
-		call, ok = findCall(direction, peer)
-		if !ok {
-			if peer == "" {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-			var err error
-			call, err = newCall(direction, peer)
-			if err != nil {
-				writeError(w, http.StatusInternalServerError, "could not allocate call")
-				return
-			}
-		}
-		if call.TraceID == "" {
-			call.TraceID = request.TraceID
-		}
-		if call.EndedAt != nil {
-			a.diag.RecordTrace("manager.call", "late-event.ignored", call.TraceID, map[string]any{"event": request.Event, "call": call})
-			writeJSON(w, http.StatusOK, call)
+		if peer == "" && request.CallID == "" {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		previousState := call.State
-		call.State = callResultState(request.Args[2], call.State, request.Args[3])
-		call.UpdatedAt = now
-		call.EndedAt = &now
-		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "dial_status": request.Args[2], "hangup_cause": request.Args[3], "call": call})
+		callUpdate = &engineCallUpdate{
+			Instance: request.Instance, EngineCallID: request.CallID, TraceID: request.TraceID,
+			Event: request.Event, Direction: direction, Peer: peer, At: eventAt,
+			DialStatus: request.Args[2], HangupCause: request.Args[3],
+		}
 	default:
 		// Informational engine events do not belong in call or message history.
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if err := a.store.SaveCall(call); err != nil {
-		a.diag.RecordTrace("manager.call", "persist.failed", call.TraceID, map[string]any{"call": call, "error": err.Error()})
+	id, err := randomID("call")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not allocate call")
+		return
+	}
+	callUpdate.ProposedID = id
+	call, changed, err := a.store.ApplyEngineCallEvent(*callUpdate)
+	if err != nil {
+		if errors.Is(err, errEngineCallAwaitingStart) {
+			writeError(w, http.StatusConflict, "call start has not arrived yet")
+			return
+		}
+		a.diag.RecordTrace("manager.call", "persist.failed", request.TraceID, map[string]any{"engine_event": request, "error": err.Error()})
 		writeError(w, http.StatusInternalServerError, "could not persist call")
 		return
 	}
-	a.events.Publish("call.updated", call)
+	if changed {
+		a.events.Publish("call.updated", call)
+	}
 	a.diag.RecordTrace("manager.call", "event.completed", call.TraceID, map[string]any{"engine_event": request, "call": call})
 	writeJSON(w, http.StatusOK, call)
 }

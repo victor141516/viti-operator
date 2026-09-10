@@ -83,10 +83,11 @@ COPY recording_enabled.py /usr/local/bin/recording_enabled.py
 COPY test_ami_usim_http.py /usr/local/bin/test_ami_usim_http.py
 COPY test_swu_runtime.py /usr/local/bin/test_swu_runtime.py
 COPY test_event_outbox.py /usr/local/bin/test_event_outbox.py
+COPY test_notify.py /usr/local/bin/test_notify.py
 COPY templates/      /opt/vowifi/templates/
 COPY entrypoint.sh   /entrypoint.sh
-RUN cd /usr/local/bin && python3 -m unittest test_ami_usim_http.py test_swu_runtime.py test_event_outbox.py && \
-    rm /usr/local/bin/test_ami_usim_http.py /usr/local/bin/test_swu_runtime.py /usr/local/bin/test_event_outbox.py && \
+RUN cd /usr/local/bin && python3 -m unittest test_ami_usim_http.py test_swu_runtime.py test_event_outbox.py test_notify.py && \
+    rm /usr/local/bin/test_ami_usim_http.py /usr/local/bin/test_swu_runtime.py /usr/local/bin/test_event_outbox.py /usr/local/bin/test_notify.py && \
     chmod +x /usr/local/bin/*.py /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

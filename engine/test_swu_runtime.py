@@ -1,8 +1,11 @@
 import importlib.util
+import itertools
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+
+import event_outbox
 
 
 class InnerAddressRefreshTest(unittest.TestCase):
@@ -67,6 +70,29 @@ class InnerAddressRefreshTest(unittest.TestCase):
             self.module.swu_apply_inner_ip("2001:db8::10")
 
         call.assert_not_called()
+
+    def test_tunnel_process_transitions_are_committed_synchronously(self):
+        self.module.SWU_TUNNEL_GENERATION = "process-one"
+        self.module.SWU_TUNNEL_SEQUENCE = itertools.count(1)
+        with mock.patch.object(event_outbox, "enqueue_event") as enqueue:
+            self.assertTrue(self.module.swu_notify("tunnel_start"))
+            self.assertTrue(self.module.swu_notify("tunnel_up", "connected"))
+
+        self.assertEqual(enqueue.call_count, 2)
+        first = enqueue.call_args_list[0]
+        second = enqueue.call_args_list[1]
+        self.assertEqual(first.args[:2], ("tunnel_start", []))
+        self.assertEqual(first.kwargs["extra"], {
+            "tunnel_generation": "process-one", "tunnel_sequence": 1,
+        })
+        self.assertEqual(second.args[:2], ("tunnel_up", ["connected"]))
+        self.assertEqual(second.kwargs["extra"]["tunnel_sequence"], 2)
+        self.assertGreater(first.kwargs["recorded_at_ns"], 0)
+
+    def test_process_does_not_start_without_a_durable_generation_claim(self):
+        with mock.patch.object(self.module, "swu_notify", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "durably claim"):
+                self.module.main()
 
 
 if __name__ == "__main__":

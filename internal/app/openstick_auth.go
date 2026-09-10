@@ -29,6 +29,7 @@ type OpenStickAuthenticator struct {
 	Timeout   time.Duration
 	PollDelay time.Duration
 	mu        sync.Mutex
+	runADB    func(context.Context, ...string) ([]byte, error)
 }
 
 func NewOpenStickAuthenticator(adb, serial string) *OpenStickAuthenticator {
@@ -43,7 +44,39 @@ func (a *OpenStickAuthenticator) CheckSIMReady(ctx context.Context) error {
 	if strings.TrimSpace(string(output)) != "device" {
 		return fmt.Errorf("OpenStick unavailable: ADB state is %q", strings.TrimSpace(string(output)))
 	}
+	output, err = a.run(ctx, "shell", "getprop", "gsm.sim.state")
+	if err != nil {
+		return fmt.Errorf("OpenStick SIM state unavailable: %w", err)
+	}
+	if !openStickSIMReady(string(output)) {
+		return fmt.Errorf("OpenStick SIM is not ready: state is %q", strings.TrimSpace(string(output)))
+	}
+	output, err = a.run(ctx, "shell", "pm", "path", openStickBridgePackage)
+	if err != nil || !strings.Contains(string(output), "package:") {
+		return errors.New("OpenStick SIM bridge package is unavailable")
+	}
+	if _, err = a.run(ctx, "shell", "test", "-x", "/data/local/tmp/qmi_auth_aka"); err != nil {
+		return errors.New("OpenStick SIM bridge helper is unavailable")
+	}
+	output, err = a.run(ctx, "shell", "content", "query", "--uri", "content://lab.codex.simidentity.aka/material")
+	if err != nil || !openStickProviderAvailable(string(output)) {
+		return errors.New("OpenStick SIM bridge provider is unavailable")
+	}
 	return nil
+}
+
+func openStickProviderAvailable(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value != "" && !strings.HasPrefix(value, "error:") && !strings.Contains(value, "unknown uri") && !strings.Contains(value, "failed to find provider")
+}
+
+func openStickSIMReady(value string) bool {
+	for _, state := range strings.FieldsFunc(strings.ToUpper(value), func(r rune) bool { return r == ',' || r == ' ' || r == '\n' || r == '\r' }) {
+		if state == "READY" {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *OpenStickAuthenticator) AuthenticateAKA(ctx context.Context, rand16, autn16 []byte) (AKAResult, error) {
@@ -122,6 +155,9 @@ func (a *OpenStickAuthenticator) AuthenticateAKA(ctx context.Context, rand16, au
 }
 
 func (a *OpenStickAuthenticator) run(ctx context.Context, args ...string) ([]byte, error) {
+	if a.runADB != nil {
+		return a.runADB(ctx, args...)
+	}
 	command := exec.CommandContext(ctx, a.ADB, append([]string{"-s", a.Serial}, args...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {

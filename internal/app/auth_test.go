@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -43,6 +45,59 @@ func TestAuthBrokerRoundTrip(t *testing.T) {
 	}
 }
 
+func TestAdaptiveAuthenticationPinsPendingChallengeToInitialAgent(t *testing.T) {
+	broker := NewAuthBroker()
+	selected := "agent-one"
+	auth := &AdaptiveAuthenticator{
+		Broker: broker, RemoteTimeout: time.Second,
+		Select: func(time.Time) SIMAuthSelection { return SIMAuthSelection{Mode: "remote", AgentID: selected} },
+	}
+	resultCh := make(chan AKAResult, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		result, err := auth.AuthenticateAKA(context.Background(), bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16))
+		resultCh <- result
+		errCh <- err
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	challenge := broker.Poll(ctx, "agent-one")
+	if challenge == nil {
+		t.Fatal("expected challenge for initial agent")
+	}
+	selected = "agent-two"
+	otherCtx, otherCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer otherCancel()
+	if other := broker.Poll(otherCtx, "agent-two"); other != nil {
+		t.Fatalf("pending challenge moved to takeover agent: %#v", other)
+	}
+	response := AuthResponse{
+		RES: base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{3}, 8)),
+		CK:  base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{4}, 16)),
+		IK:  base64.RawStdEncoding.EncodeToString(bytes.Repeat([]byte{5}, 16)),
+	}
+	if err := broker.Respond("agent-two", challenge.ID, response); err == nil {
+		t.Fatal("takeover agent answered a challenge pinned to the previous provider")
+	}
+	if err := broker.Respond("agent-one", challenge.ID, response); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	if result := <-resultCh; len(result.RES) != 8 {
+		t.Fatalf("unexpected AKA result: %#v", result)
+	}
+}
+
+func TestAdaptiveAuthenticationFailsFreshChallengeWithoutAProvider(t *testing.T) {
+	auth := &AdaptiveAuthenticator{Select: func(time.Time) SIMAuthSelection { return SIMAuthSelection{Mode: "disabled"} }}
+	result, err := auth.AuthenticateAKA(context.Background(), bytes.Repeat([]byte{1}, 16), bytes.Repeat([]byte{2}, 16))
+	if err == nil || len(result.RES) != 0 || len(result.CK) != 0 || len(result.IK) != 0 || len(result.AUTS) != 0 {
+		t.Fatalf("absent provider returned fabricated AKA material: result=%#v error=%v", result, err)
+	}
+}
+
 func TestParseOpenStickAKA1(t *testing.T) {
 	material := append([]byte("AKA1"), 8, 16, 16)
 	material = append(material, bytes.Repeat([]byte{1}, 8)...)
@@ -69,5 +124,55 @@ func TestParseOpenStickAKAR(t *testing.T) {
 	}
 	if len(result.RES) != 8 || !bytes.Equal(result.CK, keys[:16]) || !bytes.Equal(result.IK, keys[16:]) {
 		t.Fatal("unexpected parsed result")
+	}
+}
+
+func TestOpenStickReadinessChecksSIMAndInstalledBridge(t *testing.T) {
+	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{})}
+	if err := auth.CheckSIMReady(context.Background()); err != nil {
+		t.Fatalf("ready OpenStick rejected: %v", err)
+	}
+}
+
+func TestOpenStickReadinessRejectsConnectedStickWithoutReadySIM(t *testing.T) {
+	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{
+		"shell getprop gsm.sim.state": {output: "ABSENT"},
+	})}
+	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "SIM is not ready") {
+		t.Fatalf("missing SIM readiness error = %v", err)
+	}
+}
+
+func TestOpenStickReadinessRejectsMissingBridgeProvider(t *testing.T) {
+	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{
+		"shell content query --uri content://lab.codex.simidentity.aka/material": {err: errors.New("provider missing")},
+	})}
+	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("missing bridge readiness error = %v", err)
+	}
+}
+
+type fakeADBResult struct {
+	output string
+	err    error
+}
+
+func fakeOpenStickReadiness(overrides map[string]fakeADBResult) func(context.Context, ...string) ([]byte, error) {
+	defaults := map[string]fakeADBResult{
+		"get-state":                                  {output: "device"},
+		"shell getprop gsm.sim.state":                {output: "READY"},
+		"shell pm path lab.codex.simidentity":        {output: "package:/data/app/lab.codex.simidentity-1.apk"},
+		"shell test -x /data/local/tmp/qmi_auth_aka": {},
+		"shell content query --uri content://lab.codex.simidentity.aka/material": {output: "No result found."},
+	}
+	for command, result := range overrides {
+		defaults[command] = result
+	}
+	return func(_ context.Context, args ...string) ([]byte, error) {
+		result, exists := defaults[strings.Join(args, " ")]
+		if !exists {
+			return nil, errors.New("unexpected fake ADB command")
+		}
+		return []byte(result.output), result.err
 	}
 }

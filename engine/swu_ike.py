@@ -16,6 +16,8 @@ import hashlib
 import ipaddress
 import base64
 import re
+import itertools
+import uuid
 
 # Python 3.14 changed POSIX multiprocessing's default to forkserver.  The ESP
 # workers are bound methods of the live IKE object, which contains cryptography
@@ -112,6 +114,8 @@ SWU_IFACE = os.environ.get("SWU_IFACE", "ipsec0")          # tun device name (pj
 SWU_NOTIFY = os.environ.get("SWU_NOTIFY", "/usr/local/bin/notify.py")
 SWU_ASSIGN_IPV6_GLOBAL = os.environ.get("SWU_ASSIGN_IPV6_GLOBAL", "1") not in ("0", "", "no")
 SWU_WRITE_RESOLV = os.environ.get("SWU_WRITE_RESOLV", "0") not in ("0", "", "no")
+SWU_TUNNEL_GENERATION = uuid.uuid4().hex
+SWU_TUNNEL_SEQUENCE = itertools.count(1)
 
 # --- Data-plane MTU / fragmentation handling -------------------------------------------------
 # The userspace ESP dataplane reads inner IP packets off the tun (ipsec0), wraps each in
@@ -175,12 +179,29 @@ def swu_write_pcscf(addr):
 
 def swu_notify(event, arg=None):
     try:
+        if event in ("tunnel_start", "tunnel_up", "tunnel_down"):
+            # A process transition is the ownership proof for the manager's
+            # tunnel state machine. Commit it synchronously before continuing;
+            # the separate outbox worker performs network delivery and retry.
+            import event_outbox
+            event_outbox.enqueue_event(
+                event,
+                [arg] if arg else [],
+                recorded_at_ns=time.time_ns(),
+                extra={
+                    "tunnel_generation": SWU_TUNNEL_GENERATION,
+                    "tunnel_sequence": next(SWU_TUNNEL_SEQUENCE),
+                },
+            )
+            return True
         cmd = ["python3", SWU_NOTIFY, event]
         if arg:
             cmd.append(arg)
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except Exception:
-        pass
+        return True
+    except Exception as error:
+        swu_log("could not persist %s notification: %r" % (event, error))
+        return False
 
 
 def swu_apply_pcscf(addr):
@@ -6408,6 +6429,12 @@ def https_res_ck_ik(server, rand, autn):
 
 
 def main():
+
+    # Claim a new process generation before DNS, SIM access, or IKE can fail.
+    # This is durable evidence that a previously reported userspace tunnel no
+    # longer owns the data plane, even if this attempt never reaches tunnel_up.
+    if not swu_notify("tunnel_start"):
+        raise RuntimeError("could not durably claim the tunnel process generation")
 
     # CP+TS address-family mode (per line, from cfg.cp_mode). The CFG config-request family MUST
     # match the carrier's IMS PDN or the ePDG rejects the PDN after EAP-Success (Telus: no P-CSCF on

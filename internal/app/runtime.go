@@ -14,10 +14,68 @@ import (
 var errRuntimeUnavailable = errors.New("telephony runtime is unavailable")
 
 type engineTunnelState struct {
-	Seen      bool
-	Ready     bool
-	Detail    string
-	UpdatedAt time.Time
+	Seen       bool
+	Ready      bool
+	Detail     string
+	UpdatedAt  time.Time
+	Instance   string
+	Generation string
+	Sequence   uint64
+}
+
+type EngineTunnelCheckpoint struct {
+	Instance           string    `json:"instance"`
+	Generation         string    `json:"generation"`
+	Sequence           uint64    `json:"sequence"`
+	Ready              bool      `json:"ready"`
+	UpdatedAt          time.Time `json:"updated_at"`
+	LastDownAt         time.Time `json:"last_down_at,omitempty"`
+	RetiredGenerations []string  `json:"retired_generations,omitempty"`
+}
+
+func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, generation string, sequence uint64, ready, claimsGeneration bool, at time.Time) (EngineTunnelCheckpoint, bool) {
+	if instance == "" || generation == "" || sequence == 0 || at.IsZero() {
+		return previous, false
+	}
+	if previous.Generation == generation {
+		if sequence <= previous.Sequence {
+			return previous, false
+		}
+		if !ready {
+			previous.LastDownAt = at
+		}
+		previous.Sequence, previous.Ready, previous.UpdatedAt = sequence, ready, at
+		return previous, true
+	}
+	for _, retired := range previous.RetiredGenerations {
+		if retired == generation {
+			return previous, false
+		}
+	}
+	// Generations share the engine host's clock. An unobserved older process can
+	// be retried from the durable outbox after a newer process has already taken
+	// ownership; it must not retire that newer generation.
+	if previous.Generation != "" && !at.After(previous.UpdatedAt) {
+		return previous, false
+	}
+	// Only a durable process-start or tunnel-up event can transfer ownership to
+	// a generation that the manager has never observed. A standalone down event
+	// cannot prove that it belongs to the currently established data plane.
+	if previous.Generation != "" && !claimsGeneration {
+		return previous, false
+	}
+	retired := append([]string(nil), previous.RetiredGenerations...)
+	if previous.Generation != "" {
+		retired = append(retired, previous.Generation)
+	}
+	lastDownAt := previous.LastDownAt
+	if !ready {
+		lastDownAt = at
+	}
+	return EngineTunnelCheckpoint{
+		Instance: instance, Generation: generation, Sequence: sequence,
+		Ready: ready, UpdatedAt: at, LastDownAt: lastDownAt, RetiredGenerations: retired,
+	}, true
 }
 
 // StartIMSPreferenceReconciler keeps an intentionally disabled registration
@@ -136,29 +194,37 @@ func decodeEngineBase64(value string) ([]byte, error) {
 	return nil, errors.New("invalid Base64")
 }
 
-func (a *App) setEngineTunnelState(ready bool, args []string, recordedAtNS int64) {
+func (a *App) setEngineTunnelState(instance, generation string, sequence uint64, ready, claimsGeneration bool, args []string, recordedAtNS int64) error {
 	updatedAt := time.Now().UTC()
 	if recordedAtNS > 0 {
 		updatedAt = time.Unix(0, recordedAtNS).UTC()
 	}
 	detail := strings.TrimSpace(strings.Join(args, " "))
 	a.stateMu.Lock()
+	checkpoint, calls, accepted, err := a.store.ApplyEngineTunnelEvent(instance, generation, sequence, ready, claimsGeneration, updatedAt)
+	if err != nil {
+		a.stateMu.Unlock()
+		a.diag.RecordEvent("manager.runtime", "tunnel-state.persist-failed", map[string]any{"instance": instance, "generation": generation, "sequence": sequence, "error": err.Error()})
+		return err
+	}
+	if !accepted {
+		a.stateMu.Unlock()
+		a.diag.RecordEvent("manager.runtime", "tunnel-state.ignored", map[string]any{"instance": instance, "generation": generation, "sequence": sequence, "ready": ready})
+		return nil
+	}
 	previous := a.tunnel
-	a.tunnel = engineTunnelState{Seen: true, Ready: ready, Detail: detail, UpdatedAt: updatedAt}
+	a.tunnel = engineTunnelState{
+		Seen: true, Ready: checkpoint.Ready, Detail: detail, UpdatedAt: checkpoint.UpdatedAt,
+		Instance: checkpoint.Instance, Generation: checkpoint.Generation, Sequence: checkpoint.Sequence,
+	}
 	current := a.tunnel
 	a.stateMu.Unlock()
 	a.diag.RecordEvent("manager.runtime", "tunnel-state.changed", map[string]any{"previous": previous, "current": current})
-	if !ready {
-		calls, err := a.store.InterruptOpenCalls(updatedAt)
-		if err != nil {
-			a.diag.RecordEvent("manager.runtime", "calls.interrupt-failed", map[string]any{"error": err.Error()})
-		} else {
-			for _, call := range calls {
-				a.events.Publish("call.updated", call)
-			}
-		}
+	for _, call := range calls {
+		a.events.Publish("call.updated", call)
 	}
 	a.events.Publish("status.updated", current)
+	return nil
 }
 
 func (a *App) runtimeStatus(ctx context.Context) (RuntimeStatus, error) {
@@ -185,8 +251,6 @@ func (a *App) runtimeStatus(ctx context.Context) (RuntimeStatus, error) {
 		cancel()
 		if healthErr != nil {
 			status.SIMReady = false
-			status.TunnelReady = false
-			status.IMSReady = false
 			details = append(details, healthErr.Error())
 			gatewayErr = errors.Join(gatewayErr, healthErr)
 		} else {

@@ -63,7 +63,7 @@ exten => t,1,Hangup()
 ; a Gosub and produced a noisy "Return without Gosub" error here.
 exten => h,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=incoming-hangup dialstatus=${DIALSTATUS} cause=${HANGUPCAUSE})
 same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}")
 same => n,Hangup()
 
 ; ===== Incoming SMS from the IMS/VoWiFi side =====
@@ -191,7 +191,7 @@ exten => h,1,Set(ST=${IF($["${REALSTATUS}" != ""]?${REALSTATUS}:${DIALSTATUS})})
 same => n,Set(CS=${IF($["${REALCAUSE}" != ""]?${REALCAUSE}:${HANGUPCAUSE})})
 same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=outgoing-hangup dialstatus=${ST} cause=${CS})
 same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" out "${CALLPEER}" "${ST}" "${CS}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" out "${CALLPEER}" "${ST}" "${CS}")
 same => n,Hangup()
 
 ; Test-only inbound call. The Local channel answers immediately before ringing all
@@ -225,7 +225,7 @@ same => n,Hangup()
 same => n(busy),Busy()
 same => n,Hangup()
 exten => h,1,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}")
 same => n,Hangup()
 
 ; ===== Multiparty carrier conference =====
@@ -263,12 +263,12 @@ exten => s,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL
 ; preserves early media and continues when the first local client leaves. This fallback also
 ; covers engines/configurations where the pre-dial handler could not start it.
 same => n,Gosub(viti-start-carrier-recording,s,1)
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_active "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_active "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}")
 same => n,ConfBridge(${VITI_CALL_ID},viti_bridge,viti_carrier)
 same => n,Hangup()
 exten => h,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-carrier-left cause=${HANGUPCAUSE})
 same => n,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}" ANSWER "${HANGUPCAUSE}" &)
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_DIRECTION}" "${CALLPEER}" ANSWER "${HANGUPCAUSE}")
 same => n,Hangup()
 
 [viti-clear-active-call]

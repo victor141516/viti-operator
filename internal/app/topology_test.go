@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -27,6 +28,16 @@ func TestTopologyViewerIsEmbeddedAndSameOriginEmbeddable(t *testing.T) {
 	}
 	if count := strings.Count(recorder.Body.String(), `/topology-inspector.bundle.js`); count != 1 {
 		t.Fatalf("topology inspector bundle references = %d, want exactly one", count)
+	}
+	if !strings.Contains(recorder.Body.String(), "topology-viewer.js") {
+		t.Fatal("topology viewer script is missing")
+	}
+	viewer, err := fs.ReadFile(webRoot, "topology-viewer.js")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(viewer), "An established carrier session may continue") || strings.Contains(string(viewer), "line will not work until the SIM") {
+		t.Fatalf("SIM-loss guidance does not preserve honest established-session semantics: %s", viewer)
 	}
 	csp := recorder.Header().Get("Content-Security-Policy")
 	if !strings.Contains(csp, "frame-ancestors 'self'") {
@@ -108,6 +119,45 @@ func TestOfflineClaimFallsBackToUSBAndReturnsAfterHeartbeat(t *testing.T) {
 	heartbeatClientForTest(t, a, "android-one", "agent-one", "One", true)
 	if selection := a.effectiveSIMAuthSelection(time.Now().UTC()); selection.Mode != "remote" || selection.ClientID != "android-one" {
 		t.Fatalf("returning mobile should recover its assignment: %#v", selection)
+	}
+}
+
+func TestRemoteAgentLossPreservesEstablishedSessionAndRecoversReadiness(t *testing.T) {
+	a, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "remote"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeatClientForTest(t, a, "android-one", "agent-one", "One", true)
+	claimSIMForTest(t, a, "android-one", "agent-one", true)
+	now := time.Now().UTC()
+	if err := a.store.SaveCall(Call{ID: "active-call", Direction: DirectionOutgoing, Peer: "+15555550101", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	a.stateMu.Lock()
+	client := a.clients["android-one"]
+	client.LastSeen = now.Add(-clientOnlineWindow - time.Second)
+	client.AuthLastSeen = client.LastSeen
+	a.clients[client.ID] = client
+	a.stateMu.Unlock()
+	status, statusErr := a.runtimeStatus(context.Background())
+	if statusErr == nil || status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+		t.Fatalf("remote loss status = %#v, error = %v", status, statusErr)
+	}
+	call, _ := a.store.GetCall("active-call")
+	if call.EndedAt != nil || call.State != "active" {
+		t.Fatalf("remote loss proactively ended the call: %#v", call)
+	}
+	heartbeatClientForTest(t, a, "android-one", "agent-one", "One", true)
+	status, statusErr = a.runtimeStatus(context.Background())
+	if statusErr != nil || !status.Ready || !status.SIMReady || !status.TunnelReady || !status.IMSReady {
+		t.Fatalf("returning remote agent did not recover readiness: %#v, error = %v", status, statusErr)
+	}
+	call, _ = a.store.GetCall("active-call")
+	if call.EndedAt != nil || call.State != "active" {
+		t.Fatalf("remote recovery disrupted the call: %#v", call)
 	}
 }
 
