@@ -66,6 +66,47 @@
               <button type="button" class="hangup-button" id="hangup-call">Hang up</button>
             </div>
             <p class="form-status" id="call-status" role="status"></p>
+            <section class="call-audio" aria-labelledby="call-audio-title">
+              <div class="call-audio-heading">
+                <div>
+                  <h2 id="call-audio-title">Call audio</h2>
+                  <p>Choose the devices used by this browser and verify live audio during a call.</p>
+                </div>
+              </div>
+              <div class="audio-device-grid">
+                <div class="audio-device-card">
+                  <label class="audio-device-field" for="audio-input">
+                    <span>Microphone</span>
+                    <select id="audio-input" aria-describedby="audio-input-detail microphone-level-label" disabled><option value="">Detecting devices…</option></select>
+                    <small id="audio-input-detail">Checking browser capabilities…</small>
+                  </label>
+                  <div class="audio-level-row">
+                    <span id="microphone-level-label">Input level</span>
+                    <div class="audio-level" id="microphone-level" role="meter" aria-labelledby="microphone-level-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                      <i aria-hidden="true"></i>
+                    </div>
+                  </div>
+                </div>
+                <div class="audio-device-card">
+                  <label class="audio-device-field" for="audio-output">
+                    <span>Speaker</span>
+                    <select id="audio-output" aria-describedby="audio-output-detail speaker-level-label" disabled><option value="">Detecting devices…</option></select>
+                    <small id="audio-output-detail">Checking browser capabilities…</small>
+                  </label>
+                  <div class="audio-level-row">
+                    <span id="speaker-level-label">Output level</span>
+                    <div class="audio-level" id="speaker-level" role="meter" aria-labelledby="speaker-level-label" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                      <i aria-hidden="true"></i>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div class="audio-access-row" id="audio-access-row">
+                <button class="audio-permission-button" id="audio-permission" type="button">Allow audio device access</button>
+                <button class="audio-output-picker-button" id="audio-output-picker" type="button" hidden>Choose a speaker…</button>
+                <p class="form-status" id="audio-permission-status" role="status" aria-live="polite"></p>
+              </div>
+            </section>
             <details class="call-quality" id="call-quality" hidden>
               <summary><span id="call-quality-summary">Live media quality</span><small id="call-quality-route"></small></summary>
               <div class="call-quality-grid">
@@ -123,29 +164,6 @@
               <b>Record calls</b>
             </label>
             <p class="form-status" id="recording-status" role="status"></p>
-          </article>
-          <article class="audio-setting" aria-labelledby="audio-setting-title">
-            <div class="audio-setting-heading">
-              <h2 id="audio-setting-title">Call audio</h2>
-              <p>Choose the microphone and speaker used by this browser. Available choices are remembered locally.</p>
-            </div>
-            <div class="audio-device-grid">
-              <label class="audio-device-field" for="audio-input">
-                <span>Microphone</span>
-                <select id="audio-input" aria-describedby="audio-input-detail" disabled><option value="">Detecting devices…</option></select>
-                <small id="audio-input-detail">Checking browser capabilities…</small>
-              </label>
-              <label class="audio-device-field" for="audio-output">
-                <span>Speaker</span>
-                <select id="audio-output" aria-describedby="audio-output-detail" disabled><option value="">Detecting devices…</option></select>
-                <small id="audio-output-detail">Checking browser capabilities…</small>
-              </label>
-            </div>
-            <div class="audio-access-row" id="audio-access-row">
-              <button class="audio-permission-button" id="audio-permission" type="button">Allow audio device access</button>
-              <button class="audio-output-picker-button" id="audio-output-picker" type="button" hidden>Choose a speaker…</button>
-              <p class="form-status" id="audio-permission-status" role="status" aria-live="polite"></p>
-            </div>
           </article>
           <form class="token-form" id="token-form">
             <h2>Access key</h2>

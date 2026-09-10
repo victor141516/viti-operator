@@ -353,6 +353,11 @@ def main():
         # before it silently ages out (3GPP TS 24.302 7.2.2C). Set by the manager from
         # settings.rekey.minutes (default 30); hand-authored configs may omit it.
         f.write(f"SWU_CHILD_REKEY_MINUTES={cfg.get('rekey_minutes', 30)}\n")
+        # Proactive IKE-SA rekey period. O2's ePDG has been observed initiating a rekey after
+        # roughly 55 minutes; going first preserves our initiator role and avoids a full tunnel
+        # reconnect that would interrupt active SIP calls. This is deliberately independent from
+        # the shorter ESP CHILD-SA rekey period.
+        f.write(f"SWU_IKE_REKEY_MINUTES={cfg.get('ike_rekey_minutes', 45)}\n")
         # EAP-AKA fast re-authentication (RFC 4187 AT_NEXT_REAUTH_ID). '1' (default) presents the
         # AAA-issued re-auth identity as IDi on a reconnect; swu_ike falls back to the permanent
         # NAI automatically if the ePDG rejects it. '0' never offers one — for a carrier (O2 UK

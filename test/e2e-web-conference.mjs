@@ -63,6 +63,7 @@ class BrowserClient {
       else resolve(message.result);
     });
     await this.command("Runtime.enable");
+    await this.evaluate("sessionStorage.setItem('viti-e2e-test-tone', '1'); true");
   }
 
   command(method, params = {}) {

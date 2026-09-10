@@ -25,7 +25,7 @@ python3 /usr/local/bin/render.py || { log "render failed"; exit 1; }
 # shellcheck disable=SC1091
 set -a; . "$VOWIFI_RUNDIR/engine.env"; set +a
 export USIM_PIN USIM_READER USIM_READER_INDEX USIM_READER_PORT USIM_IMSI VOWIFI_ID MANAGER_URL VOWIFI_RUNDIR
-export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID
+export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID
 export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 
 # Delivery reports are irreplaceable protocol evidence. They are committed to
@@ -75,13 +75,19 @@ else
 fi
 rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
 
-# swu_ike is very chatty (per-packet IKE decode dumps). Its output goes either to
-# the opt-in diagnostic file or /dev/null; operational state remains available in
-# swu_status.json and through the supervisor's concise container-log messages.
+# swu_ike is very chatty (per-packet IKE decode dumps). Full output goes either to
+# the opt-in diagnostic file or through an operational-line filter. The latter keeps
+# low-volume [swu_ike] lifecycle/rekey evidence in both Docker logs and a bounded file,
+# instead of discarding the exact reason for every supervised reconnect.
 (
   backoff=4
   while true; do
     log "swu_ike starting"
+    SWU_OPERATIONAL_LOG=/logs/swu-operational.log
+    if [ -f "$SWU_OPERATIONAL_LOG" ] && [ "$(stat -c %s "$SWU_OPERATIONAL_LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
+      tail -c 524288 "$SWU_OPERATIONAL_LOG" > "$SWU_OPERATIONAL_LOG.tmp"
+      mv "$SWU_OPERATIONAL_LOG.tmp" "$SWU_OPERATIONAL_LOG"
+    fi
     python3 -u /usr/local/bin/swu_ike.py \
         -m "${USIM_READER_INDEX:-0}" \
         -s "$SWU_SOURCE" \
@@ -91,8 +97,12 @@ rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
         -M "$SWU_MCC" \
         -N "$SWU_MNC" \
         -E "${SWU_IMEI:-}" \
-        -V "${SWU_IMEISV:-}" >> "$SWU_LOG_TARGET" 2>&1
-    rc=$?
+        -V "${SWU_IMEISV:-}" 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
+          awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+        else
+          tee -a "$SWU_LOG_TARGET" | awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+        fi
+    rc=${PIPESTATUS[0]}
     log "swu_ike exited (rc=$rc); reconnecting in ${backoff}s"
     sleep "$backoff"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
   done

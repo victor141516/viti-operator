@@ -101,6 +101,18 @@ the browser or operating-system controls must be used. The application does not
 claim a preferred device is active unless the corresponding browser operation
 has succeeded.
 
+The Calls surface taps the actual outbound sender track and inbound remote
+stream with unconnected Web Audio analyser nodes. It renders logarithmic input
+and output level meters without adding a second playback route or changing the
+media. This makes a selected-but-muted, silent, or replaced track visible while
+the call is active. Synthetic test audio requires both the `testTone` query and
+a per-tab `sessionStorage` opt-in set by the end-to-end runner; a copied or stale
+test URL alone can never replace a production microphone.
+
+During an established call, the dial pad provides local dual-tone feedback for
+the full press gesture. On release it emits one RFC 4733 event whose bounded
+duration matches the press, so a long press does not become repeated digits.
+
 ### Android client
 
 The native application uses Kotlin, Jetpack Compose, Material 3, coroutines,
@@ -408,6 +420,16 @@ security associations and a carrier-assigned inner connection through the TUN
 interface. NAT-T keepalives, liveness probes, fragmentation, reauthentication,
 and tunnel supervision are handled by the SWu client.
 
+The engine refreshes two independent security-association lifetimes. It renews
+the ESP CHILD SA every 30 minutes and proactively renews the parent IKE SA every
+45 minutes. The latter is deliberately earlier than O2's observed
+responder-initiated renewal at roughly 55 minutes: initiating the exchange from
+the engine preserves the existing IKE roles, inner address, CHILD SA, SIP
+dialogs, and active media. A lost or rejected proactive IKE renewal retains the
+current association and retries after 60 seconds instead of tearing down a
+working tunnel. A carrier-forced tunnel deletion remains a real data-plane
+boundary and cannot preserve an existing carrier call.
+
 Every SWu process creates a random generation and monotonically increasing event
 sequence. `tunnel_start`, `tunnel_up`, and `tunnel_down` attempt a synchronous
 commit to the bind-mounted event outbox before network delivery. Failure to
@@ -711,7 +733,10 @@ a webhook retry cannot create a second conversation row.
 - The adaptive authenticator probes for the configured ADB serial and resumes
   when it returns. OpenStick is advertised only after ADB reports `device`, the
   SIM property is exactly `READY`, and the bridge package, executable helper,
-  and content provider all respond.
+  and content provider all respond. Readiness probes are serialized and briefly
+  cached to avoid overloading the Windows ADB bridge. A transport timeout keeps
+  a successful observation for at most 30 seconds; definitive evidence such as
+  an absent SIM or missing device still fails immediately.
 - Manager restart restores open call rows and the durable tunnel checkpoint;
   record age alone is not proof that a carrier call ended. It does not restore
   volatile logical-participant generations, pending exact-channel controls, or
@@ -719,7 +744,8 @@ a webhook retry cannot create a second conversation row.
   outside the current guarantee.
 - A confirmed current-generation tunnel down or a newer engine-process start
   interrupts calls that existed on that data plane. A SIM-health failure alone
-  does not.
+  does not. Normal IKE lifetime maintenance is make-before-break and therefore
+  does not create a tunnel-down boundary.
 - Engine call lookup, lifecycle mutation, comparison with the persisted down
   boundary, and state-file replacement are one atomic store operation. A flush
   failure rolls memory back before HTTP returns an error.

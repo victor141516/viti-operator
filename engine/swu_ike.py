@@ -935,6 +935,20 @@ class swu():
         self._rekey_sent_at = None           # time.monotonic() the rekey request was sent (timeout)
         self.rekey_response_timeout = float(os.environ.get("SWU_REKEY_TIMEOUT", "10") or 10)
 
+        # Proactive IKE-SA rekey. O2's ePDG initiates an IKE rekey after roughly 55 minutes.
+        # This client cannot safely accept a responder-initiated IKE rekey because that reverses
+        # the IKE initiator/responder roles for the new SA. Initiating our own make-before-break
+        # rekey first preserves those roles and, unlike a supervised reconnect, keeps the inner
+        # address, CHILD SA, SIP dialogs and active calls intact. Forty-five minutes leaves enough
+        # margin for retries before the observed carrier lifetime. 0 disables the proactive path.
+        _ike_rk_min = float(os.environ.get("SWU_IKE_REKEY_MINUTES", "45") or 45)
+        self.ike_rekey_period = _ike_rk_min * 60.0 if _ike_rk_min > 0 else 0.0
+        self._ike_sa_time = None
+        self._ike_rekey_outstanding = False
+        self._ike_rekey_sent_at = None
+        self._ike_rekey_retry_at = None
+        self._ike_rekey_failed = False
+
         # G1: IKEv2 fragmentation (RFC 7383). fragmentation_enabled advertises
         # IKEV2_FRAGMENTATION_SUPPORTED in IKE_SA_INIT (additive/optional; disable via
         # SWU_FRAGMENTATION=0 if a carrier chokes). peer_supports_fragmentation is set when the
@@ -3503,7 +3517,10 @@ class swu():
         AUTH_KEY_SIZE = self.integ_key_len_bytes.get(self.negotiated_integrity_algorithm) 
         ENCR_KEY_SIZE = self.negotiated_encryption_algorithm_key_size//8
         
-        KEY_LENGHT_TOTAL = PRF_KEY_SIZE + 2*AUTH_KEY_SIZE + 2*ENCR_KEY_SIZE
+        # RFC 7296 section 2.18: a rekey derives the same seven-key SK_* suite as an
+        # initial IKE SA. SK_pi/SK_pr are not normally consumed after EAP-AKA, but omitting
+        # them makes the new SA incomplete and breaks any later operation that does need them.
+        KEY_LENGHT_TOTAL = 3*PRF_KEY_SIZE + 2*AUTH_KEY_SIZE + 2*ENCR_KEY_SIZE
 
         KEY_STREAM = self.prf_plus(self.negotiated_prf,SKEYSEED,STREAM,KEY_LENGHT_TOTAL)
         
@@ -3512,12 +3529,16 @@ class swu():
         self.SK_AR = KEY_STREAM[PRF_KEY_SIZE+AUTH_KEY_SIZE:PRF_KEY_SIZE+2*AUTH_KEY_SIZE]
         self.SK_EI = KEY_STREAM[PRF_KEY_SIZE+2*AUTH_KEY_SIZE:PRF_KEY_SIZE+2*AUTH_KEY_SIZE+ENCR_KEY_SIZE]
         self.SK_ER = KEY_STREAM[PRF_KEY_SIZE+2*AUTH_KEY_SIZE+ENCR_KEY_SIZE:PRF_KEY_SIZE+2*AUTH_KEY_SIZE+2*ENCR_KEY_SIZE]
+        self.SK_PI = KEY_STREAM[PRF_KEY_SIZE+2*AUTH_KEY_SIZE+2*ENCR_KEY_SIZE:2*PRF_KEY_SIZE+2*AUTH_KEY_SIZE+2*ENCR_KEY_SIZE]
+        self.SK_PR = KEY_STREAM[2*PRF_KEY_SIZE+2*AUTH_KEY_SIZE+2*ENCR_KEY_SIZE:3*PRF_KEY_SIZE+2*AUTH_KEY_SIZE+2*ENCR_KEY_SIZE]
    
         print('SK_D',toHex(self.SK_D))
         print('SK_AI',toHex(self.SK_AI))
         print('SK_AR',toHex(self.SK_AR))
         print('SK_EI',toHex(self.SK_EI))
         print('SK_ER',toHex(self.SK_ER))
+        print('SK_PI',toHex(self.SK_PI))
+        print('SK_PR',toHex(self.SK_PR))
 
         self.print_ikev2_decryption_table()  
         
@@ -4836,6 +4857,9 @@ class swu():
         
         self.message_id_request += 1
         packet = self.create_CREATE_CHILD_SA(lowest)
+        self._ike_rekey_outstanding = True
+        self._ike_rekey_sent_at = time.monotonic()
+        self._ike_rekey_failed = False
         #send request
         self.send_data(packet)
         print('sending CREATE_CHILD_SA (IKE)')
@@ -4905,8 +4929,15 @@ class swu():
         # the _rekey_outstanding flag) — the SA keeps running on the old keys until then.
         if error_notify is not None:
             self.log_notify_error(error_notify, "CREATE_CHILD_SA (rekey) response")
-            self._rekey_outstanding = False
-            self._rekey_failed = True
+            if self._ike_rekey_outstanding:
+                self._ike_rekey_outstanding = False
+                self._ike_rekey_sent_at = None
+                self._ike_rekey_failed = True
+                self._ike_rekey_retry_at = time.monotonic() + 60.0
+                swu_log("proactive IKE_SA rekey rejected; retaining the current SA and retrying in 60s")
+            else:
+                self._rekey_outstanding = False
+                self._rekey_failed = True
             return
 
 
@@ -4930,6 +4961,12 @@ class swu():
             #send request
             self.send_data(packet)
             print('sending INFORMATIONAL (DELETE IKE old)')
+            self._ike_sa_time = time.monotonic()
+            self._ike_rekey_outstanding = False
+            self._ike_rekey_sent_at = None
+            self._ike_rekey_retry_at = None
+            self._ike_rekey_failed = False
+            swu_log("IKE_SA rekey complete; active SIP dialogs and CHILD SA retained")
 
         if isESP == True:
             print('received CREATE_CHILD_SA response IPSEC')                
@@ -5085,9 +5122,17 @@ class swu():
         self._rekey_outstanding = False
         self._rekey_sent_at = None
         self._rekey_failed = False
+        self._ike_sa_time = time.monotonic() if self.ike_rekey_period > 0 else None
+        self._ike_rekey_outstanding = False
+        self._ike_rekey_sent_at = None
+        self._ike_rekey_retry_at = None
+        self._ike_rekey_failed = False
         if self.child_rekey_period > 0:
             swu_log("proactive CHILD_SA rekey enabled: every %d min (0=off via SWU_CHILD_REKEY_MINUTES)" %
                     int(self.child_rekey_period / 60))
+        if self.ike_rekey_period > 0:
+            swu_log("proactive IKE_SA rekey enabled: every %d min (0=off via SWU_IKE_REKEY_MINUTES)" %
+                    int(self.ike_rekey_period / 60))
 
         while True:
 
@@ -5096,6 +5141,7 @@ class swu():
             _timeouts = [t for t in (
                 self.liveness_period if self.liveness_period > 0 else None,
                 self._rekey_select_timeout(),
+                self._ike_rekey_select_timeout(),
             ) if t is not None]
             _timeout = min(_timeouts) if _timeouts else None
             read_sockets, write_sockets, error_sockets = select.select(socket_list, [], [], _timeout)
@@ -5197,6 +5243,8 @@ class swu():
             self._liveness_tick()
             # Proactive CHILD-SA rekey: refresh the ESP SA before it silently ages out on the ePDG.
             self._rekey_tick()
+            # Proactive IKE-SA rekey: run before the carrier's responder-initiated lifetime expiry.
+            self._ike_rekey_tick()
 
 
                         
@@ -5329,6 +5377,62 @@ class swu():
         except Exception:
             pass
         exit(1)
+
+    def _ike_rekey_select_timeout(self):
+        """Seconds until the next proactive IKE-SA action."""
+        if self.ike_rekey_period <= 0 or self._ike_sa_time is None:
+            return None
+        now = time.monotonic()
+        if self._ike_rekey_outstanding and self._ike_rekey_sent_at is not None:
+            return max(0.0, self.rekey_response_timeout - (now - self._ike_rekey_sent_at))
+        if self._ike_rekey_retry_at is not None:
+            return max(0.0, self._ike_rekey_retry_at - now)
+        return max(0.0, self.ike_rekey_period - (now - self._ike_sa_time))
+
+    def _ike_rekey_tick(self):
+        """Initiate a make-before-break IKE-SA rekey before the carrier expires the SA.
+
+        A timeout or rejection leaves the old SA installed and schedules a short retry; it does
+        not tear down a still-working tunnel. The carrier remains free to expire it if every retry
+        fails, but one transient lost CREATE_CHILD_SA can no longer cause a self-inflicted outage.
+        """
+        if self.ike_rekey_period <= 0 or self._ike_sa_time is None:
+            return
+        now = time.monotonic()
+
+        if self._ike_rekey_outstanding:
+            if self._ike_rekey_sent_at is not None and \
+                    (now - self._ike_rekey_sent_at) >= self.rekey_response_timeout:
+                self._ike_rekey_outstanding = False
+                self._ike_rekey_sent_at = None
+                self._ike_rekey_retry_at = now + 60.0
+                swu_log("proactive IKE_SA rekey got no response in %ds; retaining the current SA "
+                        "and retrying in 60s" % int(self.rekey_response_timeout))
+            return
+
+        due = (now - self._ike_sa_time) >= self.ike_rekey_period
+        retry_due = self._ike_rekey_retry_at is not None and now >= self._ike_rekey_retry_at
+        if not due and not retry_due:
+            return
+
+        # Never overlap CREATE_CHILD_SA exchanges. A CHILD rekey normally finishes in one RTT;
+        # wake again shortly and let it complete first.
+        if self._rekey_outstanding:
+            self._ike_rekey_retry_at = now + 5.0
+            return
+
+        age = int(now - self._ike_sa_time)
+        swu_log("IKE_SA reached proactive rekey age (~%d min); initiating make-before-break rekey" %
+                (age // 60))
+        self._ike_rekey_retry_at = None
+        try:
+            self.state_ue_create_sa()
+        except Exception as error:
+            self._ike_rekey_outstanding = False
+            self._ike_rekey_sent_at = None
+            self._ike_rekey_retry_at = now + 60.0
+            swu_log("proactive IKE_SA rekey send failed (%r); retaining the current SA and "
+                    "retrying in 60s" % error)
 
     def _sim_auth_failed(self):
         """Handle a SIM AUTHENTICATE that returned no RES/CK/IK — e.g. the wrong SIM is in the

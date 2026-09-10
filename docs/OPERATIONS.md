@@ -326,7 +326,7 @@ country to `POST /api/v1/calls/normalize` and inspect the returned E.164 value.
 
 ## Browser audio devices
 
-Open **Connection → Call audio** to select this browser's microphone and, when
+Open **Calls → Call audio** to select this browser's microphone and, when
 supported, its speaker. Choices are stored only in that browser origin, so an
 HTTP loopback URL, an HTTPS deployment, and another host or port each have
 independent preferences. Audio capture and device enumeration require a secure
@@ -347,6 +347,17 @@ that fallback and restores the device after it reconnects when its identifier,
 physical group, or unique label can be matched safely. Duplicate labels remain
 on the default route rather than selecting an arbitrary device. A failed live
 microphone switch leaves the previous call track and saved choice intact.
+
+The input and output meters are active only while the corresponding call stream
+exists. Input measures the track attached to the WebRTC sender, not merely the
+device selected by the operating system; output measures the remote stream
+attached to the call audio element. A moving input meter with a flat output
+therefore has a different meaning from the inverse and helps localize one-way
+audio before inspecting packet traces.
+
+During a connected call, press and hold a dial-pad key to hear local DTMF
+feedback. Releasing it sends one RFC 4733 digit with the measured press duration.
+Pointer, touch, Space, and Enter activation follow the same lifecycle.
 
 ## Contact synchronization
 
@@ -392,6 +403,14 @@ directory alone does not enable capture. While the switch is on, the stack recor
 - engine event-delivery results;
 - Asterisk and SWu logs;
 - manager and engine PCAP files.
+
+Even when high-volume diagnostics are disabled, the engine retains low-volume
+SWu lifecycle and renewal lines in
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log`. The file is capped by
+keeping the most recent 512 KiB whenever it exceeds 1 MiB. It contains the
+reason for supervised tunnel recovery without retaining packet-by-packet IKE
+dumps. Full `charon.log` and PCAP capture still require the explicit diagnostic
+switch.
 
 Export one correlated report:
 
@@ -444,6 +463,14 @@ do not add them to source-controlled configuration.
 4. If IMS failed, inspect Asterisk registration and SIP AKA logs.
 5. Do not repeatedly reflash the modem: the stock-Android SIM bridge is only
    the local authentication transport and is not the carrier IMS stack.
+
+For an approximately hourly IMS interruption, inspect
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for `IKE_SA rekey` and
+`swu_ike exited`. Healthy lifetime maintenance reports `IKE_SA rekey complete`
+without an Asterisk restart. The default proactive periods are 30 minutes for
+the ESP CHILD SA and 45 minutes for the parent IKE SA; `0` disables either timer
+through `SWU_CHILD_REKEY_MINUTES` or `SWU_IKE_REKEY_MINUTES` in the rendered
+engine environment.
 
 ### Modem was unplugged
 
