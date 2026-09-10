@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 
 const cdpPort = process.env.VITI_CDP_PORT || "9231";
@@ -7,6 +8,15 @@ const barrierPath = process.env.VITI_BARRIER_PATH || "";
 const apiKey = process.env.VITI_TEST_API_KEY || "";
 const testNumber = process.env.VITI_TEST_NUMBER || "*43";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
+const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
+const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
+
+const composeExec = (...args) => execFileSync("docker", ["compose", "exec", "-T", "engine", ...args], {
+  cwd: composeRoot,
+  encoding: "utf8",
+});
+const asterisk = command => composeExec("asterisk", "-rx", command);
+const asteriskLog = command => composeExec("sh", "-lc", command);
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -79,8 +89,13 @@ async function evaluate(expression) {
 let registered = false;
 let active = false;
 let bidirectional = false;
+let dtmfStarted = false;
+let dtmfStopped = false;
+let dtmfReceived = false;
 let historyFinalized = false;
 let initialFinalizedLocalCalls = 0;
+let asteriskLogStart = 0;
+let rtpDebugEnabled = false;
 const callsFetch = `fetch('/api/v1/calls', {
   headers: localStorage.getItem('viti-token')
     ? { Authorization: 'Bearer ' + localStorage.getItem('viti-token') }
@@ -115,6 +130,9 @@ try {
     `),
     30000,
   );
+  asteriskLogStart = Number(asteriskLog("wc -l < /var/log/asterisk/full").trim());
+  asterisk("rtp set debug on");
+  rtpDebugEnabled = true;
   initialFinalizedLocalCalls = await evaluate(`${callsFetch}.then(value =>
     value.calls.filter(call => call.peer === ${JSON.stringify(testNumber)} && Boolean(call.ended_at)).length)`);
   await evaluate(`(() => {
@@ -145,6 +163,15 @@ try {
     () => evaluate("document.querySelector('#call-status').textContent.includes('two-way audio')"),
     30000,
   );
+  dtmfStarted = await evaluate("state.voice.startDTMF('5') === true");
+  await delay(240);
+  dtmfStopped = await evaluate("state.voice.stopDTMF('5') === true");
+  // Keep the call alive long enough for the RFC4733 end packets and
+  // inter-tone gap queued by the browser to reach Asterisk.
+  await delay(500);
+  const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
+  dtmfReceived = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
+    && /DTMF begin '5' received/.test(newAsteriskLog);
   if (barrierPath) {
     writeFileSync(`${barrierPath}.ready`, "ready\n", { encoding: "utf8", mode: 0o600 });
     await waitFor("external test release", () => existsSync(`${barrierPath}.release`), 300000);
@@ -152,6 +179,9 @@ try {
     await delay(holdMilliseconds);
   }
 } finally {
+  if (rtpDebugEnabled) {
+    try { asterisk("rtp set debug off"); } catch {}
+  }
   try {
     await evaluate("document.querySelector('#hangup-call').click(); true");
     await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
@@ -175,6 +205,9 @@ const result = {
   registered: Boolean(registered),
   active: Boolean(active),
   bidirectional: Boolean(bidirectional),
+  dtmf_started: Boolean(dtmfStarted),
+  dtmf_stopped: Boolean(dtmfStopped),
+  dtmf_received: Boolean(dtmfReceived),
   history_finalized: Boolean(historyFinalized),
 };
 console.log(JSON.stringify(result));
