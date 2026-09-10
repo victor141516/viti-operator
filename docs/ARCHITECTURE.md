@@ -514,6 +514,40 @@ ringback. `183 Session Progress` may carry carrier early media; in that case the
 client stops generated ringback and plays the received stream. Any answer,
 failure, cancellation, or hangup stops ringback.
 
+#### Live client quality evidence
+
+Each active web or Android participant samples its own `RTCPeerConnection`
+statistics. The sample is volatile and belongs to one immutable call-leg token
+and one peer-connection instance; it is not written to call history. A replaced
+peer connection cancels the previous sampler, and terminal events discard any
+late asynchronous result. Android additionally rejects samples for another leg
+or with a non-increasing sequence number.
+
+Packet loss is calculated over consecutive counters for each continuing audio
+RTP report and is then aggregated. A first sample, idle interval, counter reset,
+signed loss correction, added or removed SSRC, or selected ICE-pair change starts
+a new baseline instead of producing an invented percentage. Incoming loss and
+jitter describe RTP received by the local client. Outgoing loss is shown only
+when the media peer supplies a linked `remote-inbound-rtp` RTCP report. Jitter
+and RTT values defined in seconds by WebRTC statistics are converted to
+milliseconds for display.
+
+Media RTT comes from a linked remote-inbound RTCP report when available. The
+fallback ICE-path RTT is the selected candidate pair's current STUN RTT. Neither
+measurement includes the carrier, PSTN, or called party. The route is resolved
+from the audio RTP transport's selected candidate pair; a unique legacy selected
+pair is accepted only when transport linkage is unavailable. The UI says
+**TURN relay** only when a selected candidate is observed as `relay`, otherwise
+**ICE direct**, and displays the observed relay/protocol value such as UDP. TURN
+does not imply TCP.
+
+Normal quality events contain only timestamps, sequence numbers, numeric
+measurements, candidate types, and protocol labels. Candidate addresses, ports,
+IDs, SDP, raw reports, and audio levels remain outside this UI path. Connecting,
+reconnecting, unsupported, ambiguous, and failed-statistics states clear current
+measurements rather than freezing an earlier successful sample. Route evidence
+may appear while numeric measurements are still collecting.
+
 ### Call recordings
 
 Call recording is server-owned and independent from diagnostic capture. Web and

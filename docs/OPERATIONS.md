@@ -492,6 +492,22 @@ delete or clear the entire queue.
 
 ### Audio is intermittent
 
+During a local call, expand **Live media quality** in the web or Android call
+surface. It reports only that client's WebRTC leg. **Incoming loss** and
+**Incoming jitter** cover RTP received by that device; **Outgoing loss** is
+available only when RTCP from the media peer exposes it. **Media RTT** is the
+RTCP round trip to the media peer, while **ICE path RTT** is the selected ICE
+pair's STUN round trip. All RTT and jitter values are milliseconds, packet loss
+is a percentage over the displayed sampling interval, and none of these values
+measure the carrier/PSTN leg.
+
+The route label is based on the selected candidate pair, not configured server
+intent. **TURN relay · UDP** means the client observed a relay candidate using
+UDP; TURN can also use other transports and is not synonymous with TCP. During
+ICE recovery the panel says **Media reconnecting** and removes the prior values.
+**Collecting measurements**, **Measurements unavailable**, or **Live statistics
+unavailable** are valid outcomes and should not be interpreted as zero loss.
+
 Use the correlated trace to compare SIP state, ICE state, WebRTC statistics,
 RTP packet capture, and decoded WAV directions. A signaling success does not
 prove media reachability. Check TURN allocation and the Tailscale path before
