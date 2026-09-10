@@ -10,6 +10,7 @@ const testNumber = process.env.VITI_TEST_NUMBER || "*43";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
 const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
+const dtmfLogPath = `/tmp/viti-e2e-dtmf-${process.pid}`;
 
 const composeExec = (...args) => execFileSync("docker", ["compose", "exec", "-T", "engine", ...args], {
   cwd: composeRoot,
@@ -94,7 +95,7 @@ let dtmfStopped = false;
 let dtmfReceived = false;
 let historyFinalized = false;
 let initialFinalizedLocalCalls = 0;
-let asteriskLogStart = 0;
+let dtmfLoggerEnabled = false;
 let rtpDebugEnabled = false;
 const callsFetch = `fetch('/api/v1/calls', {
   headers: localStorage.getItem('viti-token')
@@ -130,7 +131,9 @@ try {
     `),
     30000,
   );
-  asteriskLogStart = Number(asteriskLog("wc -l < /var/log/asterisk/full").trim());
+  asteriskLog(`rm -f ${dtmfLogPath}`);
+  asterisk(`logger add channel ${dtmfLogPath} verbose,dtmf`);
+  dtmfLoggerEnabled = true;
   asterisk("rtp set debug on");
   rtpDebugEnabled = true;
   initialFinalizedLocalCalls = await evaluate(`${callsFetch}.then(value =>
@@ -169,7 +172,7 @@ try {
   // Keep the call alive long enough for the RFC4733 end packets and
   // inter-tone gap queued by the browser to reach Asterisk.
   await delay(500);
-  const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
+  const newAsteriskLog = asteriskLog(`cat ${dtmfLogPath}`);
   dtmfReceived = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
     && /DTMF begin '5' received/.test(newAsteriskLog);
   if (barrierPath) {
@@ -181,6 +184,10 @@ try {
 } finally {
   if (rtpDebugEnabled) {
     try { asterisk("rtp set debug off"); } catch {}
+  }
+  if (dtmfLoggerEnabled) {
+    try { asterisk(`logger remove channel ${dtmfLogPath}`); } catch {}
+    try { asteriskLog(`rm -f ${dtmfLogPath}`); } catch {}
   }
   try {
     await evaluate("document.querySelector('#hangup-call').click(); true");

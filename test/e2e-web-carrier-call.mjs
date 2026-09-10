@@ -13,6 +13,7 @@ const externalChecks = process.env.VITI_EXTERNAL_CHECKS === "1";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
 const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
+const dtmfLogPath = `/tmp/viti-e2e-dtmf-${process.pid}`;
 
 const composeExec = (...args) => execFileSync("docker", ["compose", "exec", "-T", "engine", ...args], {
   cwd: composeRoot,
@@ -87,7 +88,7 @@ let externalChecksPreserved = false;
 let remoteHungup = false;
 let historyFinalized = false;
 let initialFinalized = 0;
-let asteriskLogStart = 0;
+let dtmfLoggerEnabled = false;
 let rtpDebugEnabled = false;
 try {
   await command("Runtime.enable");
@@ -107,7 +108,9 @@ try {
     state.globalCall === false &&
     document.querySelector('.call-button')?.disabled === false
   `), 30000);
-  asteriskLogStart = Number(asteriskLog("wc -l < /var/log/asterisk/full").trim());
+  asteriskLog(`rm -f ${dtmfLogPath}`);
+  asterisk(`logger add channel ${dtmfLogPath} verbose,dtmf`);
+  dtmfLoggerEnabled = true;
   asterisk("rtp set debug on");
   rtpDebugEnabled = true;
   initialFinalized = await evaluate(`${callsFetch}.then(value => value.calls.filter(call =>
@@ -147,7 +150,7 @@ try {
   await delay(240);
   await evaluate("state.voice.stopDTMF('5'); true");
   await delay(500);
-  const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
+  const newAsteriskLog = asteriskLog(`cat ${dtmfLogPath}`);
   dtmfForwarded = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
     && /Sent RTP DTMF packet to/.test(newAsteriskLog);
   if (interruptMedia) {
@@ -189,6 +192,10 @@ try {
 } finally {
   if (rtpDebugEnabled) {
     try { asterisk("rtp set debug off"); } catch {}
+  }
+  if (dtmfLoggerEnabled) {
+    try { asterisk(`logger remove channel ${dtmfLogPath}`); } catch {}
+    try { asteriskLog(`rm -f ${dtmfLogPath}`); } catch {}
   }
   try {
     if (!remoteHungup) {
