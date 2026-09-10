@@ -8,6 +8,8 @@ const destination = process.env.VITI_TEST_DESTINATION || "";
 const barrier = process.env.VITI_BARRIER_PATH || "";
 const requireRinging = process.env.VITI_REQUIRE_RINGING === "1";
 const expectRemoteHangup = process.env.VITI_EXPECT_REMOTE_HANGUP === "1";
+const interruptMedia = process.env.VITI_INTERRUPT_MEDIA === "1";
+const externalChecks = process.env.VITI_EXTERNAL_CHECKS === "1";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
 const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
@@ -80,6 +82,8 @@ let ringing = false;
 let active = false;
 let bidirectional = false;
 let dtmfForwarded = false;
+let mediaRecovered = false;
+let externalChecksPreserved = false;
 let remoteHungup = false;
 let historyFinalized = false;
 let initialFinalized = 0;
@@ -146,6 +150,33 @@ try {
   const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
   dtmfForwarded = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
     && /Sent RTP DTMF packet to/.test(newAsteriskLog);
+  if (interruptMedia) {
+    const traceID = await evaluate("state.recoveryContext?.trace_id || ''");
+    await evaluate("state.voice.interruptForTest(); true");
+    mediaRecovered = await waitFor(
+      "carrier media recovery",
+      () => evaluate(`
+        state.localCall === true &&
+        state.callEstablished === true &&
+        state.recoveryContext?.trace_id === ${JSON.stringify(traceID)} &&
+        document.querySelector('#call-status').textContent.includes('two-way audio')
+      `),
+      60000,
+    );
+  }
+  if (externalChecks) {
+    writeFileSync(`${barrier}.web-active`, "ready\n", { encoding: "utf8", mode: 0o600 });
+    await waitFor("external checks release", () => existsSync(`${barrier}.release`), 120000);
+    externalChecksPreserved = await waitFor(
+      "carrier media after external checks",
+      () => evaluate(`
+        state.localCall === true &&
+        state.callEstablished === true &&
+        document.querySelector('#call-status').textContent.includes('two-way audio')
+      `),
+      30000,
+    );
+  }
   if (expectRemoteHangup) {
     remoteHungup = await waitFor(
       "remote carrier hangup",
@@ -179,10 +210,15 @@ const result = {
   active: Boolean(active),
   bidirectional: Boolean(bidirectional),
   dtmf_forwarded: Boolean(dtmfForwarded),
+  media_recovered: interruptMedia ? Boolean(mediaRecovered) : null,
+  external_checks_preserved: externalChecks ? Boolean(externalChecksPreserved) : null,
   remote_hangup: expectRemoteHangup ? Boolean(remoteHungup) : null,
   history_finalized: Boolean(historyFinalized),
 };
 console.log(JSON.stringify(result));
 const required = result.registered && result.progressed && result.active
   && result.bidirectional && result.dtmf_forwarded && result.history_finalized;
-if (!required || (requireRinging && !result.ringing) || (expectRemoteHangup && !result.remote_hangup)) process.exitCode = 1;
+if (!required || (requireRinging && !result.ringing)
+  || (interruptMedia && !result.media_recovered)
+  || (externalChecks && !result.external_checks_preserved)
+  || (expectRemoteHangup && !result.remote_hangup)) process.exitCode = 1;
