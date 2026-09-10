@@ -43,6 +43,23 @@ test('unavailable values explain absence instead of becoming successful state', 
   assert.doesNotMatch(text, /Operational|In service/)
 })
 
+test('an expired field remains distinct from a current telemetry report', () => {
+  const sections = buildCellularSections({
+    subscription_role: 'default_data',
+    home_network: { availability: 'unknown' },
+    serving_network: { availability: 'unknown' },
+    service: { availability: 'unknown' },
+    data_access: { availability: 'available', technology: 'LTE', measured_at: '2026-01-01T00:04:59Z' },
+    signal: { availability: 'stale', measured_at: '2026-01-01T00:00:00Z' },
+    stale: false,
+  }, 'observed')
+  const text = JSON.stringify(sections)
+  assert.match(text, /Report freshness.*Current/)
+  assert.match(text, /Signal status.*Measurement expired/)
+  assert.match(text, /Signal measured.*2026-01-01T00:00:00Z/)
+  assert.doesNotMatch(text, /dBm|Android signal level/)
+})
+
 test('formatters expose raw OS evidence without claiming inferred coverage', () => {
   assert.equal(networkCode({ mcc: '214', mnc: '07' }), 'MCC 214 / MNC 07')
   assert.equal(registrationLabel('in_service'), 'In service')

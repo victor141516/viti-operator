@@ -10,7 +10,10 @@ import (
 	"time"
 )
 
-const cellularObservationFreshWindow = 2 * clientOnlineWindow
+const (
+	cellularObservationFreshWindow = 2 * clientOnlineWindow
+	cellularMeasurementFreshWindow = 5 * time.Minute
+)
 
 var (
 	cellularMCCPattern = regexp.MustCompile(`^[0-9]{3}$`)
@@ -36,31 +39,31 @@ type CellularObservation struct {
 }
 
 type CellularNetworkDetails struct {
-	Availability string    `json:"availability"`
-	Operator     string    `json:"operator,omitempty"`
-	MCC          string    `json:"mcc,omitempty"`
-	MNC          string    `json:"mnc,omitempty"`
-	MeasuredAt   time.Time `json:"measured_at,omitempty"`
+	Availability string     `json:"availability"`
+	Operator     string     `json:"operator,omitempty"`
+	MCC          string     `json:"mcc,omitempty"`
+	MNC          string     `json:"mnc,omitempty"`
+	MeasuredAt   *time.Time `json:"measured_at,omitempty"`
 }
 
 type CellularServiceDetails struct {
-	Availability string    `json:"availability"`
-	Registration string    `json:"registration,omitempty"`
-	Roaming      *bool     `json:"roaming,omitempty"`
-	MeasuredAt   time.Time `json:"measured_at,omitempty"`
+	Availability string     `json:"availability"`
+	Registration string     `json:"registration,omitempty"`
+	Roaming      *bool      `json:"roaming,omitempty"`
+	MeasuredAt   *time.Time `json:"measured_at,omitempty"`
 }
 
 type CellularDataAccessDetails struct {
-	Availability string    `json:"availability"`
-	Technology   string    `json:"technology,omitempty"`
-	MeasuredAt   time.Time `json:"measured_at,omitempty"`
+	Availability string     `json:"availability"`
+	Technology   string     `json:"technology,omitempty"`
+	MeasuredAt   *time.Time `json:"measured_at,omitempty"`
 }
 
 type CellularSignalDetails struct {
-	Availability string    `json:"availability"`
-	Level        *int      `json:"level,omitempty"`
-	DBM          *int      `json:"dbm,omitempty"`
-	MeasuredAt   time.Time `json:"measured_at,omitempty"`
+	Availability string     `json:"availability"`
+	Level        *int       `json:"level,omitempty"`
+	DBM          *int       `json:"dbm,omitempty"`
+	MeasuredAt   *time.Time `json:"measured_at,omitempty"`
 }
 
 func decodeCellularHeartbeat(raw json.RawMessage, receivedAt time.Time) (*CellularObservation, bool, error) {
@@ -111,11 +114,11 @@ func normalizeCellularObservation(observation *CellularObservation) error {
 	if observation.Service.Registration != "" && !oneOf(observation.Service.Registration, "in_service", "out_of_service", "emergency_only", "power_off") {
 		return errors.New("cellular service registration is invalid")
 	}
-	if observation.Service.Availability == "available" && (observation.Service.Registration == "" || observation.Service.MeasuredAt.IsZero()) {
+	if observation.Service.Availability == "available" && (observation.Service.Registration == "" || missingMeasurement(observation.Service.MeasuredAt)) {
 		return errors.New("available cellular service requires registration evidence and measured_at")
 	}
 	if observation.Service.Availability != "available" {
-		observation.Service.Registration, observation.Service.Roaming, observation.Service.MeasuredAt = "", nil, time.Time{}
+		observation.Service.Registration, observation.Service.Roaming, observation.Service.MeasuredAt = "", nil, nil
 	}
 	if err := normalizeAvailability("data_access", observation.DataAccess.Availability); err != nil {
 		return err
@@ -124,11 +127,11 @@ func normalizeCellularObservation(observation *CellularObservation) error {
 	if len(observation.DataAccess.Technology) > 24 {
 		return errors.New("cellular data access technology is too long")
 	}
-	if observation.DataAccess.Availability == "available" && (observation.DataAccess.Technology == "" || observation.DataAccess.MeasuredAt.IsZero()) {
+	if observation.DataAccess.Availability == "available" && (observation.DataAccess.Technology == "" || missingMeasurement(observation.DataAccess.MeasuredAt)) {
 		return errors.New("available cellular data access requires technology evidence and measured_at")
 	}
 	if observation.DataAccess.Availability != "available" {
-		observation.DataAccess.Technology, observation.DataAccess.MeasuredAt = "", time.Time{}
+		observation.DataAccess.Technology, observation.DataAccess.MeasuredAt = "", nil
 	}
 	if err := normalizeAvailability("signal", observation.Signal.Availability); err != nil {
 		return err
@@ -139,11 +142,11 @@ func normalizeCellularObservation(observation *CellularObservation) error {
 	if observation.Signal.DBM != nil && (*observation.Signal.DBM < -200 || *observation.Signal.DBM > 0) {
 		return errors.New("cellular signal dBm is outside the supported range")
 	}
-	if observation.Signal.Availability == "available" && (observation.Signal.Level == nil && observation.Signal.DBM == nil || observation.Signal.MeasuredAt.IsZero()) {
+	if observation.Signal.Availability == "available" && (observation.Signal.Level == nil && observation.Signal.DBM == nil || missingMeasurement(observation.Signal.MeasuredAt)) {
 		return errors.New("available cellular signal requires level or dBm evidence and measured_at")
 	}
 	if observation.Signal.Availability != "available" {
-		observation.Signal.Level, observation.Signal.DBM, observation.Signal.MeasuredAt = nil, nil, time.Time{}
+		observation.Signal.Level, observation.Signal.DBM, observation.Signal.MeasuredAt = nil, nil, nil
 	}
 	return nil
 }
@@ -166,11 +169,11 @@ func normalizeCellularNetwork(field string, network *CellularNetworkDetails) err
 	if (network.MCC == "") != (network.MNC == "") {
 		return fmt.Errorf("cellular %s MCC and MNC must be reported together", field)
 	}
-	if network.Availability == "available" && (network.Operator == "" && network.MCC == "" || network.MeasuredAt.IsZero()) {
+	if network.Availability == "available" && (network.Operator == "" && network.MCC == "" || missingMeasurement(network.MeasuredAt)) {
 		return fmt.Errorf("available cellular %s requires operator evidence and measured_at", field)
 	}
 	if network.Availability != "available" {
-		network.Operator, network.MCC, network.MNC, network.MeasuredAt = "", "", "", time.Time{}
+		network.Operator, network.MCC, network.MNC, network.MeasuredAt = "", "", "", nil
 	}
 	return nil
 }
@@ -191,17 +194,34 @@ func oneOf(candidate string, values ...string) bool {
 	return false
 }
 
-func shouldReplaceCellular(previous, next *CellularObservation) bool {
+func missingMeasurement(value *time.Time) bool {
+	return value == nil || value.IsZero()
+}
+
+func applyCellularObservation(presence *clientPresence, next *CellularObservation) bool {
 	if next == nil {
 		return false
 	}
+	previous := presence.Cellular
 	if previous == nil {
+		presence.Cellular = next
 		return true
 	}
 	if next.Generation == previous.Generation {
-		return next.Sequence > previous.Sequence
+		if next.Sequence <= previous.Sequence {
+			return false
+		}
+		presence.Cellular = next
+		return true
 	}
-	return next.GenerationStartedAt.After(previous.GenerationStartedAt)
+	for _, retired := range presence.RetiredCellularGenerations {
+		if next.Generation == retired {
+			return false
+		}
+	}
+	presence.RetiredCellularGenerations = append(presence.RetiredCellularGenerations, previous.Generation)
+	presence.Cellular = next
+	return true
 }
 
 func cellularSnapshot(observation *CellularObservation, now time.Time, clientOffline bool) *CellularObservation {
@@ -210,7 +230,55 @@ func cellularSnapshot(observation *CellularObservation, now time.Time, clientOff
 	}
 	result := *observation
 	result.Stale = clientOffline || result.ReceivedAt.IsZero() || now.Sub(result.ReceivedAt) > cellularObservationFreshWindow
+	result.HomeNetwork = cellularNetworkSnapshot(result.HomeNetwork, observation, now, result.Stale)
+	result.ServingNetwork = cellularNetworkSnapshot(result.ServingNetwork, observation, now, result.Stale)
+	result.Service = cellularServiceSnapshot(result.Service, observation, now, result.Stale)
+	result.DataAccess = cellularDataAccessSnapshot(result.DataAccess, observation, now, result.Stale)
+	result.Signal = cellularSignalSnapshot(result.Signal, observation, now, result.Stale)
 	return &result
+}
+
+func cellularMeasurementExpired(observation *CellularObservation, measuredAt *time.Time, now time.Time, reportStale bool) bool {
+	if reportStale || missingMeasurement(measuredAt) || observation.MeasuredAt.IsZero() || observation.ReceivedAt.IsZero() {
+		return true
+	}
+	clientAge := observation.MeasuredAt.Sub(*measuredAt)
+	if clientAge < 0 {
+		clientAge = 0
+	}
+	serverAge := now.Sub(observation.ReceivedAt)
+	if serverAge < 0 {
+		serverAge = 0
+	}
+	return clientAge+serverAge > cellularMeasurementFreshWindow
+}
+
+func cellularNetworkSnapshot(value CellularNetworkDetails, observation *CellularObservation, now time.Time, reportStale bool) CellularNetworkDetails {
+	if value.Availability == "available" && cellularMeasurementExpired(observation, value.MeasuredAt, now, reportStale) {
+		value.Availability, value.Operator, value.MCC, value.MNC = "stale", "", "", ""
+	}
+	return value
+}
+
+func cellularServiceSnapshot(value CellularServiceDetails, observation *CellularObservation, now time.Time, reportStale bool) CellularServiceDetails {
+	if value.Availability == "available" && cellularMeasurementExpired(observation, value.MeasuredAt, now, reportStale) {
+		value.Availability, value.Registration, value.Roaming = "stale", "", nil
+	}
+	return value
+}
+
+func cellularDataAccessSnapshot(value CellularDataAccessDetails, observation *CellularObservation, now time.Time, reportStale bool) CellularDataAccessDetails {
+	if value.Availability == "available" && cellularMeasurementExpired(observation, value.MeasuredAt, now, reportStale) {
+		value.Availability, value.Technology = "stale", ""
+	}
+	return value
+}
+
+func cellularSignalSnapshot(value CellularSignalDetails, observation *CellularObservation, now time.Time, reportStale bool) CellularSignalDetails {
+	if value.Availability == "available" && cellularMeasurementExpired(observation, value.MeasuredAt, now, reportStale) {
+		value.Availability, value.Level, value.DBM = "stale", nil, nil
+	}
+	return value
 }
 
 func cellularStatus(observation *CellularObservation) string {

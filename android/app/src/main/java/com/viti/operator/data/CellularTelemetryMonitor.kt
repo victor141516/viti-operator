@@ -16,7 +16,6 @@ import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import java.time.Instant
 import java.util.UUID
-import java.util.concurrent.atomic.AtomicLong
 
 /**
  * One process-owned listener for the subscription used by [SimAuthEngine].
@@ -30,7 +29,8 @@ class CellularTelemetryMonitor private constructor(context: Context) {
     private val lock = Any()
     private val generation = UUID.randomUUID().toString()
     private val generationStartedAt = Instant.now()
-    private val sequence = AtomicLong()
+    private val snapshotGuard = CellularSnapshotGuard()
+    private var sequence = 0L
 
     private var subscriptionId = SubscriptionManager.INVALID_SUBSCRIPTION_ID
     private var bindRevision = 0L
@@ -44,20 +44,20 @@ class CellularTelemetryMonitor private constructor(context: Context) {
     private var latestDataAccess: TimedDataAccess? = null
     private var latestSignal: TimedSignal? = null
 
-    fun snapshot(): CellularObservation? {
-        val telephony = baseTelephony ?: return null
+    fun snapshot(): CellularObservation? = snapshotGuard.serialized {
+        val telephony = baseTelephony ?: return@serialized null
         val selectedSubscription = simAuthSubscriptionId()
         val phonePermission = hasPhoneStatePermission()
         ensureBinding(selectedSubscription, phonePermission)
-        val now = Instant.now()
+        val networkMeasuredAt = Instant.now()
         val selectedTelephony = if (selectedSubscription == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
             null
         } else {
             runCatching { telephony.createForSubscriptionId(selectedSubscription) }.getOrNull()
         }
-        val home = selectedTelephony?.networkDetails(home = true, now = now)
+        val home = selectedTelephony?.networkDetails(home = true, now = networkMeasuredAt)
             ?: CellularNetworkDetails(availability = if (selectedSubscriptionValid(selectedSubscription)) "unknown" else "unsupported")
-        val serving = selectedTelephony?.networkDetails(home = false, now = now)
+        val serving = selectedTelephony?.networkDetails(home = false, now = networkMeasuredAt)
             ?: CellularNetworkDetails(availability = if (selectedSubscriptionValid(selectedSubscription)) "unknown" else "unsupported")
         val callbackSnapshot = synchronized(lock) {
             Triple(latestService, latestDataAccess, latestSignal)
@@ -86,11 +86,12 @@ class CellularTelemetryMonitor private constructor(context: Context) {
                 measuredAt = it.at.toString(),
             )
         } ?: CellularSignalDetails(availability = protectedAvailability(selectedSubscription, phonePermission))
-        return CellularObservation(
+        val measuredAt = Instant.now()
+        CellularObservation(
             generation = generation,
             generationStartedAt = generationStartedAt.toString(),
-            sequence = sequence.incrementAndGet(),
-            measuredAt = now.toString(),
+            sequence = ++sequence,
+            measuredAt = measuredAt.toString(),
             subscriptionRole = if (selectedSubscriptionValid(selectedSubscription)) "default_data" else "none",
             homeNetwork = home,
             servingNetwork = serving,
@@ -247,6 +248,12 @@ class CellularTelemetryMonitor private constructor(context: Context) {
 
         fun currentSnapshot(): CellularObservation? = instance?.snapshot()
     }
+}
+
+internal class CellularSnapshotGuard {
+    private val lock = Any()
+
+    fun <T> serialized(block: () -> T): T = synchronized(lock, block)
 }
 
 internal fun simAuthSubscriptionId(): Int = SubscriptionManager.getDefaultDataSubscriptionId()

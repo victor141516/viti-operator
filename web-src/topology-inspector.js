@@ -2,6 +2,7 @@ const availabilityLabels = {
   unknown: 'Not reported',
   permission_denied: 'Phone permission not granted',
   unsupported: 'Not supported on this device',
+  stale: 'Measurement expired',
 }
 
 export function availabilityLabel(value) {
@@ -30,8 +31,15 @@ export function signalLabel(signal = {}) {
   return parts.join(' · ')
 }
 
+function unavailableRows(details = {}) {
+  return compactRows([
+    ['Status', availabilityLabel(details.availability)],
+    ['Last measured', details.measured_at],
+  ])
+}
+
 function networkRows(network = {}) {
-  if (network.availability !== 'available') return [['Status', availabilityLabel(network.availability)]]
+  if (network.availability !== 'available') return unavailableRows(network)
   return [
     ['Operator', network.operator],
     ['Network code', networkCode(network)],
@@ -65,19 +73,21 @@ export function buildCellularSections(cellular, cellularStatus = 'unknown') {
         ['Roaming', typeof cellular.service.roaming === 'boolean' ? (cellular.service.roaming ? 'Yes' : 'No') : ''],
         ['Service measured', cellular.service.measured_at],
       ])
-    : [['Status', availabilityLabel(cellular.service?.availability)]]
+    : unavailableRows(cellular.service)
   const access = cellular.data_access || {}
   const signal = cellular.signal || {}
-  const radioRows = [
-    ['Data technology', access.availability === 'available' ? access.technology : availabilityLabel(access.availability)],
-    ['Signal', signal.availability === 'available' ? signalLabel(signal) : availabilityLabel(signal.availability)],
-  ].filter(([, value]) => value)
+  const radioRows = compactRows([
+    [access.availability === 'available' ? 'Data technology' : 'Data technology status', access.availability === 'available' ? access.technology : availabilityLabel(access.availability)],
+    ['Technology measured', access.measured_at],
+    [signal.availability === 'available' ? 'Signal' : 'Signal status', signal.availability === 'available' ? signalLabel(signal) : availabilityLabel(signal.availability)],
+    ['Signal measured', signal.measured_at],
+  ])
   return [
     {
       title: 'Telemetry report',
       tone: cellular.stale || cellularStatus === 'stale' ? 'warning' : 'neutral',
       rows: compactRows([
-        ['Freshness', cellular.stale || cellularStatus === 'stale' ? 'Stale — device is offline or the report has expired' : 'Current'],
+        ['Report freshness', cellular.stale || cellularStatus === 'stale' ? 'Stale — device is offline or the report has expired' : 'Current'],
         ['Subscription', cellular.subscription_role === 'default_data' ? 'Default-data subscription used for AKA' : 'No active data subscription'],
         ['Report measured', cellular.measured_at],
         ['Server received', cellular.received_at],
@@ -88,11 +98,7 @@ export function buildCellularSections(cellular, cellularStatus = 'unknown') {
     { title: 'Cellular service', rows: serviceRows },
     {
       title: 'Radio',
-      rows: [
-        ...radioRows,
-        ['Technology measured', access.measured_at],
-        ['Signal measured', signal.measured_at],
-      ].filter(([, value]) => value),
+      rows: radioRows,
     },
   ].filter(section => section.rows.length)
 }

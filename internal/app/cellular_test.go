@@ -63,14 +63,15 @@ func TestCellularHeartbeatIsOrderedAndOmissionDoesNotEraseIt(t *testing.T) {
 
 func TestCellularGenerationRejectsLateSupersededProcess(t *testing.T) {
 	oldStart := time.Now().UTC().Add(-2 * time.Minute)
-	newStart := oldStart.Add(time.Minute)
+	newStart := oldStart.Add(-time.Hour) // The phone clock moved backwards during restart.
 	old := &CellularObservation{Generation: "old", GenerationStartedAt: oldStart, Sequence: 99}
 	newer := &CellularObservation{Generation: "new", GenerationStartedAt: newStart, Sequence: 1}
 	lateOld := &CellularObservation{Generation: "old", GenerationStartedAt: oldStart, Sequence: 100}
-	if !shouldReplaceCellular(old, newer) {
-		t.Fatal("a newer process generation should replace the old one")
+	presence := clientPresence{Cellular: old}
+	if !applyCellularObservation(&presence, newer) || presence.Cellular != newer {
+		t.Fatal("a newly received process generation should replace the old one regardless of client wall clock")
 	}
-	if shouldReplaceCellular(newer, lateOld) {
+	if applyCellularObservation(&presence, lateOld) || presence.Cellular != newer {
 		t.Fatal("a delayed request from a superseded process must not restore old data")
 	}
 }
@@ -84,6 +85,39 @@ func TestCellularObservationBecomesStaleWithoutMutatingStoredSample(t *testing.T
 	}
 	if original.Stale {
 		t.Fatal("staleness must be derived per response, not persisted in the observation")
+	}
+}
+
+func TestCellularFieldExpiresWhileReportRemainsCurrent(t *testing.T) {
+	now := time.Now().UTC()
+	oldMeasurement := now.Add(-cellularMeasurementFreshWindow - time.Second)
+	original := &CellularObservation{
+		MeasuredAt: now, ReceivedAt: now,
+		Signal: CellularSignalDetails{Availability: "available", Level: intPointer(3), DBM: intPointer(-91), MeasuredAt: &oldMeasurement},
+	}
+	snapshot := cellularSnapshot(original, now, false)
+	if snapshot.Stale {
+		t.Fatal("a current report must not be marked stale because one cached measurement expired")
+	}
+	if snapshot.Signal.Availability != "stale" || snapshot.Signal.Level != nil || snapshot.Signal.DBM != nil || snapshot.Signal.MeasuredAt == nil {
+		t.Fatalf("expired signal evidence = %#v", snapshot.Signal)
+	}
+}
+
+func TestUnavailableCellularFieldsOmitZeroMeasurementTimes(t *testing.T) {
+	now := time.Now().UTC()
+	encoded, err := json.Marshal(CellularObservation{
+		Generation: "process-one", GenerationStartedAt: now, Sequence: 1, MeasuredAt: now, ReceivedAt: now,
+		SubscriptionRole: "none",
+		HomeNetwork:      CellularNetworkDetails{Availability: "unknown"}, ServingNetwork: CellularNetworkDetails{Availability: "unknown"},
+		Service: CellularServiceDetails{Availability: "unknown"}, DataAccess: CellularDataAccessDetails{Availability: "unknown"},
+		Signal: CellularSignalDetails{Availability: "unknown"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "0001-") || strings.Contains(string(encoded), `"measured_at":"0001`) {
+		t.Fatalf("missing nested evidence timestamps must remain absent: %s", encoded)
 	}
 }
 
@@ -111,18 +145,18 @@ func TestRemoteSIMExposesOnlyItsSelectedPhoneObservation(t *testing.T) {
 	now := time.Now().UTC()
 	observation := &CellularObservation{
 		Generation: "process-one", GenerationStartedAt: now.Add(-time.Minute), Sequence: 1,
-		ReceivedAt: now, SubscriptionRole: "default_data",
-		HomeNetwork:    CellularNetworkDetails{Availability: "available", Operator: "O2", MCC: "214", MNC: "07"},
-		ServingNetwork: CellularNetworkDetails{Availability: "available", Operator: "Movistar", MCC: "214", MNC: "07"},
-		Service:        CellularServiceDetails{Availability: "available", Registration: "in_service"},
-		DataAccess:     CellularDataAccessDetails{Availability: "available", Technology: "LTE"},
+		MeasuredAt: now, ReceivedAt: now, SubscriptionRole: "default_data",
+		HomeNetwork:    CellularNetworkDetails{Availability: "available", Operator: "O2", MCC: "214", MNC: "07", MeasuredAt: &now},
+		ServingNetwork: CellularNetworkDetails{Availability: "available", Operator: "Movistar", MCC: "214", MNC: "07", MeasuredAt: &now},
+		Service:        CellularServiceDetails{Availability: "available", Registration: "in_service", MeasuredAt: &now},
+		DataAccess:     CellularDataAccessDetails{Availability: "available", Technology: "LTE", MeasuredAt: &now},
 		Signal:         CellularSignalDetails{Availability: "unknown"},
 	}
 	a := newSIMSelectionTestApp(t, nil, "disabled")
 	a.clients["android-one"] = clientPresence{ID: "android-one", Kind: "android", Name: "Phone", AuthAgentID: "agent-one", HasSIM: true, LastSeen: now, AuthLastSeen: now, Cellular: observation}
 	a.simAuthAssignment = SIMAuthAssignment{ClientID: "android-one", AgentID: "agent-one", UpdatedAt: now}
-	clients := a.topologyClients(now)
-	sim := a.topologySIM(RuntimeStatus{}, clients, now)
+	selection, clients := a.topologyClientSnapshot(now)
+	sim := a.topologySIM(RuntimeStatus{}, clients, selection)
 	if !sim.Selected || sim.Mode != "remote" || sim.CellularStatus != "observed" || sim.Cellular == nil || sim.Cellular.HomeNetwork.Operator != "O2" {
 		t.Fatalf("remote SIM topology = %#v", sim)
 	}
@@ -131,9 +165,39 @@ func TestRemoteSIMExposesOnlyItsSelectedPhoneObservation(t *testing.T) {
 func TestOpenStickAuthenticationDoesNotClaimCellularRadioState(t *testing.T) {
 	now := time.Now().UTC()
 	a := newSIMSelectionTestApp(t, &readinessFixture{ready: true}, "openstick")
-	sim := a.topologySIM(RuntimeStatus{SIMReady: true, UpdatedAt: now}, nil, now)
+	sim := a.topologySIM(RuntimeStatus{SIMReady: true, UpdatedAt: now}, nil, SIMAuthSelection{Mode: "openstick"})
 	if !sim.Selected || sim.CellularStatus != "not_observed" || sim.Cellular != nil {
 		t.Fatalf("OpenStick radio state must remain explicitly unobserved: %#v", sim)
+	}
+}
+
+func TestCellularHeartbeatRejectsSIMRoleMismatchWithoutUpdatingPresence(t *testing.T) {
+	a := newSIMSelectionTestApp(t, nil, "disabled")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	body := `{"id":"android-one","kind":"android","name":"Phone","has_sim":false,"cellular":{
+		"generation":"process-one","generation_started_at":"` + now + `","sequence":1,"measured_at":"` + now + `",
+		"subscription_role":"default_data","home_network":{"availability":"unknown"},
+		"serving_network":{"availability":"unknown"},"service":{"availability":"unknown"},
+		"data_access":{"availability":"unknown"},"signal":{"availability":"unknown"}}}`
+	recorder := httptest.NewRecorder()
+	a.clientHeartbeat(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/clients/heartbeat", strings.NewReader(body)))
+	if recorder.Code != http.StatusBadRequest || len(a.clients) != 0 {
+		t.Fatalf("mismatched SIM role status=%d clients=%#v", recorder.Code, a.clients)
+	}
+}
+
+func TestClientKindReuseClearsIncompatibleCellularTelemetry(t *testing.T) {
+	a := newSIMSelectionTestApp(t, nil, "disabled")
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	postCellularHeartbeat(t, a, `{"id":"shared-id","kind":"android","name":"Phone","has_sim":true,"cellular":{
+		"generation":"process-one","generation_started_at":"`+now+`","sequence":1,"measured_at":"`+now+`",
+		"subscription_role":"default_data","home_network":{"availability":"unknown"},
+		"serving_network":{"availability":"unknown"},"service":{"availability":"unknown"},
+		"data_access":{"availability":"unknown"},"signal":{"availability":"unknown"}}}`)
+	postCellularHeartbeat(t, a, `{"id":"shared-id","kind":"web","name":"Browser","has_sim":false}`)
+	clients := a.topologyClients(time.Now().UTC())
+	if len(clients) != 1 || clients[0].Kind != "web" || clients[0].Cellular != nil {
+		t.Fatalf("reused client identity retained incompatible telemetry: %#v", clients)
 	}
 }
 
@@ -181,3 +245,5 @@ func postCellularHeartbeat(t *testing.T, a *App, body string) {
 		t.Fatalf("heartbeat status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 }
+
+func intPointer(value int) *int { return &value }
