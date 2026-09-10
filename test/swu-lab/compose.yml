@@ -117,6 +117,94 @@ services:
     volumes:
       - python-runtime:/run/vowifi:ro
 
+  strongswan-backend:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    depends_on: [epdg, aka-broker]
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      SWU_BACKEND: strongswan
+      SWU_SOURCE: 172.30.39.20
+      SWU_EPDG: 172.30.39.10
+      SWU_APN: ims
+      USIM_IMSI: "001010123456789"
+      SWU_MCC: "001"
+      SWU_MNC: "001"
+      SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
+      SWU_HTTP_AKA_TOKEN: lab-token
+      SWU_HTTP_AKA_TIMEOUT: "1"
+      SWU_TUN_MTU: "1400"
+      SWU_LIVENESS_PERIOD: "${LAB_SWU_LIVENESS_PERIOD:-20}"
+      SWU_CHILD_REKEY_MINUTES: "${LAB_SWU_CHILD_REKEY_MINUTES:-30}"
+      SWU_IKE_REKEY_MINUTES: "${LAB_SWU_IKE_REKEY_MINUTES:-45}"
+      SWU_REDACT_SECRETS: "1"
+      VOWIFI_RUNDIR: /run/vowifi
+      VITI_EVENT_OUTBOX_DIR: /run/vowifi/event-outbox
+    volumes:
+      - strongswan-runtime:/run/vowifi
+    networks:
+      outer:
+        ipv4_address: 172.30.39.20
+
+  strongswan-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    depends_on: [strongswan-backend]
+    network_mode: service:strongswan-backend
+    environment:
+      LAB_EXPECTED_BACKEND: strongswan
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - strongswan-runtime:/run/vowifi:ro
+
+  strongswan-lifecycle-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: strongswan
+      LAB_PROBE_MODE: lifecycle
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - strongswan-runtime:/run/vowifi:ro
+
+  strongswan-failure-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: strongswan
+      LAB_PROBE_MODE: failed_attach
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - strongswan-runtime:/run/vowifi:ro
+
+  strongswan-terminated-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: strongswan
+      LAB_PROBE_MODE: terminated
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - strongswan-runtime:/run/vowifi:ro
+
 networks:
   outer:
     driver: bridge
@@ -126,3 +214,4 @@ networks:
 
 volumes:
   python-runtime:
+  strongswan-runtime:
