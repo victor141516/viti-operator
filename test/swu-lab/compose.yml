@@ -62,6 +62,7 @@ services:
     network_mode: service:python-backend
     environment:
       LAB_EXPECTED_BACKEND: python
+      PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
     volumes:
       - python-runtime:/run/vowifi:ro
