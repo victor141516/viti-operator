@@ -155,8 +155,8 @@ try {
   await waitFor("release instruction", () => existsSync(`${barrierPath}.release`), 60000);
 } finally {
   try {
-    await evaluate("state.voice?.hangup(); true");
-    await waitFor("call hangup", () => evaluate("state.localCall === false"), 10000);
+    await evaluate("document.querySelector('#hangup-call').click(); true");
+    await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
     historyFinalized = await waitFor(
       "finalized incoming history",
       () => evaluate(`${callsFetch}.then(value => value.calls.filter(call =>

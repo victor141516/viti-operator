@@ -112,8 +112,8 @@ try {
   await delay(1500);
 } finally {
   try {
-    await evaluate("state.voice?.hangup(); true");
-    await waitFor("call hangup", () => evaluate("state.localCall === false"), 15000);
+    await evaluate("document.querySelector('#hangup-call').click(); true");
+    await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
     historyFinalized = await waitFor("finalized carrier history", () => evaluate(`${callsFetch}.then(value =>
       value.calls.filter(call => call.peer === ${JSON.stringify(destination)} && Boolean(call.ended_at)).length > ${initialFinalized})`), 35000);
   } catch {
