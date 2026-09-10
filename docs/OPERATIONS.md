@@ -404,6 +404,14 @@ directory alone does not enable capture. While the switch is on, the stack recor
 - Asterisk and SWu logs;
 - manager and engine PCAP files.
 
+Even when high-volume diagnostics are disabled, the engine retains low-volume
+SWu lifecycle and renewal lines in
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log`. The file is capped by
+keeping the most recent 512 KiB whenever it exceeds 1 MiB. It contains the
+reason for supervised tunnel recovery without retaining packet-by-packet IKE
+dumps. Full `charon.log` and PCAP capture still require the explicit diagnostic
+switch.
+
 Export one correlated report:
 
 Use the correlated trace ID to inspect files in the configured diagnostics directory.
@@ -455,6 +463,14 @@ do not add them to source-controlled configuration.
 4. If IMS failed, inspect Asterisk registration and SIP AKA logs.
 5. Do not repeatedly reflash the modem: the stock-Android SIM bridge is only
    the local authentication transport and is not the carrier IMS stack.
+
+For an approximately hourly IMS interruption, inspect
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for `IKE_SA rekey` and
+`swu_ike exited`. Healthy lifetime maintenance reports `IKE_SA rekey complete`
+without an Asterisk restart. The default proactive periods are 30 minutes for
+the ESP CHILD SA and 45 minutes for the parent IKE SA; `0` disables either timer
+through `SWU_CHILD_REKEY_MINUTES` or `SWU_IKE_REKEY_MINUTES` in the rendered
+engine environment.
 
 ### Modem was unplugged
 

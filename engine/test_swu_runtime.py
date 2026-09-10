@@ -94,6 +94,53 @@ class InnerAddressRefreshTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "durably claim"):
                 self.module.main()
 
+    def ike_timer_subject(self):
+        subject = self.module.swu.__new__(self.module.swu)
+        subject.ike_rekey_period = 45 * 60
+        subject._ike_sa_time = 1_000.0
+        subject._ike_rekey_outstanding = False
+        subject._ike_rekey_sent_at = None
+        subject._ike_rekey_retry_at = None
+        subject._ike_rekey_failed = False
+        subject._rekey_outstanding = False
+        subject.rekey_response_timeout = 10
+        return subject
+
+    def test_proactive_ike_rekey_starts_before_carrier_expiry(self):
+        subject = self.ike_timer_subject()
+        subject.state_ue_create_sa = mock.Mock()
+
+        with mock.patch.object(self.module.time, "monotonic", return_value=3_701.0):
+            subject._ike_rekey_tick()
+
+        subject.state_ue_create_sa.assert_called_once_with()
+        self.assertIsNone(subject._ike_rekey_retry_at)
+
+    def test_ike_rekey_timeout_keeps_current_sa_and_schedules_retry(self):
+        subject = self.ike_timer_subject()
+        subject._ike_rekey_outstanding = True
+        subject._ike_rekey_sent_at = 3_000.0
+        subject.state_ue_create_sa = mock.Mock()
+
+        with mock.patch.object(self.module.time, "monotonic", return_value=3_011.0):
+            subject._ike_rekey_tick()
+
+        subject.state_ue_create_sa.assert_not_called()
+        self.assertFalse(subject._ike_rekey_outstanding)
+        self.assertEqual(subject._ike_rekey_retry_at, 3_071.0)
+        self.assertEqual(subject._ike_sa_time, 1_000.0)
+
+    def test_ike_rekey_waits_for_child_rekey_exchange(self):
+        subject = self.ike_timer_subject()
+        subject._rekey_outstanding = True
+        subject.state_ue_create_sa = mock.Mock()
+
+        with mock.patch.object(self.module.time, "monotonic", return_value=3_701.0):
+            subject._ike_rekey_tick()
+
+        subject.state_ue_create_sa.assert_not_called()
+        self.assertEqual(subject._ike_rekey_retry_at, 3_706.0)
+
 
 if __name__ == "__main__":
     unittest.main()

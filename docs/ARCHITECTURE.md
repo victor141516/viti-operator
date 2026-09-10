@@ -420,6 +420,16 @@ security associations and a carrier-assigned inner connection through the TUN
 interface. NAT-T keepalives, liveness probes, fragmentation, reauthentication,
 and tunnel supervision are handled by the SWu client.
 
+The engine refreshes two independent security-association lifetimes. It renews
+the ESP CHILD SA every 30 minutes and proactively renews the parent IKE SA every
+45 minutes. The latter is deliberately earlier than O2's observed
+responder-initiated renewal at roughly 55 minutes: initiating the exchange from
+the engine preserves the existing IKE roles, inner address, CHILD SA, SIP
+dialogs, and active media. A lost or rejected proactive IKE renewal retains the
+current association and retries after 60 seconds instead of tearing down a
+working tunnel. A carrier-forced tunnel deletion remains a real data-plane
+boundary and cannot preserve an existing carrier call.
+
 Every SWu process creates a random generation and monotonically increasing event
 sequence. `tunnel_start`, `tunnel_up`, and `tunnel_down` attempt a synchronous
 commit to the bind-mounted event outbox before network delivery. Failure to
@@ -734,7 +744,8 @@ a webhook retry cannot create a second conversation row.
   outside the current guarantee.
 - A confirmed current-generation tunnel down or a newer engine-process start
   interrupts calls that existed on that data plane. A SIM-health failure alone
-  does not.
+  does not. Normal IKE lifetime maintenance is make-before-break and therefore
+  does not create a tunnel-down boundary.
 - Engine call lookup, lifecycle mutation, comparison with the persisted down
   boundary, and state-file replacement are one atomic store operation. A flush
   failure rolls memory back before HTTP returns an error.
