@@ -19,6 +19,8 @@ import androidx.core.content.ContextCompat
 import androidx.webkit.WebViewAssetLoader
 import com.viti.operator.data.ClientIdentity
 import com.viti.operator.data.VoiceProvisioning
+import com.viti.operator.data.VoiceCallQuality
+import com.viti.operator.data.VoiceMediaRoute
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -35,7 +37,59 @@ data class VoiceEngineEvent(
     val traceId: String = "",
     val participantId: String = "",
     val legToken: String = "",
+    val quality: VoiceCallQuality? = null,
 )
+
+internal object VoiceQualityJson {
+    fun parse(body: JSONObject?): VoiceCallQuality? = body?.let {
+        val route = it.optJSONObject("route")
+        parseValues(
+            values = mapOf(
+                "sequence" to it.optLong("sequence", 0), "status" to it.optString("status"),
+                "sampledAtMs" to it.optLong("sampledAtMs", 0), "inboundLossPercent" to it.optNullableDouble("inboundLossPercent"),
+                "outboundLossPercent" to it.optNullableDouble("outboundLossPercent"), "inboundJitterMs" to it.optNullableDouble("inboundJitterMs"),
+                "roundTripTimeMs" to it.optNullableDouble("roundTripTimeMs"), "roundTripScope" to it.optString("roundTripScope"),
+                "windowMs" to it.optNullableDouble("windowMs"),
+            ),
+            routeValues = route?.let { value -> mapOf(
+                "mode" to value.optString("mode"), "protocol" to value.optString("protocol", "unknown"),
+                "localCandidateType" to value.optString("localCandidateType", "unknown"),
+                "remoteCandidateType" to value.optString("remoteCandidateType", "unknown"),
+            ) },
+        )
+    }
+
+    private fun JSONObject.optNullableDouble(name: String): Double? =
+        if (has(name) && !isNull(name)) optDouble(name).takeIf(Double::isFinite) else null
+
+    fun parseValues(values: Map<String, Any?>, routeValues: Map<String, Any?>? = null): VoiceCallQuality? {
+        val sequence = (values["sequence"] as? Number)?.toLong() ?: 0
+        val status = values["status"] as? String ?: ""
+        if (sequence <= 0 || status !in setOf("connecting", "collecting", "available", "reconnecting", "unavailable", "unsupported")) return null
+        val route = routeValues?.let {
+            val mode = it["mode"] as? String ?: ""
+            if (mode !in setOf("direct", "turn-relay")) null else VoiceMediaRoute(
+                mode = mode,
+                protocol = it["protocol"] as? String ?: "unknown",
+                localCandidateType = it["localCandidateType"] as? String ?: "unknown",
+                remoteCandidateType = it["remoteCandidateType"] as? String ?: "unknown",
+            )
+        }
+        fun number(name: String) = (values[name] as? Number)?.toDouble()?.takeIf(Double::isFinite)
+        return VoiceCallQuality(
+            sequence = sequence,
+            status = status,
+            sampledAtMs = (values["sampledAtMs"] as? Number)?.toLong() ?: 0,
+            inboundLossPercent = number("inboundLossPercent"),
+            outboundLossPercent = number("outboundLossPercent"),
+            inboundJitterMs = number("inboundJitterMs"),
+            roundTripTimeMs = number("roundTripTimeMs"),
+            roundTripScope = values["roundTripScope"] as? String ?: "",
+            windowMs = number("windowMs"),
+            route = route,
+        )
+    }
+}
 
 class VoiceCommandException(message: String) : IllegalStateException(message)
 
@@ -58,6 +112,9 @@ class VoiceWebViewClient(
     private var pendingProvisioning: VoiceProvisioning? = null
     private var activeProvisioning: VoiceProvisioning? = null
     private var currentTraceId = ""
+    private val qualityLock = Any()
+    private var pendingQualityEvent: VoiceEngineEvent? = null
+    private var qualityDispatchPosted = false
 
     @Suppress("SetJavaScriptEnabled")
     val view: WebView = WebView(applicationContext).apply {
@@ -248,8 +305,27 @@ class VoiceWebViewClient(
                 traceId = body.optString("trace_id"),
                 participantId = body.optString("participant_id"),
                 legToken = body.optString("leg_token"),
+                quality = VoiceQualityJson.parse(body.optJSONObject("quality")),
             )
-            mainHandler.post { onEvent(event) }
+            if (type == "quality") dispatchLatestQuality(event) else mainHandler.post { onEvent(event) }
+        }
+    }
+
+    private fun dispatchLatestQuality(event: VoiceEngineEvent) {
+        val shouldPost = synchronized(qualityLock) {
+            pendingQualityEvent = event
+            if (qualityDispatchPosted) false else {
+                qualityDispatchPosted = true
+                true
+            }
+        }
+        if (!shouldPost) return
+        mainHandler.post {
+            val latest = synchronized(qualityLock) {
+                qualityDispatchPosted = false
+                pendingQualityEvent.also { pendingQualityEvent = null }
+            }
+            latest?.let(onEvent)
         }
     }
 

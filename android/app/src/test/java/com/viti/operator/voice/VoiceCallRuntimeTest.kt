@@ -1,6 +1,7 @@
 package com.viti.operator.voice
 
 import com.viti.operator.data.VoiceProvisioning
+import com.viti.operator.data.VoiceCallQuality
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -11,6 +12,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -725,6 +727,30 @@ class VoiceCallRuntimeTest {
         assertTrue(result.isFailure)
         assertTrue(engine.commands.contains("hangup:$token"))
         assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun qualityIsLegScopedOrderedAndClearedWithTheCall() = runTest(UnconfinedTestDispatcher()) {
+        val runtime = runtime(FakeVoiceEngine(), null, FakeLegacyAudio())
+        val token = "quality-leg"
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000090", legToken = token))
+
+        runtime.onVoiceEvent(VoiceEngineEvent("quality", legToken = token, quality = VoiceCallQuality(
+            sequence = 2, status = "available", sampledAtMs = 2, inboundLossPercent = 1.0,
+        )))
+        runtime.onVoiceEvent(VoiceEngineEvent("quality", legToken = token, quality = VoiceCallQuality(
+            sequence = 1, status = "available", sampledAtMs = 1, inboundLossPercent = 99.0,
+        )))
+        runtime.onVoiceEvent(VoiceEngineEvent("quality", legToken = "replacement", quality = VoiceCallQuality(
+            sequence = 3, status = "available", sampledAtMs = 3, inboundLossPercent = 88.0,
+        )))
+
+        assertEquals(2L, runtime.snapshot.value.voice.quality?.sequence)
+        assertEquals(1.0, runtime.snapshot.value.voice.quality?.inboundLossPercent ?: -1.0, 0.0)
+        runtime.onVoiceEvent(VoiceEngineEvent("ended", legToken = token))
+        runCurrent()
+        assertNull(runtime.snapshot.value.voice.quality)
         runtime.close()
     }
 

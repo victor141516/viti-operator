@@ -66,6 +66,16 @@
               <button type="button" class="hangup-button" id="hangup-call">Hang up</button>
             </div>
             <p class="form-status" id="call-status" role="status"></p>
+            <details class="call-quality" id="call-quality" hidden>
+              <summary><span id="call-quality-summary">Live media quality</span><small id="call-quality-route"></small></summary>
+              <div class="call-quality-grid">
+                <div><span>Incoming loss</span><strong id="quality-in-loss">Unavailable</strong><small>RTP received by this device</small></div>
+                <div><span>Outgoing loss</span><strong id="quality-out-loss">Unavailable</strong><small>Reported by the media peer</small></div>
+                <div><span>Incoming jitter</span><strong id="quality-jitter">Unavailable</strong><small>RTP received by this device</small></div>
+                <div><span id="quality-rtt-label">Round-trip time</span><strong id="quality-rtt">Unavailable</strong><small id="quality-rtt-scope">WebRTC media path</small></div>
+              </div>
+              <p id="call-quality-sample"></p>
+            </details>
             <audio id="remote-audio" autoplay playsinline></audio>
           </form>
           <div><h2>Recent</h2><div class="call-list" id="call-list"></div></div>

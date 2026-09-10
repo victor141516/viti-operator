@@ -223,12 +223,33 @@ data class VoiceUiState(
     val peer: String = "",
     val detail: String = "Telephony disconnected",
     val microphoneMuted: Boolean = false,
+    val quality: VoiceCallQuality? = null,
 ) {
     val registered: Boolean get() = state == "registered"
     val incoming: Boolean get() = state == "incoming"
     val ending: Boolean get() = state == "ending"
     val inCall: Boolean get() = state in setOf("calling", "ringing", "active", "media")
 }
+
+data class VoiceCallQuality(
+    val sequence: Long,
+    val status: String,
+    val sampledAtMs: Long,
+    val inboundLossPercent: Double? = null,
+    val outboundLossPercent: Double? = null,
+    val inboundJitterMs: Double? = null,
+    val roundTripTimeMs: Double? = null,
+    val roundTripScope: String = "",
+    val windowMs: Double? = null,
+    val route: VoiceMediaRoute? = null,
+)
+
+data class VoiceMediaRoute(
+    val mode: String,
+    val protocol: String,
+    val localCandidateType: String,
+    val remoteCandidateType: String,
+)
 
 data class AuthChallenge(
     val id: String,
