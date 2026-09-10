@@ -72,7 +72,11 @@ class IncomingCallActivity : ComponentActivity() {
         val token = permissionRequestToken
         permissionRequestToken = null
         if (granted && token != null) {
-            answerIfCurrent(token)
+            // The permission surface may temporarily stop this Activity and
+            // unbind it. Preserve the exact-token intent until onStart has
+            // reattached to the already-running call service.
+            autoAnswerToken = token
+            consumeAutoAnswer()
         } else if (!granted) {
             notice = "Microphone access is required to answer. You can still decline the call."
         }
@@ -211,8 +215,13 @@ class IncomingCallActivity : ComponentActivity() {
 
     private fun consumeAutoAnswer() {
         val token = autoAnswerToken ?: return
+        if (token != expectedToken) {
+            autoAnswerToken = null
+            return
+        }
+        if (service == null) return
         autoAnswerToken = null
-        if (token == expectedToken) answer()
+        answer()
     }
 
     private fun decline() {
