@@ -107,9 +107,11 @@ export function collectCallQuality(stats, previous = {}) {
   const outbound = [...reports.values()].filter((item) => item.type === 'outbound-rtp' && audio(item))
   const outboundIds = new Set(outbound.map((item) => item.id))
   const outboundRemoteIds = new Set(outbound.map((item) => item.remoteId).filter(Boolean))
-  const remoteInbound = [...reports.values()].filter((item) => item.type === 'remote-inbound-rtp' && audio(item) && (
-    outboundIds.has(item.localId) || outboundRemoteIds.has(item.id)
-  ))
+  const remoteInbound = [...reports.values()].filter((item) => {
+    const linked = outboundIds.has(item.localId) || outboundRemoteIds.has(item.id)
+    const mediaKind = item.kind || item.mediaType
+    return item.type === 'remote-inbound-rtp' && linked && item.active !== false && (!mediaKind || mediaKind === 'audio')
+  })
   const rtp = [...inbound, ...outbound]
   const routeEvidence = resolveRoute(reports, rtp)
   const route = routeEvidence?.route || null

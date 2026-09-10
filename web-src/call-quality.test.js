@@ -9,7 +9,7 @@ test('derives interval inbound loss, jitter, media RTT and a UDP TURN route', ()
   const first = report(
     { id: 'in-1', type: 'inbound-rtp', kind: 'audio', packetsReceived: 100, packetsLost: 2, jitter: 0.012, timestamp: 1_000, transportId: 'transport' },
     { id: 'out-1', type: 'outbound-rtp', kind: 'audio', packetsSent: 80, timestamp: 1_000, transportId: 'transport', remoteId: 'remote-in-1' },
-    { id: 'remote-in-1', type: 'remote-inbound-rtp', kind: 'audio', localId: 'out-1', packetsReceived: 78, packetsLost: 2, jitter: 0.02, roundTripTime: 0.043, timestamp: 1_000 },
+    { id: 'remote-in-1', type: 'remote-inbound-rtp', localId: 'out-1', packetsReceived: 78, packetsLost: 2, jitter: 0.02, roundTripTime: 0.043, timestamp: 1_000 },
     { id: 'transport', type: 'transport', selectedCandidatePairId: 'pair' },
     { id: 'pair', type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote', state: 'succeeded', currentRoundTripTime: 0.031 },
     { id: 'local', type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'udp' },
@@ -19,7 +19,7 @@ test('derives interval inbound loss, jitter, media RTT and a UDP TURN route', ()
   const second = report(
     { id: 'in-1', type: 'inbound-rtp', kind: 'audio', packetsReceived: 198, packetsLost: 4, jitter: 0.009, timestamp: 2_500, transportId: 'transport' },
     { id: 'out-1', type: 'outbound-rtp', kind: 'audio', packetsSent: 180, timestamp: 2_500, transportId: 'transport', remoteId: 'remote-in-1' },
-    { id: 'remote-in-1', type: 'remote-inbound-rtp', kind: 'audio', localId: 'out-1', packetsReceived: 176, packetsLost: 4, jitter: 0.015, roundTripTime: 0.043, timestamp: 2_500 },
+    { id: 'remote-in-1', type: 'remote-inbound-rtp', localId: 'out-1', packetsReceived: 176, packetsLost: 4, jitter: 0.015, roundTripTime: 0.043, timestamp: 2_500 },
     { id: 'transport', type: 'transport', selectedCandidatePairId: 'pair' },
     { id: 'pair', type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote', state: 'succeeded', currentRoundTripTime: 0.031 },
     { id: 'local', type: 'local-candidate', candidateType: 'relay', protocol: 'udp', relayProtocol: 'udp' },
