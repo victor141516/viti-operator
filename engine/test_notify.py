@@ -22,6 +22,24 @@ class NotifyTest(unittest.TestCase):
         ]
         self.assertEqual(background_call_hooks, [])
 
+    def test_public_outbound_dialplan_rejects_non_e164_before_side_effects(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        guard = template.index("Set(VITI_PUBLIC_DIGITS=${FILTER(0-9,${EXTEN})})")
+        persistence = template.index("notify.py call_out", guard)
+        carrier_dial = template.index("Dial(PJSIP/${EXTEN}@volte_ims", guard)
+
+        self.assertLess(guard, persistence)
+        self.assertLess(guard, carrier_dial)
+        self.assertIn('${EXTEN:0:1}" != "+"', template[guard:persistence])
+        self.assertIn('${EXTEN:1}" != "${VITI_PUBLIC_DIGITS}', template[guard:persistence])
+        self.assertIn("LEN(${VITI_PUBLIC_DIGITS})} < 8", template[guard:persistence])
+        self.assertIn("LEN(${VITI_PUBLIC_DIGITS})} > 15", template[guard:persistence])
+        self.assertIn("n(invalid_destination)", template[guard:])
+
     def test_ordered_tunnel_transition_uses_durable_outbox(self):
         environment = {
             "VITI_TUNNEL_GENERATION": "process-one",

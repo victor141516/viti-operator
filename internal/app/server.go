@@ -154,6 +154,7 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/messages", a.authorized(http.HandlerFunc(a.messages)))
 	a.mux.Handle("POST /api/v1/messages", a.authorized(http.HandlerFunc(a.sendMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
+	a.mux.Handle("POST /api/v1/calls/normalize", a.authorized(http.HandlerFunc(a.normalizeCallDestination)))
 	a.mux.Handle("GET /api/v1/contacts", a.authorized(http.HandlerFunc(a.contacts)))
 	a.mux.Handle("PUT /api/v1/contacts/sources/{client}", a.authorized(http.HandlerFunc(a.replaceContactSource)))
 	a.mux.Handle("POST /api/v1/calls", a.authorized(http.HandlerFunc(a.startCall)))
@@ -744,10 +745,16 @@ func (a *App) calls(w http.ResponseWriter, _ *http.Request) {
 func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 	traceID := strings.TrimSpace(r.Header.Get("X-Viti-Trace-ID"))
 	var request struct {
-		To string `json:"to"`
+		To      string `json:"to"`
+		Country string `json:"country,omitempty"`
 	}
-	if err := readJSON(r, &request, 4<<10); err != nil || !e164Pattern.MatchString(strings.TrimSpace(request.To)) {
-		writeError(w, http.StatusBadRequest, "use an E.164 destination")
+	if err := readJSON(r, &request, 4<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	destination, err := normalizeDialDestination(request.To, request.Country)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	statusCtx, statusCancel := context.WithTimeout(r.Context(), 4*time.Second)
@@ -772,7 +779,7 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 	if traceID == "" {
 		traceID = id
 	}
-	call := Call{ID: id, TraceID: traceID, Direction: DirectionOutgoing, Peer: strings.TrimSpace(request.To), State: "dialing", StartedAt: now, UpdatedAt: now}
+	call := Call{ID: id, TraceID: traceID, Direction: DirectionOutgoing, Peer: destination, State: "dialing", StartedAt: now, UpdatedAt: now}
 	a.diag.RecordTrace("manager.call", "api.start.accepted", traceID, call)
 	if err := a.store.SaveCall(call); err != nil {
 		writeError(w, http.StatusInternalServerError, "could not persist call")
@@ -792,6 +799,23 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 	}
 	a.diag.RecordTrace("manager.call", "gateway.start.completed", traceID, call)
 	writeJSON(w, http.StatusCreated, call)
+}
+
+func (a *App) normalizeCallDestination(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		Number  string `json:"number"`
+		Country string `json:"country,omitempty"`
+	}
+	if err := readJSON(r, &request, 4<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	number, err := normalizeDialDestination(request.Number, request.Country)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"number": number})
 }
 
 func (a *App) hangupCall(w http.ResponseWriter, r *http.Request) {
@@ -937,7 +961,7 @@ func securityHeaders(next http.Handler) http.Handler {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), geolocation=(), payment=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; media-src 'self' blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'self'")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' https://api.country.is ws: wss:; media-src 'self' blob:; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'self'")
 		next.ServeHTTP(w, r)
 	})
 }

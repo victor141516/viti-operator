@@ -11,8 +11,16 @@ the engine Dockerfile and source. These components retain their respective
 upstream licenses; the engine MIT notice does not relicense dependencies.
 
 The web voice bundle is built from JsSIP and its dependencies, whose versions
-are recorded in `web-src/package-lock.json`. The Gradle wrapper and Android
-dependencies retain their upstream licenses and notices.
+are recorded in `web-src/package-lock.json`. National-dialing timezone metadata
+uses `countries-and-timezones` 3.10.0 under the MIT license; its package
+integrity, version, and license are recorded in `web-src/package-lock.json`.
+The Gradle wrapper and Android dependencies retain their upstream licenses and
+notices.
+
+The default per-session country fallback calls the external `api.country.is`
+service directly from the client. It is a runtime service dependency rather than
+vendored software; operators must separately assess its privacy, availability,
+and terms or replace/self-host it for their deployment.
 
 No new blanket license is assigned to original application code in this
 snapshot. Review the complete licensing and attribution position before a

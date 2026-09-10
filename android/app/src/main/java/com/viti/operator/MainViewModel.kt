@@ -14,6 +14,7 @@ import com.viti.operator.data.asPhoneContacts
 import com.viti.operator.data.RuntimeStatus
 import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.ServerContactsSnapshot
+import com.viti.operator.data.SessionCountryDetector
 import com.viti.operator.data.SettingsStore
 import com.viti.operator.data.IMSRegistrationState
 import com.viti.operator.data.PhoneRoutingSettings
@@ -21,6 +22,7 @@ import com.viti.operator.data.RecordingSettings
 import com.viti.operator.data.VitiApi
 import com.viti.operator.data.VoiceUiState
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -31,6 +33,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 data class AppUiState(
     val status: RuntimeStatus = RuntimeStatus(),
@@ -55,7 +58,10 @@ internal fun shouldReloadContacts(
     serverVersion: Long,
 ): Boolean = cachedSettings != currentSettings || cachedVersion != serverVersion
 
-class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
+class MainViewModel(
+    private val settingsStore: SettingsStore,
+    private val countryDetector: SessionCountryDetector,
+) : ViewModel() {
     val settings: StateFlow<ServerSettings> = settingsStore.settings.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
@@ -82,6 +88,8 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
     private var contactsCacheSettings: ServerSettings? = null
     private var contactsCacheVersion: Long? = null
     private val incomingMessageTracker = IncomingMessageTracker()
+    private val sessionGeneration = UUID.randomUUID().toString()
+    private val sessionCountry = viewModelScope.async { countryDetector.detect(sessionGeneration) }
 
     init {
         viewModelScope.launch {
@@ -175,7 +183,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
 
     fun startCall(to: String) = viewModelScope.launch {
         _uiState.value = _uiState.value.copy(busy = true, notice = "Starting call…")
-        runCatching { VitiApi(settings.value).startCall(to.trim()) }
+        runCatching { VitiApi(settings.value).startCall(normalizeCallDestination(to)) }
             .onSuccess {
                 _uiState.value = _uiState.value.copy(busy = false, notice = "Call started")
                 refresh(silent = true)
@@ -183,6 +191,15 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
             .onFailure { error ->
                 _uiState.value = _uiState.value.copy(busy = false, notice = error.message ?: "Could not place the call")
             }
+    }
+
+    suspend fun normalizeCallDestination(to: String): String {
+        val number = to.trim()
+        val country = if (number.startsWith("+")) "" else sessionCountry.await()
+            .takeIf { it.sessionGeneration == sessionGeneration }
+            ?.country
+            .orEmpty()
+        return VitiApi(settings.value).normalizeCallDestination(number, country)
     }
 
     fun setVoiceState(value: VoiceUiState) {
@@ -293,9 +310,12 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         it.number.filter(Char::isDigit) == number.filter(Char::isDigit)
     }?.name.orEmpty()
 
-    class Factory(private val store: SettingsStore) : ViewModelProvider.Factory {
+    class Factory(
+        private val store: SettingsStore,
+        private val countryDetector: SessionCountryDetector,
+    ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(store) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(store, countryDetector) as T
     }
 
     private data class RefreshData(

@@ -10,6 +10,8 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.content.ContextCompat
 import com.viti.operator.data.SettingsStore
+import com.viti.operator.data.SessionCountryDetection
+import com.viti.operator.data.SessionCountryDetector
 import com.viti.operator.data.VitiApi
 import com.viti.operator.voice.VoiceCallService
 import com.viti.operator.voice.VoiceCallSnapshot
@@ -22,11 +24,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 internal data class CarCallState(
     val coreTelecomAvailable: Boolean = false,
@@ -62,9 +66,13 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
     private var bound = false
     private var started = false
     private var directoryJob: Job? = null
+    private var callPreparationJob: Job? = null
     private var snapshotJob: Job? = null
     private var startRequestAccepted = false
     private var startFailureDetail = ""
+    private val sessionGeneration = UUID.randomUUID().toString()
+    private val countryDetector = SessionCountryDetector(appContext)
+    private var sessionCountry: Deferred<SessionCountryDetection>? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
@@ -106,6 +114,7 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
         )
         _state.value = _state.value.copy(coreTelecomAvailable = capable)
         if (!capable) return
+        sessionCountry = scope.async { countryDetector.detect(sessionGeneration) }
 
         val serviceIntent = Intent(appContext, VoiceCallService::class.java)
         val startError = runCatching {
@@ -158,8 +167,33 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
             _state.value = current.copy(notice = notice)
             return
         }
-        val activeService = connected ?: return
-        activeService.runtime.placeCall(target.number, target.name)
+        if (callPreparationJob?.isActive == true) {
+            _state.value = current.copy(notice = "A destination is already being prepared. Try again shortly.")
+            return
+        }
+        callPreparationJob = scope.launch {
+            _state.value = _state.value.copy(notice = "Preparing destination…")
+            runCatching {
+                val settings = settingsStore.settings.first()
+                val detection = sessionCountry?.await()
+                    ?.takeIf { it.sessionGeneration == sessionGeneration }
+                    ?: SessionCountryDetection(sessionGeneration, reason = "detector-unavailable")
+                normalizeCarDialTarget(target, detection) { number, country ->
+                    VitiApi(settings).normalizeCallDestination(number, country)
+                }
+            }.onSuccess { normalized ->
+                val activeService = service
+                val block = carCallBlockReason(_state.value.copy(notice = ""), activeService != null, hasMicrophonePermission())
+                if (block.isNotBlank()) {
+                    _state.value = _state.value.copy(notice = block)
+                } else {
+                    _state.value = _state.value.copy(notice = "")
+                    activeService?.runtime?.placeCall(normalized.number, normalized.name)
+                }
+            }.onFailure { error ->
+                _state.value = _state.value.copy(notice = error.message ?: "Could not prepare the destination")
+            }
+        }
     }
 
     override fun clearNotice() {
@@ -168,6 +202,7 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
 
     override fun close() {
         directoryJob?.cancel()
+        callPreparationJob?.cancel()
         snapshotJob?.cancel()
         if (bound) runCatching { appContext.unbindService(connection) }
         bound = false

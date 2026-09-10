@@ -19,8 +19,10 @@ or `X-API-Key: <VITI_API_KEY>`. Engine events instead require
 {"error":"human-readable English message"}
 ```
 
-Phone destinations use E.164 form. Timestamps are UTC RFC 3339 values. Unknown
-JSON fields are rejected and request bodies have endpoint-specific size limits.
+Stored and carrier-routed phone destinations use E.164 form. The normalization
+endpoint is the only public-call API that accepts national or formatted input.
+Timestamps are UTC RFC 3339 values. Unknown JSON fields are rejected and request
+bodies have endpoint-specific size limits.
 
 ## Process and line state
 
@@ -241,6 +243,31 @@ shared event stream and normal history refresh.
 
 ## Calls
 
+### `POST /api/v1/calls/normalize`
+
+Normalizes one public call destination without starting or persisting a call:
+
+```json
+{"number":"020 7946 0018","country":"GB"}
+```
+
+The successful response is canonical E.164:
+
+```json
+{"number":"+442079460018"}
+```
+
+`country` is an uppercase or lowercase ISO 3166-1 alpha-2 region supplied from
+the current client session. It is required for national numbers and recognized
+international-dialing prefixes, but ignored when `number` begins with `+`.
+The server has no default country and never substitutes its own location.
+Invalid numbers, emergency numbers, short codes, service codes, extensions,
+pause/wait sequences, and `tel:` URIs return `400` rather than being guessed.
+
+The endpoint requires normal client authentication. It does not receive the
+IP address returned by the web country lookup, and calling it has no telephony
+side effect.
+
 ### `GET /api/v1/calls`
 
 Returns `{"calls":[...]}` in descending start order. Records include local ID,
@@ -288,7 +315,11 @@ rather than partial audio.
 
 This endpoint is available to non-interactive telephony adapters. The current
 Asterisk/WebRTC adapter requires clients to place interactive calls through SIP
-WebSocket, so normal web and Android callers do not use it.
+WebSocket, so normal web and Android callers do not use it. Its request accepts
+`{"to":"+442079460018"}` for existing adapters, or an optional transient
+`country` beside a non-canonical `to`. The manager applies the same normalizer
+before persistence or gateway dispatch. Missing/ambiguous country evidence is
+rejected; legacy canonical E.164 requests remain compatible.
 
 ### `POST /api/v1/calls/{id}/hangup`
 
