@@ -97,6 +97,7 @@ const incomingCallFilter = anyIncomingPeer
 try {
   await command("Runtime.enable");
   await waitFor("web application", () => evaluate("document.readyState === 'complete' && typeof state !== 'undefined'"));
+  await evaluate("sessionStorage.setItem('viti-e2e-test-tone', '1'); true");
   if (apiKey) {
     const previousTimeOrigin = await evaluate("performance.timeOrigin");
     await evaluate(`localStorage.setItem('viti-token', ${JSON.stringify(apiKey)}); location.reload(); true`);

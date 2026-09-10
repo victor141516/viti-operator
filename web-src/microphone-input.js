@@ -3,6 +3,7 @@ export function createMicrophoneInputController({
   getSession = () => null,
   isMuted = () => false,
   diagnose = () => {},
+  onTrackChanged = () => {},
 } = {}) {
   let deviceId = ''
   let selectedTrack = null
@@ -13,6 +14,7 @@ export function createMicrophoneInputController({
     if (!selectedTrack) return
     try { selectedTrack.stop() } catch {}
     selectedTrack = null
+    onTrackChanged(null, getSession())
   }
   const setDeviceNow = async (requestedDeviceId) => {
     const current = getSession()
@@ -71,6 +73,7 @@ export function createMicrophoneInputController({
     if (previousTrack && previousTrack !== nextTrack) previousTrack.stop()
     if (selectedTrack && selectedTrack !== previousTrack && selectedTrack !== nextTrack) selectedTrack.stop()
     selectedTrack = nextTrack
+    onTrackChanged(nextTrack, current)
     diagnose('microphone.switched', { device_id: requestedDeviceId, track_id: nextTrack.id, label: nextTrack.label, muted: isMuted() }, current)
   }
 

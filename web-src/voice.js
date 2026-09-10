@@ -2,6 +2,7 @@ import JsSIP from 'jssip'
 import { createMicrophoneMuteController } from './microphone-mute.js'
 import { createMicrophoneInputController } from './microphone-input.js'
 import { createCallQualitySampler } from './call-quality.js'
+import { createAudioLevelMeter } from './audio-level-meter.js'
 
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
@@ -12,6 +13,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   let incomingRing = null
   let incomingAudioContext = null
   let endTone = null
+  let dtmfFeedback = null
   let pendingLegToken = ''
 	let pendingConnectionID = ''
   let telecomMuted = false
@@ -72,11 +74,36 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     client_id: clientId, session_id: sessionId(current), trace_id: traceId(current), leg_token: legToken(current), kind, data,
     }, current)
   }
+  let localLevelTrack = null
+  const microphoneLevel = createAudioLevelMeter({ onLevel: (level) => emit('audio-level', { kind: 'microphone', level }) })
+  const speakerLevel = createAudioLevelMeter({ onLevel: (level) => emit('audio-level', { kind: 'speaker', level }) })
+  const attachMicrophoneLevel = (track, current = session) => {
+    if (track === localLevelTrack) return
+    localLevelTrack = track || null
+    if (!track || track.readyState === 'ended') {
+      microphoneLevel.stop()
+      return
+    }
+    microphoneLevel.attach(new MediaStream([track]))
+    diagnose('audio-level.microphone-attached', { track_id: track.id, enabled: track.enabled, muted: track.muted }, current)
+  }
+  const stopLevelMeters = () => {
+    localLevelTrack = null
+    microphoneLevel.stop()
+    speakerLevel.stop()
+  }
+  const cancelDTMFFeedback = () => {
+    if (!dtmfFeedback) return
+    for (const oscillator of dtmfFeedback.oscillators) { try { oscillator.stop() } catch {} }
+    dtmfFeedback.context?.close?.().catch?.(() => {})
+    dtmfFeedback = null
+  }
   const microphoneInput = createMicrophoneInputController({
     mediaDevices: navigator.mediaDevices,
     getSession: () => session,
     isMuted: () => microphoneMute.muted,
     diagnose,
+    onTrackChanged: attachMicrophoneLevel,
   })
   const applySystemAudioState = (current = session) => {
     microphoneMute.setSuppressed(telecomMuted || systemInactive, current)
@@ -235,6 +262,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     if (!stream || !audioElement) return
     stopRingback('remote-track')
     audioElement.srcObject = stream
+    speakerLevel.attach(stream)
     diagnose('audio.attached', {
       stream_id: stream.id,
       tracks: stream.getTracks().map((track) => ({ id: track.id, kind: track.kind, label: track.label, enabled: track.enabled, muted: track.muted, ready_state: track.readyState })),
@@ -319,6 +347,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     const monitorConnection = (peerconnection) => {
       if (!peerconnection || monitoredConnections.has(peerconnection)) return
       monitoredConnections.add(peerconnection)
+      attachMicrophoneLevel(peerconnection.getSenders?.().find((sender) => sender.track?.kind === 'audio')?.track, next)
       if (next.__vitiQualityPeer && next.__vitiQualityPeer !== peerconnection) stopQuality(next, 'connecting')
       next.__vitiQualityPeer = peerconnection
       const snapshot = (kind) => diagnose(kind, {
@@ -335,7 +364,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         ['onnegotiationneeded', 'peer.negotiation-needed'],
       ]) {
         const previous = peerconnection[property]
-        peerconnection[property] = (event) => { previous?.call(peerconnection, event); snapshot(eventName) }
+        peerconnection[property] = (event) => { previous?.call(peerconnection, event); attachMicrophoneLevel(peerconnection.getSenders?.().find((sender) => sender.track?.kind === 'audio')?.track, next); snapshot(eventName) }
       }
       const previousTrack = peerconnection.ontrack
       peerconnection.ontrack = (event) => {
@@ -380,7 +409,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       testAudio = null
     }
     next.on('ended', (event) => {
-      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next, 'unavailable'); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       lastTerminationClassification = {
         event: 'ended', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
@@ -394,7 +423,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       // WebRTC leg. Its late terminal event belongs to the old generation and
       // must not end (or play an end tone over) the replacement call.
       if (!wasCurrent) return
-      if (wasCurrent) microphoneInput.release()
+      if (wasCurrent) { microphoneInput.release(); stopLevelMeters() }
 	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded
 	  if (wasCurrent && !interrupted) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
 	  if (interrupted) { emit('interrupted', { trace_id: traceId(next), cause: event?.cause || 'Call media ended unexpectedly' }, next); return }
@@ -403,7 +432,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       else finish()
     })
     next.on('failed', (event) => {
-      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next, 'unavailable'); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       lastTerminationClassification = {
         event: 'failed', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
@@ -414,7 +443,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       if (wasCurrent) session = null
       sessionsByLegToken.delete(legToken(next))
       if (!wasCurrent) return
-      if (wasCurrent) microphoneInput.release()
+      if (wasCurrent) { microphoneInput.release(); stopLevelMeters() }
 	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded
 	  if (wasCurrent && !interrupted) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
 	  if (interrupted) { emit('interrupted', { trace_id: traceId(next), cause: event?.cause || 'Call media failed unexpectedly' }, next); return }
@@ -468,7 +497,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(),
 		extraHeaders: [`X-Viti-Trace-ID: ${pendingTraceID}`, `X-Viti-Client-ID: ${clientId}`, `X-Viti-Connection-ID: ${pendingConnectionID}`],
       }
-      if (new URLSearchParams(location.search).get('testTone') === '1') {
+      // Synthetic media is an end-to-end diagnostic hook, never a normal UI
+      // mode. The test runner must opt this tab in through sessionStorage, so
+      // an old test URL cannot silently replace a real microphone.
+      if (sessionStorage.getItem('viti-e2e-test-tone') === '1' && new URLSearchParams(location.search).get('testTone') === '1') {
         const AudioContext = window.AudioContext || window.webkitAudioContext
         const context = new AudioContext(), oscillator = context.createOscillator(), gain = context.createGain(), destination = context.createMediaStreamDestination()
         oscillator.frequency.value = 697; gain.gain.value = 0.025; oscillator.connect(gain).connect(destination); oscillator.start()
@@ -506,6 +538,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
 	},
 	abandon() {
 	  microphoneInput.release()
+	  stopLevelMeters()
 	  microphoneMute.reset()
 	  telecomMuted = false
 	  systemInactive = false
@@ -533,9 +566,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       const ending = sessionFor(requestedLegToken)
       diagnose('action.hangup', {}, ending)
       ending.__vitiLocallyEnded = true
+      cancelDTMFFeedback()
       stopRingback('local-hangup')
       stopIncomingRing('local-hangup')
-      if (session === ending) microphoneInput.release()
+      if (session === ending) { microphoneInput.release(); stopLevelMeters() }
       if (session === ending) session = null
       sessionsByLegToken.delete(legToken(ending))
       stopQuality(ending)
@@ -567,7 +601,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       return true
     },
     setAudioInput: (deviceId) => microphoneInput.setDevice(deviceId),
-    dtmf(tone, requestedLegToken = '') {
+    dtmf(tone, requestedLegToken = '', duration = 160) {
       const target = sessionFor(requestedLegToken)
       if (!target.isEstablished()) throw new Error('The call is not connected yet')
       if (!/^[0-9*#]$/.test(String(tone))) throw new Error('Invalid DTMF key')
@@ -578,10 +612,55 @@ export function createVoice(onEvent, audioElement, identity = {}) {
         monitoredDTMFSenders.add(dtmfSender)
         dtmfSender.addEventListener?.('tonechange', (event) => diagnose('dtmf.tone-change', { tone: event.tone }))
       }
-      diagnose('action.dtmf', { tone, transport: 'RFC4733', duration_ms: 160, inter_tone_gap_ms: 100 })
-      target.sendDTMF(String(tone), { transportType: 'RFC2833', duration: 160, interToneGap: 100 })
-      emit('dtmf', { tone: String(tone) }, target)
+      const boundedDuration = Math.max(70, Math.min(6000, Math.round(Number(duration) || 160)))
+      diagnose('action.dtmf', { tone, transport: 'RFC4733', duration_ms: boundedDuration, inter_tone_gap_ms: 100 })
+      target.sendDTMF(String(tone), { transportType: 'RFC2833', duration: boundedDuration, interToneGap: 100 })
+      emit('dtmf', { tone: String(tone), duration_ms: boundedDuration }, target)
     },
-    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); microphoneInput.release(); microphoneMute.reset(session); for (const current of sessionsByLegToken.values()) { stopQuality(current); current.terminate() } sessionsByLegToken.clear(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null; telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false },
+    startDTMF(tone, requestedLegToken = '') {
+      const target = sessionFor(requestedLegToken)
+      if (!target.isEstablished()) throw new Error('The call is not connected yet')
+      const value = String(tone)
+      if (!/^[0-9*#]$/.test(value)) throw new Error('Invalid DTMF key')
+      if (dtmfFeedback) return false
+      const frequencies = {
+        '1': [697, 1209], '2': [697, 1336], '3': [697, 1477],
+        '4': [770, 1209], '5': [770, 1336], '6': [770, 1477],
+        '7': [852, 1209], '8': [852, 1336], '9': [852, 1477],
+        '*': [941, 1209], '0': [941, 1336], '#': [941, 1477],
+      }[value]
+      const AudioContext = window.AudioContext || window.webkitAudioContext
+      const context = AudioContext ? new AudioContext() : null
+      let oscillators = []
+      if (context) {
+        const gain = context.createGain()
+        gain.gain.value = 0.045
+        oscillators = frequencies.map((frequency) => {
+          const oscillator = context.createOscillator()
+          oscillator.frequency.value = frequency
+          oscillator.type = 'sine'
+          oscillator.connect(gain)
+          oscillator.start()
+          return oscillator
+        })
+        gain.connect(context.destination)
+        context.resume().catch(() => {})
+      }
+      dtmfFeedback = { tone: value, target, startedAt: performance.now(), context, oscillators }
+      diagnose('dtmf.feedback-started', { tone: value, frequencies }, target)
+      return true
+    },
+    stopDTMF(tone = '') {
+      const feedback = dtmfFeedback
+      if (!feedback || (tone && String(tone) !== feedback.tone)) return false
+      dtmfFeedback = null
+      for (const oscillator of feedback.oscillators) { try { oscillator.stop() } catch {} }
+      feedback.context?.close?.().catch?.(() => {})
+      const duration = Math.max(70, Math.min(6000, Math.round(performance.now() - feedback.startedAt)))
+      if (feedback.target === session && feedback.target.isEstablished()) this.dtmf(feedback.tone, legToken(feedback.target), duration)
+      diagnose('dtmf.feedback-stopped', { tone: feedback.tone, duration_ms: duration }, feedback.target)
+      return true
+    },
+    stop() { diagnose('ua.stop'); stopRingback('ua-stop'); stopIncomingRing('ua-stop'); cancelDTMFFeedback(); microphoneInput.release(); stopLevelMeters(); microphoneMute.reset(session); for (const current of sessionsByLegToken.values()) { stopQuality(current); current.terminate() } sessionsByLegToken.clear(); if (ua) ua.stop(); if (incomingAudioContext) incomingAudioContext.close().catch(() => {}); incomingAudioContext = null; session = null; ua = null; telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false },
   }
 }

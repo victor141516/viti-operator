@@ -326,7 +326,7 @@ country to `POST /api/v1/calls/normalize` and inspect the returned E.164 value.
 
 ## Browser audio devices
 
-Open **Connection → Call audio** to select this browser's microphone and, when
+Open **Calls → Call audio** to select this browser's microphone and, when
 supported, its speaker. Choices are stored only in that browser origin, so an
 HTTP loopback URL, an HTTPS deployment, and another host or port each have
 independent preferences. Audio capture and device enumeration require a secure
@@ -347,6 +347,17 @@ that fallback and restores the device after it reconnects when its identifier,
 physical group, or unique label can be matched safely. Duplicate labels remain
 on the default route rather than selecting an arbitrary device. A failed live
 microphone switch leaves the previous call track and saved choice intact.
+
+The input and output meters are active only while the corresponding call stream
+exists. Input measures the track attached to the WebRTC sender, not merely the
+device selected by the operating system; output measures the remote stream
+attached to the call audio element. A moving input meter with a flat output
+therefore has a different meaning from the inverse and helps localize one-way
+audio before inspecting packet traces.
+
+During a connected call, press and hold a dial-pad key to hear local DTMF
+feedback. Releasing it sends one RFC 4733 digit with the measured press duration.
+Pointer, touch, Space, and Enter activation follow the same lifecycle.
 
 ## Contact synchronization
 

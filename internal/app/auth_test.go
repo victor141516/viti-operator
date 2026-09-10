@@ -152,6 +152,51 @@ func TestOpenStickReadinessRejectsMissingBridgeProvider(t *testing.T) {
 	}
 }
 
+func TestOpenStickReadinessDoesNotProbeDuringAKAActivityLifecycle(t *testing.T) {
+	called := false
+	auth := &OpenStickAuthenticator{runADB: func(context.Context, ...string) ([]byte, error) {
+		called = true
+		return nil, errors.New("readiness must not race authentication")
+	}}
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+
+	if err := auth.CheckSIMReady(context.Background()); err != nil {
+		t.Fatalf("in-flight AKA should retain the last ready state: %v", err)
+	}
+	if called {
+		t.Fatal("readiness probe raced the bridge activity lifecycle")
+	}
+}
+
+func TestOpenStickReadinessKeepsRecentSuccessAcrossProbeTimeout(t *testing.T) {
+	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{})}
+	if err := auth.CheckSIMReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	auth.lastCheck = time.Time{}
+	auth.runADB = func(context.Context, ...string) ([]byte, error) {
+		return nil, context.DeadlineExceeded
+	}
+	if err := auth.CheckSIMReady(context.Background()); err != nil {
+		t.Fatalf("one transient timeout discarded a recent ready state: %v", err)
+	}
+}
+
+func TestOpenStickReadinessDoesNotDebounceDefinitiveSIMAbsence(t *testing.T) {
+	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{})}
+	if err := auth.CheckSIMReady(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	auth.lastCheck = time.Time{}
+	auth.runADB = fakeOpenStickReadiness(map[string]fakeADBResult{
+		"shell getprop gsm.sim.state": {output: "ABSENT"},
+	})
+	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "SIM is not ready") {
+		t.Fatalf("definitive absence was hidden by the readiness grace window: %v", err)
+	}
+}
+
 type fakeADBResult struct {
 	output string
 	err    error

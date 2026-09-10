@@ -101,6 +101,18 @@ the browser or operating-system controls must be used. The application does not
 claim a preferred device is active unless the corresponding browser operation
 has succeeded.
 
+The Calls surface taps the actual outbound sender track and inbound remote
+stream with unconnected Web Audio analyser nodes. It renders logarithmic input
+and output level meters without adding a second playback route or changing the
+media. This makes a selected-but-muted, silent, or replaced track visible while
+the call is active. Synthetic test audio requires both the `testTone` query and
+a per-tab `sessionStorage` opt-in set by the end-to-end runner; a copied or stale
+test URL alone can never replace a production microphone.
+
+During an established call, the dial pad provides local dual-tone feedback for
+the full press gesture. On release it emits one RFC 4733 event whose bounded
+duration matches the press, so a long press does not become repeated digits.
+
 ### Android client
 
 The native application uses Kotlin, Jetpack Compose, Material 3, coroutines,
@@ -711,7 +723,10 @@ a webhook retry cannot create a second conversation row.
 - The adaptive authenticator probes for the configured ADB serial and resumes
   when it returns. OpenStick is advertised only after ADB reports `device`, the
   SIM property is exactly `READY`, and the bridge package, executable helper,
-  and content provider all respond.
+  and content provider all respond. Readiness probes are serialized and briefly
+  cached to avoid overloading the Windows ADB bridge. A transport timeout keeps
+  a successful observation for at most 30 seconds; definitive evidence such as
+  an absent SIM or missing device still fails immediately.
 - Manager restart restores open call rows and the durable tunnel checkpoint;
   record age alone is not proof that a carrier call ended. It does not restore
   volatile logical-participant generations, pending exact-channel controls, or

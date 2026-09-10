@@ -29,6 +29,10 @@ type OpenStickAuthenticator struct {
 	Timeout   time.Duration
 	PollDelay time.Duration
 	mu        sync.Mutex
+	healthMu  sync.Mutex
+	lastCheck time.Time
+	lastReady time.Time
+	lastError error
 	runADB    func(context.Context, ...string) ([]byte, error)
 }
 
@@ -37,6 +41,40 @@ func NewOpenStickAuthenticator(adb, serial string) *OpenStickAuthenticator {
 }
 
 func (a *OpenStickAuthenticator) CheckSIMReady(ctx context.Context) error {
+	a.healthMu.Lock()
+	defer a.healthMu.Unlock()
+	now := time.Now()
+	if now.Sub(a.lastCheck) < 5*time.Second {
+		return a.lastError
+	}
+	// AuthenticateAKA deliberately force-stops and restarts the bridge while it
+	// owns this mutex. A concurrent health probe would otherwise observe that
+	// short maintenance window as a missing provider and flash a false SIM
+	// failure in every client. The in-flight AKA operation itself is sufficient
+	// evidence that this authenticator is the selected live provider; the next
+	// probe will perform the complete hardware check.
+	if !a.mu.TryLock() {
+		return nil
+	}
+	defer a.mu.Unlock()
+	rawErr := a.checkSIMReadyNow(ctx)
+	err := rawErr
+	// ADB on Windows occasionally exceeds the short status-probe deadline even
+	// though the USB device never left. Preserve a recent successful observation
+	// for transport timeouts only. Deterministic evidence such as ABSENT,
+	// offline, or device-not-found still fails immediately.
+	if err != nil && isTransientReadinessError(err) && !a.lastReady.IsZero() && now.Sub(a.lastReady) < 30*time.Second {
+		err = nil
+	}
+	a.lastCheck = now
+	a.lastError = err
+	if rawErr == nil {
+		a.lastReady = now
+	}
+	return err
+}
+
+func (a *OpenStickAuthenticator) checkSIMReadyNow(ctx context.Context) error {
 	output, err := a.run(ctx, "get-state")
 	if err != nil {
 		return fmt.Errorf("OpenStick disconnected: %w", err)
@@ -52,17 +90,27 @@ func (a *OpenStickAuthenticator) CheckSIMReady(ctx context.Context) error {
 		return fmt.Errorf("OpenStick SIM is not ready: state is %q", strings.TrimSpace(string(output)))
 	}
 	output, err = a.run(ctx, "shell", "pm", "path", openStickBridgePackage)
-	if err != nil || !strings.Contains(string(output), "package:") {
+	if err != nil {
+		return fmt.Errorf("OpenStick SIM bridge package check failed: %w", err)
+	}
+	if !strings.Contains(string(output), "package:") {
 		return errors.New("OpenStick SIM bridge package is unavailable")
 	}
 	if _, err = a.run(ctx, "shell", "test", "-x", "/data/local/tmp/qmi_auth_aka"); err != nil {
-		return errors.New("OpenStick SIM bridge helper is unavailable")
+		return fmt.Errorf("OpenStick SIM bridge helper check failed: %w", err)
 	}
 	output, err = a.run(ctx, "shell", "content", "query", "--uri", "content://lab.codex.simidentity.aka/material")
-	if err != nil || !openStickProviderAvailable(string(output)) {
+	if err != nil {
+		return fmt.Errorf("OpenStick SIM bridge provider check failed: %w", err)
+	}
+	if !openStickProviderAvailable(string(output)) {
 		return errors.New("OpenStick SIM bridge provider is unavailable")
 	}
 	return nil
+}
+
+func isTransientReadinessError(err error) bool {
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
 }
 
 func openStickProviderAvailable(value string) bool {
@@ -161,6 +209,9 @@ func (a *OpenStickAuthenticator) run(ctx context.Context, args ...string) ([]byt
 	command := exec.CommandContext(ctx, a.ADB, append([]string{"-s", a.Serial}, args...)...)
 	output, err := command.CombinedOutput()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return output, fmt.Errorf("ADB %s interrupted: %w: %s", args[0], ctxErr, strings.TrimSpace(string(output)))
+		}
 		return output, fmt.Errorf("ADB %s failed: %w: %s", args[0], err, strings.TrimSpace(string(output)))
 	}
 	return output, nil

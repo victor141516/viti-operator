@@ -23,7 +23,7 @@ function activeFixture({ replaceError = null, muted = false } = {}) {
     getSession: () => session,
     isMuted: () => muted,
   })
-  return { controller, previous, replacement, sender, requests }
+  return { controller, previous, replacement, sender, session, requests }
 }
 
 test('uses the selected input constraint on the next media acquisition', async () => {
@@ -42,6 +42,20 @@ test('atomically replaces the active sender track and stops the previous track',
   assert.equal(fixture.previous.stopped, true)
   assert.equal(fixture.replacement.stopped, false)
   assert.equal(fixture.controller.deviceId, 'preferred-mic')
+})
+
+test('publishes the actual replacement track for live metering', async () => {
+  const fixture = activeFixture()
+  const changes = []
+  const controller = createMicrophoneInputController({
+    mediaDevices: { async getUserMedia() { return { getAudioTracks: () => [fixture.replacement] } } },
+    getSession: () => fixture.session,
+    onTrackChanged: (value) => changes.push(value),
+  })
+  await controller.setDevice('preferred-mic')
+  assert.deepEqual(changes, [fixture.replacement])
+  controller.release()
+  assert.deepEqual(changes, [fixture.replacement, null])
 })
 
 test('keeps a replacement track muted when switching during a muted call', async () => {
