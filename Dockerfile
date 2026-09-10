@@ -4,16 +4,16 @@ FROM node:22-alpine AS web-build
 WORKDIR /src
 COPY web-src/package.json web-src/package-lock.json ./web-src/
 RUN npm ci --prefix web-src
-COPY web-src/voice.js ./web-src/voice.js
+COPY web-src/ ./web-src/
 COPY internal/app/web/ ./internal/app/web/
 RUN npm --prefix web-src run build
 
 FROM golang:1.26-alpine AS go-build
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 COPY cmd/ ./cmd/
 COPY internal/ ./internal/
-COPY --from=web-build /src/internal/app/web/voice.bundle.js ./internal/app/web/voice.bundle.js
+COPY --from=web-build /src/internal/app/web/ ./internal/app/web/
 RUN CGO_ENABLED=0 go test ./... && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-operator ./cmd/viti-operator && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-loopback-proxy ./cmd/viti-loopback-proxy

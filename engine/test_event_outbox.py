@@ -42,6 +42,25 @@ class EventOutboxTest(unittest.TestCase):
             self.assertFalse(event_outbox.deliver_file(path, "http://manager", "", session))
             self.assertTrue(path.exists())
 
+    def test_missing_final_file_means_another_worker_completed_delivery(self):
+        with tempfile.TemporaryDirectory() as directory:
+            missing = Path(directory) / "already-delivered.json"
+            session = mock.Mock()
+            self.assertTrue(event_outbox.deliver_file(missing, "http://manager", "", session))
+            session.post.assert_not_called()
+
+    def test_obsolete_durable_participant_join_is_discarded_without_replay(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(event_outbox, "load_env", return_value={}):
+                path = event_outbox.enqueue_event(
+                    "participant_joined", ["web-a", "web-a", "leg-a", "PJSIP/a"], outbox=directory,
+                )
+            session = mock.Mock()
+
+            self.assertTrue(event_outbox.deliver_file(path, "http://manager", "", session))
+            self.assertFalse(path.exists())
+            session.post.assert_not_called()
+
     def test_tunnel_ordering_metadata_is_persisted_for_retry(self):
         with tempfile.TemporaryDirectory() as directory:
             path = event_outbox.enqueue_event(

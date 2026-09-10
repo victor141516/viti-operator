@@ -12,6 +12,9 @@ IMS and conference audio.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.
+- Established carrier calls remain alive when one or every local WebRTC leg is
+  temporarily lost. Web and Android recreate media against the same conference
+  without redialing, while an explicit final participant departure still ends it.
 - National-format calling from web, Android, and Android Auto with per-session
   country detection, established numbering rules, and a fail-closed international
   fallback when the current country is ambiguous.
@@ -110,10 +113,13 @@ source assets and must not be committed.
 - [Operations and deployment](docs/OPERATIONS.md)
 - [Third-party source provenance](THIRD_PARTY_NOTICES.md)
 
-The carrier leg ends when its last participant leaves or when the carrier or
-engine reports a real terminal transport event. SIM-reader availability, ePDG
-tunnel state, IMS registration, and call state are tracked independently; losing
-the reader alone never manufactures a call failure.
+The carrier leg ends when its last logical participant explicitly leaves or when
+the carrier or engine reports a real terminal transport event. Losing a browser,
+Android network, WebRTC leg, SIM reader, or readiness probe is not itself an
+explicit hangup; a confirmed current tunnel-down boundary remains terminal.
+Clients retain logical identity and rejoin the existing conference when media
+returns. This control state is volatile: surviving a manager or engine restart
+during a call is not promised.
 
 ## Source scope
 

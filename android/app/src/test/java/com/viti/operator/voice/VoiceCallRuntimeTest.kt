@@ -754,20 +754,178 @@ class VoiceCallRuntimeTest {
         runtime.close()
     }
 
+    @Test
+    fun unexpectedMediaLossRejoinsTheSameCallAndPreservesMute() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val sessions = FakeSessionControl(active = true)
+        val runtime = runtime(engine, null, FakeLegacyAudio(), sessions)
+
+        runtime.placeCall("+34600000100")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "active",
+                peer = "+34600000100",
+                traceId = "trace-reconnect",
+                legToken = token,
+                connectionId = "connection-old",
+            ),
+        )
+        runtime.setMuted(true)
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "mute-changed",
+                traceId = "trace-reconnect",
+                legToken = token,
+                connectionId = "connection-old",
+                cause = "muted=true",
+            ),
+        )
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "interrupted",
+                traceId = "trace-reconnect",
+                legToken = token,
+                connectionId = "connection-old",
+            ),
+        )
+        runCurrent()
+
+        assertEquals(VoiceCallPhase.RECONNECTING, runtime.snapshot.value.phase)
+        assertEquals(listOf("trace-reconnect"), sessions.activeQueries)
+        assertTrue(engine.commands.contains("reconnect:$token:trace-reconnect"))
+        assertTrue(runtime.snapshot.value.voice.microphoneMuted)
+
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "active",
+                peer = "+34600000100",
+                traceId = "trace-reconnect",
+                legToken = token,
+                connectionId = "connection-new",
+            ),
+        )
+        assertEquals(VoiceCallPhase.ACTIVE, runtime.snapshot.value.phase)
+        assertEquals(token, runtime.snapshot.value.legToken)
+        assertTrue(runtime.snapshot.value.voice.microphoneMuted)
+        runtime.close()
+    }
+
+    @Test
+    fun conferenceJoinUsesTheExistingCarrierTraceInsteadOfCreatingANewCallIdentity() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+
+        runtime.placeCall("*44", traceId = "carrier-trace-existing")
+        runCurrent()
+
+        assertEquals(listOf("carrier-trace-existing"), engine.callTraces)
+        assertEquals(listOf("call:*44"), engine.commands)
+        runtime.close()
+    }
+
+    @Test
+    fun carrierHangupDuringMediaLossIsTerminalAndDoesNotRedial() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val sessions = FakeSessionControl(active = false)
+        val runtime = runtime(engine, null, FakeLegacyAudio(), sessions)
+
+        runtime.placeCall("+34600000101")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "active",
+                traceId = "trace-ended",
+                legToken = token,
+                connectionId = "connection-ended",
+            ),
+        )
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "interrupted",
+                traceId = "trace-ended",
+                legToken = token,
+                connectionId = "connection-ended",
+            ),
+        )
+        runCurrent()
+
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        assertFalse(engine.commands.any { it.startsWith("reconnect:") })
+        assertTrue(runtime.snapshot.value.voice.detail.contains("carrier call ended"))
+        runtime.close()
+    }
+
+    @Test
+    fun explicitHangupSubmitsGenerationScopedLeave() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val sessions = FakeSessionControl(active = true)
+        val runtime = runtime(engine, null, FakeLegacyAudio(), sessions)
+
+        runtime.placeCall("+34600000102")
+        runCurrent()
+        val token = runtime.snapshot.value.legToken
+        runtime.onVoiceEvent(
+            VoiceEngineEvent(
+                type = "active",
+                traceId = "trace-leave",
+                legToken = token,
+                connectionId = "connection-current",
+            ),
+        )
+        runtime.hangup(token)
+        runCurrent()
+
+        assertEquals(1, sessions.leaves.size)
+        assertEquals("trace-leave", sessions.leaves.single().traceId)
+        assertEquals("connection-current", sessions.leaves.single().connectionId)
+		assertEquals("", sessions.leaves.single().previousConnectionId)
+        assertTrue(sessions.leaves.single().operationId.isNotBlank())
+        runtime.close()
+    }
+
+	@Test
+	fun hangupDuringPendingReconnectAlsoIdentifiesThePreviousRegisteredGeneration() = runTest(UnconfinedTestDispatcher()) {
+		val engine = FakeVoiceEngine()
+		val sessions = FakeSessionControl(active = true)
+		val runtime = runtime(engine, null, FakeLegacyAudio(), sessions)
+
+		runtime.placeCall("+34600000103")
+		runCurrent()
+		val token = runtime.snapshot.value.legToken
+		runtime.onVoiceEvent(VoiceEngineEvent("active", traceId = "trace-pending", legToken = token, connectionId = "connection-old"))
+		runtime.onVoiceEvent(VoiceEngineEvent("interrupted", traceId = "trace-pending", legToken = token, connectionId = "connection-old"))
+		runCurrent()
+		runtime.onVoiceEvent(VoiceEngineEvent("calling", traceId = "trace-pending", legToken = token, connectionId = "connection-pending-one"))
+		runtime.onVoiceEvent(VoiceEngineEvent("calling", traceId = "trace-pending", legToken = token, connectionId = "connection-pending-two"))
+		runtime.hangup(token)
+		runCurrent()
+
+		assertEquals(1, sessions.leaves.size)
+		assertEquals("connection-pending-two", sessions.leaves.single().connectionId)
+		assertEquals("connection-old", sessions.leaves.single().previousConnectionId)
+		runtime.close()
+	}
+
     private fun kotlinx.coroutines.test.TestScope.runtime(
         engine: FakeVoiceEngine,
         gateway: PlatformCallGateway?,
         legacy: FakeLegacyAudio,
+        sessions: VoiceCallSessionControl = NoOpVoiceCallSessionControl,
     ) = VoiceCallRuntime(
         scope = this,
         voiceClient = engine,
         telecomGateway = gateway,
         legacyAudio = legacy,
+        callSessionControl = sessions,
         onSnapshot = {},
     )
 
     private class FakeVoiceEngine : VoiceEngineControl {
         val commands = mutableListOf<String>()
+		val callTraces = mutableListOf<String>()
         val starts = mutableListOf<VoiceProvisioning>()
         var microphonePermission = true
         var callFailure: Throwable? = null
@@ -784,6 +942,7 @@ class VoiceCallRuntimeTest {
         override suspend fun call(legToken: String, number: String, traceId: String) {
             callGate?.await()
             callFailure?.let { throw it }
+			callTraces += traceId
             commands += "call:$number"
         }
         override suspend fun answer(legToken: String) {
@@ -797,6 +956,10 @@ class VoiceCallRuntimeTest {
             hangGate?.await()
             commands += "hangup:$legToken"
         }
+        override suspend fun reconnect(legToken: String, traceId: String) {
+            callFailure?.let { throw it }
+            commands += "reconnect:$legToken:$traceId"
+        }
         override suspend fun setMuted(legToken: String, muted: Boolean) { commands += "mute:$legToken:$muted" }
         override suspend fun setTelecomMuted(legToken: String, muted: Boolean) { commands += "telecom-mute:$legToken:$muted" }
         override suspend fun setSystemInactive(legToken: String, inactive: Boolean) {
@@ -806,6 +969,22 @@ class VoiceCallRuntimeTest {
         }
         override suspend fun sendDtmf(legToken: String, tone: Char) { commands += "dtmf:$legToken:$tone" }
         override fun destroy() = Unit
+    }
+
+    private class FakeSessionControl(var active: Boolean) : VoiceCallSessionControl {
+		data class Leave(val traceId: String, val connectionId: String, val previousConnectionId: String, val operationId: String)
+
+        val activeQueries = mutableListOf<String>()
+        val leaves = mutableListOf<Leave>()
+
+        override suspend fun isCarrierCallActive(traceId: String): Boolean {
+            activeQueries += traceId
+            return active
+        }
+
+		override suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) {
+			leaves += Leave(traceId, connectionId, previousConnectionId, operationId)
+		}
     }
 
     private class FakeGateway(

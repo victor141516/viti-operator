@@ -93,6 +93,50 @@ func (g *AMIGateway) HangupCall(ctx context.Context, _ string) error {
 	return nil
 }
 
+func (g *AMIGateway) DropConferenceLeg(ctx context.Context, channel string) error {
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Hangup", "Channel": channel, "Cause": "16",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		message := first(response, "Message")
+		if amiTargetAlreadyGone(message) {
+			return nil
+		}
+		return fmt.Errorf("Asterisk rejected directed leg hangup: %s", message)
+	}
+	return nil
+}
+
+func (g *AMIGateway) EndConference(ctx context.Context, conference string) error {
+	response, err := g.action(ctx, map[string]string{
+		"Action": "ConfbridgeKick", "Conference": conference, "Channel": "all",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		message := first(response, "Message")
+		if amiTargetAlreadyGone(message) {
+			return nil
+		}
+		return fmt.Errorf("Asterisk rejected conference hangup: %s", message)
+	}
+	return nil
+}
+
+func amiTargetAlreadyGone(message string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	return strings.Contains(normalized, "no such channel") ||
+		strings.Contains(normalized, "channel not found") ||
+		strings.Contains(normalized, "no such conference") ||
+		strings.Contains(normalized, "conference not found") ||
+		strings.Contains(normalized, "conference does not exist") ||
+		strings.Contains(normalized, "no active conference")
+}
+
 func (g *AMIGateway) SetIMSRegistration(ctx context.Context, enabled bool) error {
 	command := "pjsip send unregister volte_ims"
 	if enabled {
@@ -156,7 +200,7 @@ func (g *AMIGateway) action(ctx context.Context, fields map[string]string) (map[
 }
 
 func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]string) (map[string][]string, error) {
-	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable"} {
+	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference"} {
 		value, ok := fields[key]
 		if !ok {
 			continue

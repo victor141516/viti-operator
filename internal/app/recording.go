@@ -66,11 +66,15 @@ func (a *App) ingestRecordingTrack(w http.ResponseWriter, instance, callID strin
 	participantID := strings.TrimSpace(args[1])
 	clientID := strings.TrimSpace(args[2])
 	fileName := strings.TrimSpace(args[3])
+	segmentID := ""
+	if len(args) > 4 {
+		segmentID = strings.TrimSpace(args[4])
+	}
 	if role != "remote" && role != "client" {
 		writeError(w, http.StatusBadRequest, "invalid recording track role")
 		return
 	}
-	if !recordingPathPart.MatchString(callID) || !recordingPathPart.MatchString(fileName) || filepath.Base(fileName) != fileName {
+	if !recordingPathPart.MatchString(callID) || !recordingPathPart.MatchString(fileName) || filepath.Base(fileName) != fileName || (segmentID != "" && !recordingPathPart.MatchString(segmentID)) {
 		writeError(w, http.StatusBadRequest, "invalid recording track path")
 		return
 	}
@@ -86,6 +90,9 @@ func (a *App) ingestRecordingTrack(w http.ResponseWriter, instance, callID strin
 			label = "Connected device"
 		}
 		trackID = "client-" + participantID
+		if segmentID != "" {
+			trackID += "-" + segmentID
+		}
 	}
 	track := RecordingTrack{
 		ID: trackID, Role: role, ParticipantID: participantID, ClientID: clientID,
@@ -128,6 +135,17 @@ func (a *App) claimRecordingParticipant(w http.ResponseWriter, r *http.Request) 
 	}
 	if request.Name == "" {
 		request.Name = "Connected device"
+	}
+	if existing, found := a.store.GetCallByTraceID(request.TraceID); found && existing.EndedAt != nil {
+		writeError(w, http.StatusGone, "call has ended")
+		return
+	}
+	// Record the control-plane identity even if the durable call-opening
+	// event is still waiting in the engine outbox. The client retries this
+	// endpoint so recording metadata converges once the call row exists.
+	if !a.callSessions.claim(request.TraceID, request.ParticipantID, request.ClientID) {
+		writeError(w, http.StatusGone, "call has ended")
+		return
 	}
 	call, found, err := a.store.ClaimRecordingParticipant(request.TraceID, RecordingParticipant{
 		ParticipantID: request.ParticipantID, ClientID: request.ClientID, Name: request.Name,

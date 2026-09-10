@@ -8,7 +8,7 @@ enum class VoiceCallDirection { INCOMING, OUTGOING }
 // later than the feature itself, so use its stable platform feature name.
 internal const val TELECOM_FEATURE = "android.software.telecom"
 
-enum class VoiceCallPhase { SETUP, RINGING, DIALING, ACTIVE, INACTIVE, ENDING }
+enum class VoiceCallPhase { SETUP, RINGING, DIALING, ACTIVE, INACTIVE, RECONNECTING, ENDING }
 
 enum class VoiceAudioEndpointType { EARPIECE, SPEAKER, WIRED_HEADSET, BLUETOOTH, STREAMING, UNKNOWN }
 
@@ -63,9 +63,20 @@ interface VoiceEngineControl {
     suspend fun answer(legToken: String)
     suspend fun reject(legToken: String)
     suspend fun hangup(legToken: String)
+	suspend fun reconnect(legToken: String, traceId: String)
     suspend fun setMuted(legToken: String, muted: Boolean)
     suspend fun setTelecomMuted(legToken: String, muted: Boolean)
     suspend fun setSystemInactive(legToken: String, inactive: Boolean)
     suspend fun sendDtmf(legToken: String, tone: Char)
     fun destroy()
+}
+
+interface VoiceCallSessionControl {
+	suspend fun isCarrierCallActive(traceId: String): Boolean
+	suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String)
+}
+
+object NoOpVoiceCallSessionControl : VoiceCallSessionControl {
+	override suspend fun isCarrierCallActive(traceId: String) = false
+	override suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) = Unit
 }

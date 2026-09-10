@@ -675,7 +675,7 @@ private fun CallsScreen(
     val activeServerCall = ui.calls.firstOrNull { it.endedAt.isBlank() && it.state in setOf("ringing", "dialing", "active") }
     val serverCallActive = activeServerCall != null
     val anotherClientOwnsCall = serverCallActive && !ui.voice.incoming && !ui.voice.inCall && !ui.voice.ending
-    val canJoinCall = anotherClientOwnsCall && activeServerCall?.state == "active" && activeServerCall.peer != "*43"
+    val canJoinCall = anotherClientOwnsCall && activeServerCall?.state == "active" && activeServerCall.peer != "*43" && activeServerCall.traceId.isNotBlank()
     val filteredCalls = remember(ui.calls, ui.contacts, query) {
         ui.calls.filter {
             val name = contactName(ui.contacts, it.peer)

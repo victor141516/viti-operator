@@ -501,6 +501,54 @@ Future call transfer between devices is therefore mostly a product operation:
 join the destination, verify media, then leave the source. A dedicated atomic
 handoff UI has not yet been implemented.
 
+### Logical participation and media recovery
+
+A SIP/WebRTC channel is transport, not user intent. When Wi-Fi, mobile data,
+Tailscale, ICE, or SIP WebSocket temporarily loses a local media leg, Asterisk
+emits `participant_left` but keeps the marked carrier channel in ConfBridge. The
+manager marks that connection generation disconnected while retaining its stable
+logical `client_id`. It does not start a grace timer and does not infer an explicit
+hangup when every local channel is absent.
+
+Web and Android retain the call trace, last admitted connection generation, and
+client-local mute preference. After signaling returns they create a fresh
+`connection_id` and dial the private `*44` route, which joins the existing carrier
+conference rather than placing another carrier call. Another trusted client may
+also join while the original client has no media. A carrier `call_result`, real
+terminal data-plane boundary, or missing active call makes recovery terminal and
+prevents resurrection.
+
+User intent follows a separate, idempotent manager operation. A leave request
+names the stable client, current connection, optional last admitted connection,
+and a unique operation ID. The registry removes logical ownership atomically
+before AMI control. Non-final departure removes only the exact local channel;
+final departure closes further admission before ending the conference. If the
+HTTP response or AMI operation fails, the client repeats the same operation ID so
+the retry cannot target a replacement leg.
+
+Each `connection_id` belongs to exactly one Asterisk admission attempt and one
+channel. The manager serializes admission under a mutex, rejects stale or reused
+generations, and retains exact superseded channels until AMI confirms their
+removal. Before entering ConfBridge, the dialplan makes a synchronous
+`participant_joined` request. Only a `204` admits the channel. Admission is never
+replayed from the event outbox because its original channel would no longer be
+waiting.
+
+The response can still be lost after the manager commits admission. In that
+ambiguous case Asterisk stays out of ConfBridge and durably emits
+`participant_join_aborted`. The manager keeps abort tombstones and a predecessor
+chain until a real `participant_left` proves which generation entered the
+conference. Delayed, duplicate, reversed, or consecutively interleaved aborts
+therefore restore the last non-aborted logical owner; a same-ID channel collision
+cannot revoke the valid channel. Confirmed participant departure and terminal call
+cleanup prune this rollback evidence.
+
+This logical-membership registry, its generations, tombstones, pending AMI drops,
+and leave-operation cache are intentionally process-local. Persistent call history
+may survive a manager restart, but the exact participation and recovery guarantees
+in this section do not. Server-restart survival requires a separate persisted or
+Asterisk-reconstructed control-plane design.
+
 ### Media
 
 Client media uses WebRTC: ICE for path selection, DTLS-SRTP for key agreement
@@ -647,6 +695,14 @@ a webhook retry cannot create a second conversation row.
 
 ## Failure and recovery model
 
+- Unexpected loss of a local SIP/WebRTC leg retains logical participation and
+  the carrier conference indefinitely from the application's perspective. A
+  reconnect creates a new media generation and joins the same call; it never
+  redials the remote number. Explicit leave and transport loss are separate paths.
+- Participant admission is synchronous and fail-closed. A lost response is
+  compensated by a durable abort event; connection/channel fencing, timestamps,
+  predecessor history, and tombstones make duplicate or reordered compensation
+  converge without stale ownership or duplicate conference legs.
 - Removing the modem or losing a remote SIM agent changes authentication and
   overall line readiness but does not stop the manager or terminate an
   established call. New outgoing calls and outgoing SMS submissions remain
@@ -657,7 +713,10 @@ a webhook retry cannot create a second conversation row.
   SIM property is exactly `READY`, and the bridge package, executable helper,
   and content provider all respond.
 - Manager restart restores open call rows and the durable tunnel checkpoint;
-  record age alone is not proof that a carrier call ended.
+  record age alone is not proof that a carrier call ended. It does not restore
+  volatile logical-participant generations, pending exact-channel controls, or
+  idempotent leave operations, so seamless media recovery across that restart is
+  outside the current guarantee.
 - A confirmed current-generation tunnel down or a newer engine-process start
   interrupts calls that existed on that data plane. A SIM-health failure alone
   does not.

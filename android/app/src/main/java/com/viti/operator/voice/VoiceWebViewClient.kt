@@ -37,6 +37,7 @@ data class VoiceEngineEvent(
     val traceId: String = "",
     val participantId: String = "",
     val legToken: String = "",
+	val connectionId: String = "",
     val quality: VoiceCallQuality? = null,
 )
 
@@ -181,6 +182,8 @@ class VoiceWebViewClient(
     override suspend fun answer(legToken: String) = command("answer", legToken)
     override suspend fun reject(legToken: String) = command("reject", legToken)
     override suspend fun hangup(legToken: String) = command("hangup", legToken)
+	override suspend fun reconnect(legToken: String, traceId: String) =
+		command("reconnect", legToken, JSONObject().put("trace_id", traceId))
     override suspend fun setMuted(legToken: String, muted: Boolean) =
         command("mute", legToken, JSONObject().put("muted", muted))
 
@@ -307,6 +310,7 @@ class VoiceWebViewClient(
                 traceId = body.optString("trace_id"),
                 participantId = body.optString("participant_id"),
                 legToken = body.optString("leg_token"),
+				connectionId = body.optString("connection_id"),
                 quality = VoiceQualityJson.parse(body.optJSONObject("quality")),
             )
             if (type == "quality") dispatchLatestQuality(event) else mainHandler.post { onEvent(event) }

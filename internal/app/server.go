@@ -45,6 +45,7 @@ type App struct {
 	tunnel            engineTunnelState
 	clients           map[string]clientPresence
 	simAuthAssignment SIMAuthAssignment
+	callSessions      *callSessionRegistry
 }
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
@@ -114,7 +115,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 			AuthAgentID: client.AuthAgentID, HasSIM: client.HasSIM, LastSeen: client.LastSeen,
 		}
 	}
-	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment()}
+	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry()}
 	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
 		a.tunnel = engineTunnelState{
 			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
@@ -159,6 +160,7 @@ func (a *App) routes() {
 	a.mux.Handle("PUT /api/v1/contacts/sources/{client}", a.authorized(http.HandlerFunc(a.replaceContactSource)))
 	a.mux.Handle("POST /api/v1/calls", a.authorized(http.HandlerFunc(a.startCall)))
 	a.mux.Handle("POST /api/v1/calls/{id}/hangup", a.authorized(http.HandlerFunc(a.hangupCall)))
+	a.mux.Handle("POST /api/v1/calls/participants/leave", a.authorized(http.HandlerFunc(a.leaveCallParticipant)))
 	a.mux.Handle("GET /api/v1/recording", a.authorized(http.HandlerFunc(a.recordingSettings)))
 	a.mux.Handle("PUT /api/v1/recording", a.authorized(http.HandlerFunc(a.setRecordingSettings)))
 	a.mux.Handle("POST /api/v1/calls/participants", a.authorized(http.HandlerFunc(a.claimRecordingParticipant)))
@@ -278,6 +280,10 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Event == "recording_track" {
 		a.ingestRecordingTrack(w, request.Instance, request.CallID, request.Args, request.RecordedAtNS)
+		return
+	}
+	if request.Event == "participant_joined" || request.Event == "participant_left" || request.Event == "participant_join_aborted" {
+		a.ingestCallParticipantEvent(w, request.Event, request.Instance, request.CallID, request.Args, eventAt)
 		return
 	}
 	if request.Event == "sms_protocol" {
@@ -405,6 +411,9 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if changed {
 		a.events.Publish("call.updated", call)
+	}
+	if request.Event == "call_result" {
+		a.callSessions.ended(call.Instance, call.EngineCallID, call.TraceID)
 	}
 	a.diag.RecordTrace("manager.call", "event.completed", call.TraceID, map[string]any{"engine_event": request, "call": call})
 	writeJSON(w, http.StatusOK, call)
@@ -841,6 +850,155 @@ func (a *App) hangupCall(w http.ResponseWriter, r *http.Request) {
 	a.events.Publish("call.updated", call)
 	a.diag.RecordTrace("manager.call", "api.hangup.completed", call.TraceID, call)
 	writeJSON(w, http.StatusOK, call)
+}
+
+func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance, engineCallID string, args []string, at time.Time) {
+	if len(args) < 4 || instance == "" || engineCallID == "" {
+		writeError(w, http.StatusBadRequest, "participant events require client, participant, connection and channel identifiers")
+		return
+	}
+	clientID := strings.TrimSpace(args[0])
+	participantID := strings.TrimSpace(args[1])
+	connectionID := strings.TrimSpace(args[2])
+	channel := strings.TrimSpace(args[3])
+	if participantID == "" || !validCallControlID(connectionID) || channel == "" || (clientID != "" && !validCallControlID(clientID)) {
+		writeError(w, http.StatusBadRequest, "invalid participant event identifiers")
+		return
+	}
+	call, found := a.store.GetCallByEngineID(instance, engineCallID)
+	if !found {
+		writeError(w, http.StatusConflict, "carrier call is not available yet")
+		return
+	}
+	if call.EndedAt != nil {
+		if event == "participant_joined" {
+			writeError(w, http.StatusGone, "carrier call is no longer active")
+			return
+		}
+		// A late or repeated departure already agrees with the terminal call.
+		// Acknowledge it so the durable engine outbox can converge.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if event == "participant_join_aborted" {
+		if a.callSessions.abortJoin(call, clientID, participantID, connectionID, channel, at) {
+			controller, ok := a.gateway.(ConferenceCallController)
+			if !ok {
+				writeError(w, http.StatusNotImplemented, "the telephony provider cannot end an abandoned conference")
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := controller.EndConference(ctx, call.EngineCallID)
+			cancel()
+			if err != nil {
+				a.diag.RecordTrace("manager.call", "participant.abort-end.failed", call.TraceID, map[string]any{"connection_id": connectionID, "error": err.Error()})
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if event == "participant_left" {
+		a.callSessions.leftChannel(call, clientID, participantID, connectionID, channel, at)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	joinResult := a.callSessions.joined(call, clientID, participantID, connectionID, channel, at)
+	if len(joinResult.channelsToDrop) > 0 {
+		controller, ok := a.gateway.(ConferenceCallController)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "the telephony provider cannot remove superseded conference participants")
+			return
+		}
+		for _, channelToDrop := range joinResult.channelsToDrop {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := controller.DropConferenceLeg(ctx, channelToDrop)
+			cancel()
+			if err != nil {
+				a.diag.RecordTrace("manager.call", "participant.supersede.failed", call.TraceID, map[string]any{"channel": channelToDrop, "connection_id": connectionID, "error": err.Error()})
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+			a.callSessions.completeDrop(call, channelToDrop)
+		}
+	}
+	if !joinResult.admitted {
+		writeError(w, http.StatusGone, "participant admission was rejected")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
+	var request struct {
+		TraceID              string `json:"trace_id"`
+		ClientID             string `json:"client_id"`
+		ConnectionID         string `json:"connection_id"`
+		PreviousConnectionID string `json:"previous_connection_id,omitempty"`
+		OperationID          string `json:"operation_id"`
+	}
+	if err := readJSON(r, &request, 8<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	request.TraceID = strings.TrimSpace(request.TraceID)
+	request.ClientID = strings.TrimSpace(request.ClientID)
+	request.ConnectionID = strings.TrimSpace(request.ConnectionID)
+	request.PreviousConnectionID = strings.TrimSpace(request.PreviousConnectionID)
+	request.OperationID = strings.TrimSpace(request.OperationID)
+	if !validCallControlID(request.TraceID) || !validCallControlID(request.ClientID) || !validCallControlID(request.ConnectionID) || !validCallControlID(request.OperationID) {
+		writeError(w, http.StatusBadRequest, "trace_id, client_id, connection_id and operation_id are required")
+		return
+	}
+	if request.PreviousConnectionID != "" && !validCallControlID(request.PreviousConnectionID) {
+		writeError(w, http.StatusBadRequest, "previous_connection_id is invalid")
+		return
+	}
+	call, found := a.store.GetCallByTraceID(request.TraceID)
+	if !found {
+		writeError(w, http.StatusNotFound, "call not found")
+		return
+	}
+	if call.EndedAt != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"operation_id": request.OperationID, "carrier_ended": true, "already_ended": true})
+		return
+	}
+	operation, err := a.callSessions.beginLeaveWithPrevious(call, request.ClientID, request.ConnectionID, request.PreviousConnectionID, request.OperationID)
+	if errors.Is(err, errLeaveOperationConflict) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	if errors.Is(err, errCallParticipantNotFound) {
+		writeError(w, http.StatusConflict, "this client connection is not an active participant in that call")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !operation.completed {
+		controller, ok := a.gateway.(ConferenceCallController)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "the telephony provider cannot control conference participants")
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		if operation.endCarrier {
+			err = controller.EndConference(ctx, call.EngineCallID)
+		} else if operation.channel != "" {
+			err = controller.DropConferenceLeg(ctx, operation.channel)
+		}
+		cancel()
+		if err != nil {
+			a.diag.RecordTrace("manager.call", "participant.leave.failed", call.TraceID, map[string]any{"operation_id": operation.operationID, "connection_id": operation.connectionID, "end_carrier": operation.endCarrier, "error": err.Error()})
+			writeError(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		a.callSessions.completeLeave(operation.operationID)
+	}
+	a.diag.RecordTrace("manager.call", "participant.leave.completed", call.TraceID, map[string]any{"operation_id": operation.operationID, "connection_id": operation.connectionID, "end_carrier": operation.endCarrier})
+	writeJSON(w, http.StatusOK, map[string]any{"operation_id": operation.operationID, "carrier_ended": operation.endCarrier})
 }
 
 func (a *App) waitEvents(w http.ResponseWriter, r *http.Request) {

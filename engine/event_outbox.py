@@ -20,8 +20,9 @@ OUTBOX = Path(os.environ.get("VITI_EVENT_OUTBOX_DIR", os.path.join(RUNDIR, "even
 
 
 class _Response:
-    def __init__(self, status_code):
+    def __init__(self, status_code, text=""):
         self.status_code = status_code
+        self.text = text
 
 
 class _HTTPSession:
@@ -121,13 +122,34 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
         return False
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Another worker completed this asynchronous event.
+        return True
+    except (OSError, ValueError) as error:
+        print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
+        return False
+    if payload.get("event") == "participant_joined":
+        # Releases before synchronous admission may have left these files
+        # behind. No dialplan caller is waiting now, so replaying one could
+        # create a participant that never entered ConfBridge.
+        try:
+            path.unlink()
+            _sync_directory(str(path.parent))
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            print("[event-outbox] obsolete admission could not be removed %s: %r" %
+                  (path.name, error), flush=True)
+            return False
+        return True
+    try:
         response = session.post(
             manager_url + "/api/engine/event",
             json=payload,
             headers={"X-Viti-Engine-Token": token} if token else {},
             timeout=10,
         )
-    except (OSError, ValueError, urllib.error.URLError) as error:
+    except (OSError, urllib.error.URLError) as error:
         print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
         return False
     if response.status_code < 200 or response.status_code >= 300:
@@ -137,6 +159,8 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
     try:
         path.unlink()
         _sync_directory(str(path.parent))
+    except FileNotFoundError:
+        return True
     except OSError as error:
         print("[event-outbox] accepted event could not be removed %s: %r" %
               (path.name, error), flush=True)

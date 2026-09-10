@@ -13,8 +13,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   let incomingAudioContext = null
   let endTone = null
   let pendingLegToken = ''
+	let pendingConnectionID = ''
   let telecomMuted = false
   let systemInactive = false
+  let lastTerminationClassification = null
   let iceServers = []
   const peerConfig = () => ({
     iceServers,
@@ -36,11 +38,12 @@ export function createVoice(onEvent, audioElement, identity = {}) {
   const sessionId = (value) => value?.request?.call_id || value?._request?.call_id || ''
   const requestHeader = (value, name) => value?.request?.getHeader?.(name) || value?._request?.getHeader?.(name) || ''
   const legToken = (value = session) => value?.__vitiLegToken || ''
+	const connectionId = (value = session) => value?.__vitiConnectionID || requestHeader(value, 'X-Viti-Connection-ID') || ''
   const traceId = (value = session) => sessionTraceIDs.get(value) || requestHeader(value, 'X-Viti-Trace-ID') || pendingTraceID || sessionId(value)
   const participantId = (value = session) => requestHeader(value, 'X-Viti-Participant-ID') || clientId
   const emit = (type, detail = {}, current = session) => onEvent(type, {
     participant_id: detail.participant_id || participantId(current), client_id: clientId,
-    ...detail, trace_id: detail.trace_id || traceId(current), leg_token: detail.leg_token || legToken(current),
+	...detail, trace_id: detail.trace_id || traceId(current), leg_token: detail.leg_token || legToken(current), connection_id: detail.connection_id || connectionId(current),
   })
   const emitQuality = (sample, current) => {
     current.__vitiQualitySequence = (current.__vitiQualitySequence || 0) + 1
@@ -259,7 +262,11 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     next.__vitiLegToken = next.__vitiLegToken || (
       next.direction === 'outgoing' ? pendingLegToken : ''
     ) || globalThis.crypto?.randomUUID?.() || `leg-${Date.now()}-${Math.random()}`
+	next.__vitiConnectionID = next.__vitiConnectionID || (
+	  next.direction === 'outgoing' ? pendingConnectionID : requestHeader(next, 'X-Viti-Connection-ID')
+	) || globalThis.crypto?.randomUUID?.() || `connection-${Date.now()}-${Math.random()}`
     pendingLegToken = ''
+	pendingConnectionID = ''
     sessionsByLegToken.set(next.__vitiLegToken, next)
     const currentTraceID = traceId(next) || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
     sessionTraceIDs.set(next, currentTraceID)
@@ -375,10 +382,22 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     next.on('ended', (event) => {
       stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
+      lastTerminationClassification = {
+        event: 'ended', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
+        recovery: next.__vitiRecovery === true, locally_ended: next.__vitiLocallyEnded === true,
+        trace_id: traceId(next), leg_token: legToken(next), connection_id: connectionId(next),
+      }
+      diagnose('session.termination-classified', lastTerminationClassification, next)
       if (wasCurrent) session = null
       sessionsByLegToken.delete(legToken(next))
+      // A replacement connection deliberately supersedes and hangs up the old
+      // WebRTC leg. Its late terminal event belongs to the old generation and
+      // must not end (or play an end tone over) the replacement call.
+      if (!wasCurrent) return
       if (wasCurrent) microphoneInput.release()
-      if (wasCurrent) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded
+	  if (wasCurrent && !interrupted) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+	  if (interrupted) { emit('interrupted', { trace_id: traceId(next), cause: event?.cause || 'Call media ended unexpectedly' }, next); return }
       const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }, next) }
       if (next.__vitiWasActive) playEndTone('remote-ended').finally(finish)
       else finish()
@@ -386,10 +405,19 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     next.on('failed', (event) => {
       stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); stopQuality(next, 'unavailable'); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
+      lastTerminationClassification = {
+        event: 'failed', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
+        recovery: next.__vitiRecovery === true, locally_ended: next.__vitiLocallyEnded === true,
+        trace_id: traceId(next), leg_token: legToken(next), connection_id: connectionId(next),
+      }
+      diagnose('session.termination-classified', lastTerminationClassification, next)
       if (wasCurrent) session = null
       sessionsByLegToken.delete(legToken(next))
+      if (!wasCurrent) return
       if (wasCurrent) microphoneInput.release()
-      if (wasCurrent) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded
+	  if (wasCurrent && !interrupted) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
+	  if (interrupted) { emit('interrupted', { trace_id: traceId(next), cause: event?.cause || 'Call media failed unexpectedly' }, next); return }
       const finish = () => { if (!next.__vitiLocallyEnded) emit('failed', { trace_id: traceId(next), cause: event?.cause || '' }, next) }
       if (next.__vitiWasActive) playEndTone('active-call-failed').finally(finish)
       else finish()
@@ -422,20 +450,23 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       ua.on('newRTCSession', ({ session: next, request }) => { diagnose('ua.new-session', { request: request?.toString?.() }, next); bindSession(next) })
       ua.start()
     },
-    call(number, suppliedTraceID = '', suppliedLegToken = '') {
+	call(number, suppliedTraceID = '', suppliedLegToken = '', preserveState = false) {
       if (!ua || !ua.isRegistered()) throw new Error('The WebRTC phone is not registered yet')
       if (session) throw new Error('This client already has a call')
-      microphoneMute.reset()
-      telecomMuted = false
-      systemInactive = false
-      if (audioElement) audioElement.muted = false
+	  if (!preserveState) {
+		microphoneMute.reset()
+		telecomMuted = false
+		systemInactive = false
+		if (audioElement) audioElement.muted = false
+	  }
       stopIncomingRing('outgoing-call')
       pendingTraceID = suppliedTraceID || globalThis.crypto?.randomUUID?.() || `trace-${Date.now()}-${Math.random()}`
       pendingLegToken = suppliedLegToken || globalThis.crypto?.randomUUID?.() || `leg-${Date.now()}-${Math.random()}`
+	  pendingConnectionID = globalThis.crypto?.randomUUID?.() || `connection-${Date.now()}-${Math.random()}`
       const requestedLegToken = pendingLegToken
       const options = {
         mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(),
-        extraHeaders: [`X-Viti-Trace-ID: ${pendingTraceID}`, `X-Viti-Client-ID: ${clientId}`],
+		extraHeaders: [`X-Viti-Trace-ID: ${pendingTraceID}`, `X-Viti-Client-ID: ${clientId}`, `X-Viti-Connection-ID: ${pendingConnectionID}`],
       }
       if (new URLSearchParams(location.search).get('testTone') === '1') {
         const AudioContext = window.AudioContext || window.webkitAudioContext
@@ -446,11 +477,40 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       diagnose('action.call', { number, trace_id: pendingTraceID })
       const outgoing = ua.call(`sip:${number}@${ua.configuration.uri.host}`, options)
       outgoing.__vitiLegToken = outgoing.__vitiLegToken || requestedLegToken
+	  outgoing.__vitiRecovery = preserveState
       session = outgoing
       bindSession(outgoing)
       emit('calling', { to: number, trace_id: traceId(outgoing) }, outgoing)
       return legToken(outgoing)
     },
+	reconnect(suppliedTraceID, suppliedLegToken) {
+	  return this.call('*44', suppliedTraceID, suppliedLegToken, true)
+	},
+	interruptForTest() {
+	  if (new URLSearchParams(location.search).get('testDisconnect') !== '1') {
+		throw new Error('The media interruption hook is available only in test mode')
+	  }
+	  if (!session) throw new Error('There is no local call to interrupt')
+	  session.terminate()
+	  return true
+	},
+	terminationForTest() {
+	  if (new URLSearchParams(location.search).get('testDisconnect') !== '1') {
+		throw new Error('Termination diagnostics are available only in test mode')
+	  }
+	  return lastTerminationClassification
+	},
+	callContext(requestedLegToken = '') {
+	  const target = sessionFor(requestedLegToken)
+	  return { trace_id: traceId(target), leg_token: legToken(target), connection_id: connectionId(target), muted: microphoneMute.muted }
+	},
+	abandon() {
+	  microphoneInput.release()
+	  microphoneMute.reset()
+	  telecomMuted = false
+	  systemInactive = false
+	  if (audioElement) audioElement.muted = false
+	},
     answer(requestedLegToken = '') { const target = sessionFor(requestedLegToken); stopIncomingRing('answer'); diagnose('action.answer', {}, target); target.answer({ mediaConstraints: { audio: microphoneInput.constraint(), video: false }, pcConfig: peerConfig(), extraHeaders: [`X-Viti-Client-ID: ${clientId}`] }); return true },
     reject(requestedLegToken = '') {
       const target = sessionFor(requestedLegToken)
