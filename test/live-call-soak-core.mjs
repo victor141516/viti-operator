@@ -16,10 +16,7 @@ export class LiveCallSoakTracker {
     this.childIDs = new Set()
     this.ikeRenewals = 0
     this.childRenewals = 0
-    this.lastMediaRxPackets = null
-    this.lastMediaTxPackets = null
-    this.lastMediaRxProgressAt = null
-    this.lastMediaTxProgressAt = null
+    this.mediaStreams = new Map()
     this.mediaRxProgressSamples = 0
     this.mediaTxProgressSamples = 0
     this.maxMediaRxStallSeconds = 0
@@ -27,26 +24,55 @@ export class LiveCallSoakTracker {
     this.fatalReason = ''
   }
 
-  observeMediaDirection(direction, packets, at, reasons) {
+  observeMediaDirection(stream, direction, packets, at, reasons) {
     const count = Number(packets)
-    const lastCountKey = direction === 'rx' ? 'lastMediaRxPackets' : 'lastMediaTxPackets'
-    const lastProgressKey = direction === 'rx' ? 'lastMediaRxProgressAt' : 'lastMediaTxProgressAt'
+    const lastCountKey = direction === 'rx' ? 'lastRxPackets' : 'lastTxPackets'
+    const lastProgressKey = direction === 'rx' ? 'lastRxProgressAt' : 'lastTxProgressAt'
     const progressSamplesKey = direction === 'rx' ? 'mediaRxProgressSamples' : 'mediaTxProgressSamples'
     const maxStallKey = direction === 'rx' ? 'maxMediaRxStallSeconds' : 'maxMediaTxStallSeconds'
     if (!Number.isFinite(count) || count < 0) {
       reasons.push(`media_${direction}_unavailable`)
       return
     }
-    if (this[lastCountKey] === null || count !== this[lastCountKey]) {
-      if (this[lastCountKey] !== null) this[progressSamplesKey] += 1
-      this[lastCountKey] = count
-      this[lastProgressKey] = at
+    if (stream[lastCountKey] === null || count !== stream[lastCountKey]) {
+      if (stream[lastCountKey] !== null) this[progressSamplesKey] += 1
+      stream[lastCountKey] = count
+      stream[lastProgressKey] = at
       return
     }
-    const stalledSeconds = Math.max(0, (at - this[lastProgressKey]) / 1000)
+    const stalledSeconds = Math.max(0, (at - stream[lastProgressKey]) / 1000)
     this[maxStallKey] = Math.max(this[maxStallKey], stalledSeconds)
     if (stalledSeconds > this.requirements.maxMediaStallSeconds) {
       reasons.push(`media_${direction}_stalled`)
+    }
+  }
+
+  observeMediaStreams(streams, at, reasons) {
+    if (!Array.isArray(streams) || streams.length < 1) {
+      reasons.push('media_channels_absent')
+      return
+    }
+    const current = new Set()
+    for (const item of streams) {
+      const id = String(item?.id || '')
+      if (!id || current.has(id)) {
+        reasons.push('media_stream_identity_invalid')
+        continue
+      }
+      current.add(id)
+      let stream = this.mediaStreams.get(id)
+      if (!stream) {
+        stream = { lastRxPackets: null, lastTxPackets: null, lastRxProgressAt: null, lastTxProgressAt: null }
+        this.mediaStreams.set(id, stream)
+      }
+      this.observeMediaDirection(stream, 'rx', item.rx_packets, at, reasons)
+      this.observeMediaDirection(stream, 'tx', item.tx_packets, at, reasons)
+    }
+    for (const id of this.mediaStreams.keys()) {
+      if (!current.has(id)) {
+        reasons.push('media_stream_removed')
+        this.mediaStreams.delete(id)
+      }
     }
   }
 
@@ -89,13 +115,8 @@ export class LiveCallSoakTracker {
     if (!sample.ims) reasons.push('ims_unregistered')
     if (!(sample.ike_ids || []).length) reasons.push('ike_sa_absent')
     if (!(sample.child_ids || []).length) reasons.push('child_sa_absent')
-    if (!Number.isFinite(Number(sample.media_channels)) || Number(sample.media_channels) < 1) {
-      reasons.push('media_channels_absent')
-    } else {
-      this.observeMediaDirection('rx', sample.media_rx_packets, at, reasons)
-      this.observeMediaDirection('tx', sample.media_tx_packets, at, reasons)
-    }
-    if (reasons.length) this.unhealthySamples.push({ timestamp: sample.timestamp, reasons })
+    this.observeMediaStreams(sample.media_streams, at, reasons)
+    if (reasons.length) this.unhealthySamples.push({ timestamp: sample.timestamp, reasons: [...new Set(reasons)] })
 
     for (const id of sample.ike_ids || []) {
       const value = String(id)

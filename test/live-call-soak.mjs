@@ -41,7 +41,7 @@ if (existsSync(outputPath) || existsSync(`${outputPath}.summary.json`)) {
 mkdirSync(path.dirname(outputPath), { recursive: true, mode: 0o700 })
 
 const snapshotProgram = String.raw`
-import json, re, subprocess
+import hashlib, json, re, subprocess
 
 def run(command):
     try:
@@ -67,21 +67,29 @@ for event in sas.split("list-sa event ")[1:]:
         child_ids.extend(ids[1:])
 active = re.search(r"(?m)^([0-9]+) active channels?$", channels)
 values = lambda name: [int(value) for value in re.findall(name + r"=([0-9]+)", sas)]
-media_channels, media_rx_packets, media_tx_packets = 0, 0, 0
+media_streams, media_rx_packets, media_tx_packets = [], 0, 0
 for line in channelstats.splitlines():
     fields = line.split()
     if len(fields) < 12:
         continue
     try:
         stats = fields[-9:]
-        media_rx_packets += int(stats[0])
-        media_tx_packets += int(stats[4])
+        channel_id = fields[-12]
+        rx_packets = int(stats[0])
+        tx_packets = int(stats[4])
         float(stats[3])
         float(stats[7])
         float(stats[8])
     except (ValueError, IndexError):
         continue
-    media_channels += 1
+    media_rx_packets += rx_packets
+    media_tx_packets += tx_packets
+    media_streams.append({
+        "id": hashlib.sha256(channel_id.encode()).hexdigest()[:16],
+        "rx_packets": rx_packets,
+        "tx_packets": tx_packets,
+    })
+media_streams.sort(key=lambda stream: stream["id"])
 print(json.dumps({
     "snapshot_ok": bool(channels and registrations and channelstats),
     "charon": present(["pgrep", "-x", "charon"]),
@@ -93,9 +101,10 @@ print(json.dumps({
     "child_ids": child_ids,
     "bytes_in": sum(values("bytes-in")),
     "bytes_out": sum(values("bytes-out")),
-    "media_channels": media_channels,
+    "media_channels": len(media_streams),
     "media_rx_packets": media_rx_packets,
     "media_tx_packets": media_tx_packets,
+    "media_streams": media_streams,
 }, separators=(",", ":")))
 `
 

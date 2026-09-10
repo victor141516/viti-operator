@@ -16,6 +16,7 @@ const sample = (seconds, overrides = {}) => ({
   media_channels: 2,
   media_rx_packets: seconds * 50,
   media_tx_packets: seconds * 50,
+  media_streams: [{ id: 'client', rx_packets: seconds * 50, tx_packets: seconds * 50 }],
   ...overrides,
 })
 
@@ -116,9 +117,10 @@ test('rejects a call whose RTP packet counters stop advancing', () => {
     maxMediaStallSeconds: 5,
   })
   tracker.observe(sample(0, { active_channels: 0 }))
-  tracker.observe(sample(1, { media_rx_packets: 100, media_tx_packets: 200 }))
-  tracker.observe(sample(4, { media_rx_packets: 100, media_tx_packets: 200 }))
-  tracker.observe(sample(7, { media_rx_packets: 100, media_tx_packets: 200 }))
+  const frozen = { media_rx_packets: 100, media_tx_packets: 200, media_streams: [{ id: 'client', rx_packets: 100, tx_packets: 200 }] }
+  tracker.observe(sample(1, frozen))
+  tracker.observe(sample(4, frozen))
+  tracker.observe(sample(7, frozen))
   tracker.observe(sample(8, { active_channels: 0 }))
   tracker.observe(sample(9, { active_channels: 0 }))
 
@@ -131,10 +133,46 @@ test('rejects a call whose RTP packet counters stop advancing', () => {
 
 test('rejects an active call without observable PJSIP media channels', () => {
   const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
-  tracker.observe(sample(1, { media_channels: 0 }))
+  tracker.observe(sample(1, { media_channels: 0, media_streams: [] }))
   tracker.observe(sample(2, { active_channels: 0 }))
   tracker.observe(sample(3, { active_channels: 0 }))
 
   assert.equal(tracker.summary().accepted, false)
   assert.deepEqual(tracker.unhealthySamples[0].reasons, ['media_channels_absent'])
+})
+
+test('does not let a healthy stream hide another stream that stalls', () => {
+  const tracker = new LiveCallSoakTracker({
+    minCallSeconds: 5,
+    minIkeRenewals: 0,
+    minChildRenewals: 0,
+    postCallSeconds: 0,
+    maxMediaStallSeconds: 5,
+  })
+  const streams = healthy => ([
+    { id: 'stalled', rx_packets: 10, tx_packets: 20 },
+    { id: 'healthy', rx_packets: healthy, tx_packets: healthy },
+  ])
+  tracker.observe(sample(1, { media_streams: streams(100) }))
+  tracker.observe(sample(4, { media_streams: streams(200), media_rx_packets: 210, media_tx_packets: 220 }))
+  tracker.observe(sample(7, { media_streams: streams(300), media_rx_packets: 310, media_tx_packets: 320 }))
+  tracker.observe(sample(8, { active_channels: 0 }))
+  tracker.observe(sample(9, { active_channels: 0 }))
+
+  assert.equal(tracker.summary().accepted, false)
+  assert.deepEqual(tracker.unhealthySamples.at(-1).reasons, ['media_rx_stalled', 'media_tx_stalled'])
+})
+
+test('rejects a media stream disappearing while the call remains active', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1, { media_streams: [
+    { id: 'carrier', rx_packets: 10, tx_packets: 10 },
+    { id: 'client', rx_packets: 10, tx_packets: 10 },
+  ] }))
+  tracker.observe(sample(2, { media_streams: [{ id: 'carrier', rx_packets: 20, tx_packets: 20 }] }))
+  tracker.observe(sample(3, { active_channels: 0 }))
+  tracker.observe(sample(4, { active_channels: 0 }))
+
+  assert.equal(tracker.summary().accepted, false)
+  assert.deepEqual(tracker.unhealthySamples[0].reasons, ['media_stream_removed'])
 })
