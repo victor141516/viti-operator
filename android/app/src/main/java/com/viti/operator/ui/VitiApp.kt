@@ -219,7 +219,7 @@ fun VitiApp(
                         }
                     },
                     actions = {
-                        ConnectionPill(ui.status.ready)
+                        ConnectionPill(ui.status)
                         Spacer(Modifier.width(8.dp))
                     },
                 )
@@ -281,17 +281,41 @@ fun VitiApp(
 }
 
 @Composable
-private fun ConnectionPill(ready: Boolean) {
-    val background = if (ready) MaterialTheme.colorScheme.tertiaryContainer else MaterialTheme.colorScheme.errorContainer
-    val foreground = if (ready) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onErrorContainer
+private fun ConnectionPill(status: RuntimeStatus) {
+    val authenticationUnavailable = status.imsReady && !status.simReady
+    val background = when {
+        status.ready -> MaterialTheme.colorScheme.tertiaryContainer
+        authenticationUnavailable -> MaterialTheme.colorScheme.secondaryContainer
+        else -> MaterialTheme.colorScheme.errorContainer
+    }
+    val foreground = when {
+        status.ready -> MaterialTheme.colorScheme.onTertiaryContainer
+        authenticationUnavailable -> MaterialTheme.colorScheme.onSecondaryContainer
+        else -> MaterialTheme.colorScheme.onErrorContainer
+    }
     Surface(shape = CircleShape, color = background, contentColor = foreground) {
         Row(
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(if (ready) Icons.Default.CheckCircle else Icons.Default.CloudOff, null, Modifier.size(16.dp))
+            Icon(
+                when {
+                    status.ready -> Icons.Default.CheckCircle
+                    authenticationUnavailable -> Icons.Default.WarningAmber
+                    else -> Icons.Default.CloudOff
+                },
+                contentDescription = null,
+                modifier = Modifier.size(16.dp),
+            )
             Spacer(Modifier.width(5.dp))
-            Text(if (ready) "IMS" else "No network", style = MaterialTheme.typography.labelMedium)
+            Text(
+                when {
+                    status.ready -> "IMS"
+                    authenticationUnavailable -> "IMS · no SIM auth"
+                    else -> "No network"
+                },
+                style = MaterialTheme.typography.labelMedium,
+            )
         }
     }
 }
@@ -1983,7 +2007,7 @@ private fun TopologyInsight(topology: ConnectionTopology) {
     when {
         topology.sim.state == "failed" -> {
             state = "failed"
-            message = "The server and clients remain available, but the line will not work until the SIM or modem recovers."
+            message = "SIM authentication is unavailable. An established carrier session may continue, but a fresh authentication challenge or new operation cannot."
         }
         topology.epdg.state == "failed" -> {
             state = "failed"

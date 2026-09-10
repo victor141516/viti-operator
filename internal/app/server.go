@@ -244,13 +244,15 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var request struct {
-		EventID      string   `json:"event_id,omitempty"`
-		Instance     string   `json:"instance"`
-		Event        string   `json:"event"`
-		CallID       string   `json:"call_id,omitempty"`
-		TraceID      string   `json:"trace_id,omitempty"`
-		Args         []string `json:"args"`
-		RecordedAtNS int64    `json:"recorded_at_ns,omitempty"`
+		EventID          string   `json:"event_id,omitempty"`
+		Instance         string   `json:"instance"`
+		Event            string   `json:"event"`
+		CallID           string   `json:"call_id,omitempty"`
+		TraceID          string   `json:"trace_id,omitempty"`
+		Args             []string `json:"args"`
+		RecordedAtNS     int64    `json:"recorded_at_ns,omitempty"`
+		TunnelGeneration string   `json:"tunnel_generation,omitempty"`
+		TunnelSequence   uint64   `json:"tunnel_sequence,omitempty"`
 	}
 	if err := readJSON(r, &request, 16<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -297,7 +299,24 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		a.ingestEngineSMS(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
 	case "tunnel_up", "tunnel_down":
-		a.setEngineTunnelState(request.Event == "tunnel_up", request.Args, request.RecordedAtNS)
+		generation := strings.TrimSpace(request.TunnelGeneration)
+		sequence := request.TunnelSequence
+		if generation == "" {
+			generation = "legacy"
+			if request.RecordedAtNS > 0 {
+				sequence = uint64(request.RecordedAtNS)
+			} else {
+				sequence = uint64(now.UnixNano())
+			}
+		}
+		if !topologyIdentifierPattern.MatchString(generation) || sequence == 0 || request.Instance == "" {
+			writeError(w, http.StatusBadRequest, "tunnel events require instance, generation, and sequence")
+			return
+		}
+		if err := a.setEngineTunnelState(request.Instance, generation, sequence, request.Event == "tunnel_up", request.Args, request.RecordedAtNS); err != nil {
+			writeError(w, http.StatusInternalServerError, "could not persist tunnel transition")
+			return
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	case "call_in", "call_out":

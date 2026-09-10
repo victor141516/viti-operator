@@ -144,11 +144,29 @@ func TestRuntimeStatusTracksOpenStickAndTunnelTransitions(t *testing.T) {
 	assertRuntimeReady(t, server.URL, false)
 	readiness.ready = true
 	assertRuntimeReady(t, server.URL, true)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, time.Now().UTC(), http.StatusNoContent)
 	started := time.Now().UTC()
 	if err := app.store.SaveCall(Call{ID: "active-before-disconnect", Direction: DirectionOutgoing, Peer: "+15555550101", State: "active", StartedAt: started, UpdatedAt: started}); err != nil {
 		t.Fatal(err)
 	}
-	postEngineEvent(t, server.URL, "test-token", map[string]any{"event": "tunnel_down", "args": []string{"test disconnect"}}, http.StatusNoContent)
+
+	readiness.ready = false
+	status := runtimeStatusForTest(t, server.URL)
+	if status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+		t.Fatalf("SIM loss must preserve independent session evidence: %#v", status)
+	}
+	stillActive, _ := app.store.GetCall("active-before-disconnect")
+	if stillActive.State != "active" || stillActive.EndedAt != nil {
+		t.Fatalf("SIM loss proactively ended the call: %#v", stillActive)
+	}
+	readiness.ready = true
+	assertRuntimeReady(t, server.URL, true)
+	stillActive, _ = app.store.GetCall("active-before-disconnect")
+	if stillActive.State != "active" || stillActive.EndedAt != nil {
+		t.Fatalf("SIM reconnection disrupted the call: %#v", stillActive)
+	}
+
+	postTunnelEvent(t, server.URL, "process-one", 2, false, time.Now().UTC(), http.StatusNoContent)
 	assertRuntimeReady(t, server.URL, false)
 	interrupted, ok := app.store.GetCall("active-before-disconnect")
 	if !ok || interrupted.State != "interrupted" || interrupted.EndedAt == nil {
@@ -163,11 +181,98 @@ func TestRuntimeStatusTracksOpenStickAndTunnelTransitions(t *testing.T) {
 	if response.StatusCode != http.StatusServiceUnavailable || len(app.store.Messages()) != 0 {
 		t.Fatalf("disconnected send status=%d messages=%d, want 503 and no queued message", response.StatusCode, len(app.store.Messages()))
 	}
-	postEngineEvent(t, server.URL, "test-token", map[string]any{"event": "tunnel_up", "args": []string{"test reconnect"}}, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-one", 3, true, time.Now().UTC(), http.StatusNoContent)
 	assertRuntimeReady(t, server.URL, true)
 }
 
+func TestTunnelTransitionsAreOrderedIdempotentAndDurableAcrossRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	newApp := func() *App {
+		app, err := New(Config{
+			DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+			SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+		}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return app
+	}
+	app := newApp()
+	server := httptest.NewServer(app.Handler())
+	now := time.Now().UTC()
+	postTunnelEvent(t, server.URL, "process-one", 1, true, now, http.StatusNoContent)
+	if err := app.store.SaveCall(Call{ID: "call-one", Direction: DirectionOutgoing, Peer: "+15555550101", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(2*time.Second), http.StatusNoContent)
+	first, _ := app.store.GetCall("call-one")
+	if first.EndedAt == nil {
+		t.Fatal("accepted up-to-down transition did not interrupt the open call")
+	}
+	if err := app.store.SaveCall(Call{ID: "call-two", Direction: DirectionOutgoing, Peer: "+15555550102", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(2*time.Second), http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, now, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-two", 1, true, now.Add(3*time.Second), http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-one", 3, false, now.Add(4*time.Second), http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "never-established", 1, false, now.Add(5*time.Second), http.StatusNoContent)
+	second, _ := app.store.GetCall("call-two")
+	if second.EndedAt != nil {
+		t.Fatalf("duplicate/delayed/unowned transition interrupted a recovered call: %#v", second)
+	}
+	server.Close()
+
+	restarted := newApp()
+	restartedServer := httptest.NewServer(restarted.Handler())
+	defer restartedServer.Close()
+	postTunnelEvent(t, restartedServer.URL, "process-one", 4, false, now.Add(5*time.Second), http.StatusNoContent)
+	second, _ = restarted.store.GetCall("call-two")
+	if second.EndedAt != nil {
+		t.Fatalf("retired transition was revived after manager restart: %#v", second)
+	}
+}
+
+func TestTunnelTransitionPersistenceFailureRollsBackCallAndCursor(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "state.json")
+	app, err := New(Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	now := time.Now().UTC()
+	postTunnelEvent(t, server.URL, "process-one", 1, true, now, http.StatusNoContent)
+	if err := app.store.SaveCall(Call{ID: "active-call", Direction: DirectionOutgoing, Peer: "+15555550101", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	app.store.path = directory // Renaming a regular file over this directory must fail.
+	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(time.Second), http.StatusInternalServerError)
+	call, _ := app.store.GetCall("active-call")
+	if call.EndedAt != nil || call.State != "active" {
+		t.Fatalf("failed persistence leaked a partial call transition: %#v", call)
+	}
+	app.store.path = path
+	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(time.Second), http.StatusNoContent)
+	call, _ = app.store.GetCall("active-call")
+	if call.EndedAt == nil || call.State != "interrupted" {
+		t.Fatalf("rolled-back cursor did not accept the durable retry: %#v", call)
+	}
+}
+
 func assertRuntimeReady(t *testing.T, baseURL string, want bool) {
+	t.Helper()
+	status := runtimeStatusForTest(t, baseURL)
+	if status.Ready != want {
+		t.Fatalf("ready=%v, want %v: %#v", status.Ready, want, status)
+	}
+}
+
+func runtimeStatusForTest(t *testing.T, baseURL string) RuntimeStatus {
 	t.Helper()
 	response, err := http.Get(baseURL + "/api/v1/status")
 	if err != nil {
@@ -181,9 +286,19 @@ func assertRuntimeReady(t *testing.T, baseURL string, want bool) {
 	if err := json.NewDecoder(response.Body).Decode(&status); err != nil {
 		t.Fatal(err)
 	}
-	if status.Ready != want {
-		t.Fatalf("ready=%v, want %v: %#v", status.Ready, want, status)
+	return status
+}
+
+func postTunnelEvent(t *testing.T, baseURL, generation string, sequence uint64, ready bool, at time.Time, wantStatus int) {
+	t.Helper()
+	event := "tunnel_down"
+	if ready {
+		event = "tunnel_up"
 	}
+	postEngineEvent(t, baseURL, "test-token", map[string]any{
+		"instance": "engine-1", "event": event, "args": []string{"test transition"},
+		"recorded_at_ns": at.UnixNano(), "tunnel_generation": generation, "tunnel_sequence": sequence,
+	}, wantStatus)
 }
 
 func TestEngineCallEventsCreateAndFinalizeHistory(t *testing.T) {

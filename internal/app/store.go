@@ -13,15 +13,16 @@ import (
 )
 
 type diskState struct {
-	Messages               []Message             `json:"messages"`
-	Calls                  []Call                `json:"calls"`
-	Clients                []KnownClient         `json:"clients,omitempty"`
-	SIMAuthAssignment      SIMAuthAssignment     `json:"sim_auth_assignment,omitempty"`
-	IMSRegistrationEnabled *bool                 `json:"ims_registration_enabled,omitempty"`
-	CallRecordingEnabled   *bool                 `json:"call_recording_enabled,omitempty"`
-	Contacts               []ContactSourceRecord `json:"contacts,omitempty"`
-	ContactSourceRevisions map[string]int64      `json:"contact_source_revisions,omitempty"`
-	ContactsVersion        uint64                `json:"contacts_version,omitempty"`
+	Messages               []Message                         `json:"messages"`
+	Calls                  []Call                            `json:"calls"`
+	Clients                []KnownClient                     `json:"clients,omitempty"`
+	SIMAuthAssignment      SIMAuthAssignment                 `json:"sim_auth_assignment,omitempty"`
+	IMSRegistrationEnabled *bool                             `json:"ims_registration_enabled,omitempty"`
+	CallRecordingEnabled   *bool                             `json:"call_recording_enabled,omitempty"`
+	Contacts               []ContactSourceRecord             `json:"contacts,omitempty"`
+	ContactSourceRevisions map[string]int64                  `json:"contact_source_revisions,omitempty"`
+	ContactsVersion        uint64                            `json:"contacts_version,omitempty"`
+	EngineTunnels          map[string]EngineTunnelCheckpoint `json:"engine_tunnels,omitempty"`
 }
 
 type Store struct {
@@ -37,6 +38,7 @@ type Store struct {
 	contactSourceRevisions map[string]int64
 	contactView            []Contact
 	contactsVersion        uint64
+	engineTunnels          map[string]EngineTunnelCheckpoint
 	diag                   *DiagnosticRecorder
 }
 
@@ -47,7 +49,7 @@ func (s *Store) SetDiagnostics(diagnostics *DiagnosticRecorder) {
 }
 
 func OpenStore(path string) (*Store, error) {
-	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, contacts: map[string]ContactSourceRecord{}, contactSourceRevisions: map[string]int64{}, imsRegistrationEnabled: true}
+	s := &Store{path: path, messages: map[string]Message{}, calls: map[string]Call{}, clients: map[string]KnownClient{}, contacts: map[string]ContactSourceRecord{}, contactSourceRevisions: map[string]int64{}, engineTunnels: map[string]EngineTunnelCheckpoint{}, imsRegistrationEnabled: true}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -79,6 +81,10 @@ func OpenStore(path string) (*Store, error) {
 	}
 	s.contactView = mergedContacts(contactSourcesFromMap(s.contacts), "")
 	s.contactsVersion = state.ContactsVersion
+	for instance, checkpoint := range state.EngineTunnels {
+		checkpoint.RetiredGenerations = append([]string(nil), checkpoint.RetiredGenerations...)
+		s.engineTunnels[instance] = checkpoint
+	}
 	s.simAuthAssignment = state.SIMAuthAssignment
 	if state.IMSRegistrationEnabled != nil {
 		s.imsRegistrationEnabled = *state.IMSRegistrationEnabled
@@ -367,6 +373,48 @@ func (s *Store) InterruptOpenCalls(at time.Time) ([]Call, error) {
 	return changed, nil
 }
 
+// ApplyEngineTunnelEvent atomically advances the durable event cursor and
+// interrupts open call records only for an accepted up-to-down transition.
+// Persisting both effects together makes a retried event idempotent even when
+// the manager loses its HTTP response or restarts.
+func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uint64, ready bool, at time.Time) (EngineTunnelCheckpoint, []Call, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	previous := s.engineTunnels[instance]
+	next, accepted := advanceEngineTunnelCheckpoint(previous, instance, generation, sequence, ready, at)
+	if !accepted {
+		return previous, nil, false, nil
+	}
+	previousCalls := make(map[string]Call)
+	changedCalls := make([]Call, 0)
+	if previous.Ready && !next.Ready {
+		for id, call := range s.calls {
+			if call.EndedAt != nil {
+				continue
+			}
+			previousCalls[id] = call
+			call.State = "interrupted"
+			call.UpdatedAt = at
+			call.EndedAt = &at
+			s.calls[id] = call
+			changedCalls = append(changedCalls, call)
+		}
+	}
+	s.engineTunnels[instance] = next
+	if err := s.flushLocked(); err != nil {
+		if previous.Generation == "" {
+			delete(s.engineTunnels, instance)
+		} else {
+			s.engineTunnels[instance] = previous
+		}
+		for id, call := range previousCalls {
+			s.calls[id] = call
+		}
+		return previous, nil, false, err
+	}
+	return next, changedCalls, true, nil
+}
+
 func (s *Store) GetCall(id string) (Call, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -524,6 +572,13 @@ func (s *Store) flushLocked() error {
 	}
 	state.ContactSourceRevisions = s.contactSourceRevisions
 	state.ContactsVersion = s.contactsVersion
+	if len(s.engineTunnels) > 0 {
+		state.EngineTunnels = make(map[string]EngineTunnelCheckpoint, len(s.engineTunnels))
+		for instance, checkpoint := range s.engineTunnels {
+			checkpoint.RetiredGenerations = append([]string(nil), checkpoint.RetiredGenerations...)
+			state.EngineTunnels[instance] = checkpoint
+		}
+	}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return err

@@ -16,6 +16,8 @@ import hashlib
 import ipaddress
 import base64
 import re
+import itertools
+import uuid
 
 # Python 3.14 changed POSIX multiprocessing's default to forkserver.  The ESP
 # workers are bound methods of the live IKE object, which contains cryptography
@@ -112,6 +114,8 @@ SWU_IFACE = os.environ.get("SWU_IFACE", "ipsec0")          # tun device name (pj
 SWU_NOTIFY = os.environ.get("SWU_NOTIFY", "/usr/local/bin/notify.py")
 SWU_ASSIGN_IPV6_GLOBAL = os.environ.get("SWU_ASSIGN_IPV6_GLOBAL", "1") not in ("0", "", "no")
 SWU_WRITE_RESOLV = os.environ.get("SWU_WRITE_RESOLV", "0") not in ("0", "", "no")
+SWU_TUNNEL_GENERATION = uuid.uuid4().hex
+SWU_TUNNEL_SEQUENCE = itertools.count(1)
 
 # --- Data-plane MTU / fragmentation handling -------------------------------------------------
 # The userspace ESP dataplane reads inner IP packets off the tun (ipsec0), wraps each in
@@ -178,7 +182,11 @@ def swu_notify(event, arg=None):
         cmd = ["python3", SWU_NOTIFY, event]
         if arg:
             cmd.append(arg)
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env = os.environ.copy()
+        if event in ("tunnel_up", "tunnel_down"):
+            env["VITI_TUNNEL_GENERATION"] = SWU_TUNNEL_GENERATION
+            env["VITI_TUNNEL_SEQUENCE"] = str(next(SWU_TUNNEL_SEQUENCE))
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     except Exception:
         pass
 
