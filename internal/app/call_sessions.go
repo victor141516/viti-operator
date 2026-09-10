@@ -125,7 +125,19 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		if explicitlyDeparted || !at.After(departure.at) {
 			return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
 		}
-		delete(session.departed, logicalKey)
+		if len(departure.abortedConnectionIDs) == 0 {
+			delete(session.departed, logicalKey)
+		} else {
+			// A newer generation supersedes explicit-departure fencing, but an
+			// aborted predecessor can still be reachable from the rollback chain.
+			// Retain those tombstones until participant_left proves a generation
+			// entered ConfBridge or the call ends.
+			departure.connectionIDs = make(map[string]struct{}, len(departure.abortedConnectionIDs))
+			for connectionID := range departure.abortedConnectionIDs {
+				departure.connectionIDs[connectionID] = struct{}{}
+			}
+			session.departed[logicalKey] = departure
+		}
 	}
 	previous, found := session.participants[logicalKey]
 	if found && !at.After(previous.updatedAt) {
@@ -183,13 +195,21 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 	logicalKey := logicalParticipantKey(clientID, participantID)
 	departure := session.departed[logicalKey]
 	removed := false
-	if participant, found := session.participants[logicalKey]; found && participant.connectionID == connectionID {
-		if participant.admissionChannel != channel {
+	participant, found := session.participants[logicalKey]
+	if found {
+		generation := &participant
+		for generation != nil && generation.connectionID != connectionID {
+			generation = generation.predecessor
+		}
+		if generation != nil && generation.admissionChannel != channel {
 			// The manager rejected a second channel that tried to reuse an
-			// already admitted connection generation. Its abort must not revoke
-			// the valid channel or fence the shared connection identifier.
+			// already admitted connection generation. Even after that valid
+			// generation becomes a predecessor, the rejected channel's abort must
+			// not revoke it or fence the shared connection identifier.
 			return false
 		}
+	}
+	if found && participant.connectionID == connectionID {
 		if !at.Before(participant.updatedAt) {
 			// An abort for an older ambiguous admission may already have arrived
 			// while a newer generation was current. Skip every such tombstoned
@@ -277,6 +297,7 @@ func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, co
 	participant.predecessor = nil
 	participant.updatedAt = at
 	session.participants[logicalKey] = participant
+	delete(session.departed, logicalKey)
 }
 
 // claim replaces the provisional Asterisk participant identity used for an

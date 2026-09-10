@@ -253,6 +253,31 @@ func TestSuccessiveAmbiguousReconnectsRestoreLastConfirmedGeneration(t *testing.
 	}
 }
 
+func TestNewAdmissionDoesNotForgetAbortedRollbackPredecessors(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-b", "phone-b", "leg-confirmed-a", "PJSIP/a", now)
+	r.left(call, "phone-b", "phone-b", "leg-confirmed-a", now.Add(time.Second))
+	r.joined(call, "phone-b", "phone-b", "leg-ambiguous-b", "PJSIP/b", now.Add(2*time.Second))
+	r.joined(call, "phone-b", "phone-b", "leg-ambiguous-c", "PJSIP/c", now.Add(3*time.Second))
+	r.abortJoin(call, "phone-b", "phone-b", "leg-ambiguous-b", "PJSIP/b", now.Add(4*time.Second))
+	r.joined(call, "phone-b", "phone-b", "leg-ambiguous-d", "PJSIP/d", now.Add(5*time.Second))
+	r.abortJoin(call, "phone-b", "phone-b", "leg-ambiguous-c", "PJSIP/c", now.Add(6*time.Second))
+	r.abortJoin(call, "phone-b", "phone-b", "leg-ambiguous-d", "PJSIP/d", now.Add(7*time.Second))
+
+	operation, err := r.beginLeaveWithPrevious(
+		call,
+		"phone-b",
+		"leg-pending-e",
+		"leg-confirmed-a",
+		"leave-after-interleaved-aborts",
+	)
+	if err != nil || operation.matchedConnectionID != "leg-confirmed-a" || !operation.endCarrier {
+		t.Fatalf("interleaved admission forgot the last confirmed generation: operation=%+v err=%v", operation, err)
+	}
+}
+
 func TestAbortBeforeExplicitHangupStillHonorsLastParticipantIntent(t *testing.T) {
 	r := newCallSessionRegistry()
 	call := sessionTestCall()
@@ -280,6 +305,25 @@ func TestRejectedConnectionCollisionAbortCannotRemoveValidChannel(t *testing.T) 
 	operation, err := r.beginLeave(call, "phone-a", "leg-shared", "leave-valid")
 	if err != nil || operation.channel != "PJSIP/valid" {
 		t.Fatalf("collision abort revoked valid channel: operation=%+v err=%v", operation, err)
+	}
+}
+
+func TestDelayedCollisionAbortCannotTombstoneValidPredecessor(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-valid", "PJSIP/valid", now)
+	collision := r.joined(call, "phone-a", "phone-a", "leg-valid", "PJSIP/rejected", now.Add(time.Second))
+	if collision.admitted {
+		t.Fatalf("connection collision was admitted: %+v", collision)
+	}
+	r.joined(call, "phone-a", "phone-a", "leg-ambiguous", "PJSIP/ambiguous", now.Add(2*time.Second))
+	r.abortJoin(call, "phone-a", "phone-a", "leg-valid", "PJSIP/rejected", now.Add(3*time.Second))
+	r.abortJoin(call, "phone-a", "phone-a", "leg-ambiguous", "PJSIP/ambiguous", now.Add(4*time.Second))
+
+	operation, err := r.beginLeave(call, "phone-a", "leg-valid", "leave-valid-predecessor")
+	if err != nil || operation.matchedConnectionID != "leg-valid" || !operation.endCarrier {
+		t.Fatalf("collision abort revoked the valid predecessor: operation=%+v err=%v", operation, err)
 	}
 }
 
