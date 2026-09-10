@@ -25,6 +25,11 @@ STATE = {
 
 
 def decode(value):
+    # Match the production manager's base64.RawStdEncoding contract.  This is
+    # intentionally strict so a padded strongSwan request cannot pass the lab
+    # while being rejected by the real manager.
+    if "=" in value:
+        raise ValueError("AKA fields must use unpadded Base64")
     return base64.b64decode(value + "=" * ((-len(value)) % 4), validate=True)
 
 

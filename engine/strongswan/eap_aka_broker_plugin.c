@@ -142,6 +142,14 @@ static bool decode_field(json_object *object, const char *name, uint8_t *out,
 	return valid;
 }
 
+static void strip_base64_padding(chunk_t *encoded)
+{
+	while (encoded->len && encoded->ptr[encoded->len - 1] == '=')
+	{
+		encoded->len--;
+	}
+}
+
 static void cache_auts(private_eap_aka_broker_t *this,
 					   const uint8_t rand[AKA_RAND_LEN],
 					   const uint8_t auts[AKA_AUTS_LEN])
@@ -178,6 +186,11 @@ static status_t broker_authenticate(private_eap_aka_broker_t *this,
 
 	rand64 = chunk_to_base64(chunk_create(rand, AKA_RAND_LEN), NULL);
 	autn64 = chunk_to_base64(chunk_create(autn, AKA_AUTN_LEN), NULL);
+	/* The manager API deliberately uses RFC 4648 raw/unpadded Base64.  The
+	 * strongSwan helper emits canonical padding, which Go's RawStdEncoding
+	 * rejects.  Keep this wire contract identical to the Python backend. */
+	strip_base64_padding(&rand64);
+	strip_base64_padding(&autn64);
 	request = json_object_new_object();
 	if (!rand64.ptr || !autn64.ptr || !request)
 	{

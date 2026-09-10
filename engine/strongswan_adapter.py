@@ -27,6 +27,43 @@ from tunnel_contract import normalize_control_action, status_payload
 BACKEND = "strongswan"
 CONNECTION = "viti-swu"
 CHILD = "ims"
+BACKOFF_NOTIFY = "N((41041))"
+
+
+class ViciCommandError(RuntimeError):
+    def __init__(self, method, cause, records):
+        super().__init__(f"VICI {method} failed: {cause}")
+        self.method = method
+        self.records = tuple(records)
+
+
+def record_text(value):
+    """Flatten VICI control records without depending on their exact schema."""
+    if isinstance(value, dict):
+        return " ".join(record_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return " ".join(record_text(item) for item in value)
+    return text(value)
+
+
+def classify_failure(error, env):
+    """Translate carrier failures visible in VICI into the stable contract."""
+    evidence = str(error)
+    if isinstance(error, ViciCommandError):
+        evidence += " " + " ".join(record_text(item) for item in error.records)
+    if BACKOFF_NOTIFY in evidence:
+        seconds = int(positive_float(
+            env, "SWU_BACKOFF_41041_SECONDS", "600"
+        ))
+        return {
+            "reason_code": "AUTHENTICATION_FAILED",
+            "reason_policy": "backoff",
+            "backoff": seconds,
+        }
+    return {
+        "reason_code": "strongswan_failure",
+        "reason_policy": "transient",
+    }
 
 
 def required(env, name):
@@ -221,11 +258,11 @@ class RuntimeContract:
             self.event("tunnel_up", pcscf or None)
             self.up = True
 
-    def disconnected(self, reason_code="backend_stopped", reason_policy="transient"):
+    def disconnected(self, reason_code="backend_stopped", reason_policy="transient", **extra):
         if self.down:
             return
         self.write_status(
-            "DOWN", reason_code=reason_code, reason_policy=reason_policy
+            "DOWN", reason_code=reason_code, reason_policy=reason_policy, **extra
         )
         if self.started:
             self.event("tunnel_down", reason_code)
@@ -275,8 +312,16 @@ class StrongSwanAdapter:
         session = self.session()
         try:
             result = getattr(session, method)(payload) if payload is not None else getattr(session, method)()
-            if hasattr(result, "__iter__") and not isinstance(result, dict):
-                return list(result)
+            if hasattr(result, "__iter__") and not isinstance(
+                result, (dict, str, bytes)
+            ):
+                records = []
+                try:
+                    for record in result:
+                        records.append(record)
+                except Exception as error:
+                    raise ViciCommandError(method, error, records) from error
+                return records
             return result
         finally:
             self.close_session(session)
@@ -451,6 +496,10 @@ class StrongSwanAdapter:
 
     def run(self):
         reason = "backend_stopped"
+        failure = {
+            "reason_code": reason,
+            "reason_policy": "transient",
+        }
         return_code = 0
         previous_handlers = {}
 
@@ -474,15 +523,18 @@ class StrongSwanAdapter:
             self.monitor()
             if self.signal_received is not None:
                 reason = "signal"
+            failure = {"reason_code": reason, "reason_policy": "transient"}
         except KeyboardInterrupt:
             reason = "signal"
+            failure = {"reason_code": reason, "reason_policy": "transient"}
         except Exception as error:
-            reason = "strongswan_failure"
+            failure = classify_failure(error, self.env)
+            reason = failure["reason_code"]
             return_code = 1
             self.log(f"backend failed: {error}")
         finally:
             self.terminate()
-            self.runtime.disconnected(reason)
+            self.runtime.disconnected(**failure)
             if self.control:
                 self.control.close()
             for signum, handler in previous_handlers.items():

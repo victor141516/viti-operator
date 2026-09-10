@@ -23,6 +23,57 @@ def environment(**extra):
 
 
 class StrongSwanAdapterTest(unittest.TestCase):
+    def test_vici_failure_preserves_partial_control_records(self):
+        class Session:
+            class Transport:
+                @staticmethod
+                def close():
+                    return None
+
+            transport = Transport()
+
+            @staticmethod
+            def initiate(_payload):
+                def records():
+                    yield {"msg": b"parsed IKE_AUTH response 1 [ N(AUTH_FAILED) N((41041)) ]"}
+                    raise RuntimeError("establishing CHILD_SA failed")
+                return records()
+
+        adapter = strongswan_adapter.StrongSwanAdapter(environment())
+        adapter.session = lambda: Session()
+        with self.assertRaises(strongswan_adapter.ViciCommandError) as raised:
+            adapter.request("initiate", {"child": "ims"})
+        self.assertEqual(len(raised.exception.records), 1)
+
+    def test_private_carrier_backoff_is_normalized(self):
+        error = strongswan_adapter.ViciCommandError(
+            "initiate",
+            RuntimeError("establishing CHILD_SA failed"),
+            [{"msg": b"parsed IKE_AUTH response 1 [ N(AUTH_FAILED) N((41041)) ]"}],
+        )
+        self.assertEqual(strongswan_adapter.classify_failure(error, environment()), {
+            "reason_code": "AUTHENTICATION_FAILED",
+            "reason_policy": "backoff",
+            "backoff": 600,
+        })
+
+    def test_runtime_persists_backoff_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = strongswan_adapter.RuntimeContract({
+                "VOWIFI_RUNDIR": directory,
+                "VITI_EVENT_OUTBOX_DIR": directory + "/event-outbox",
+            })
+            runtime.start()
+            runtime.disconnected(
+                "AUTHENTICATION_FAILED", "backoff", backoff=600
+            )
+            import json
+            status = json.loads(
+                (Path(directory) / "swu_status.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(status["reason_policy"], "backoff")
+            self.assertEqual(status["backoff"], 600)
+
     def test_vici_connection_is_derived_from_stable_inputs(self):
         payload = strongswan_adapter.build_connection(environment())
         connection = payload[strongswan_adapter.CONNECTION]
