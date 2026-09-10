@@ -2,15 +2,18 @@ FROM fedora:40
 
 ARG STRONGSWAN_COMMIT=b43f6bfeed34b4afc8a7eb0c0de38e6e70177847
 
-RUN dnf -y install autoconf automake bison curl-devel diffutils flex gcc git gperf \
+RUN dnf -y install autoconf automake bison curl-devel diffutils flex gcc git gperf patch \
     iproute iproute-tc json-c-devel libtool make openssl-devel pkg-config \
     procps-ng python3 python3-build python3-devel python3-pip tcpdump && dnf clean all
+
+COPY engine/patches/strongswan/0001-configurable-message-id-sync-advertisement.patch /tmp/strongswan-message-id-sync.patch
 
 RUN git init /usr/src/strongswan && \
     cd /usr/src/strongswan && \
     git remote add origin https://github.com/strongswan/strongswan.git && \
     git fetch --depth 1 origin "${STRONGSWAN_COMMIT}" && \
     git checkout --detach FETCH_HEAD && \
+    patch -p1 < /tmp/strongswan-message-id-sync.patch && \
     ./autogen.sh && \
     ./configure --prefix=/usr --sysconfdir=/etc \
       --enable-swanctl --enable-vici --enable-python-wheels --enable-openssl \
@@ -29,7 +32,7 @@ RUN cd /usr/src/strongswan && \
       -L/usr/lib64/ipsec -Wl,-rpath,/usr/lib64/ipsec \
       -lsimaka -lcharon -lstrongswan $(pkg-config --libs libcurl json-c) -pthread \
       -o /usr/lib64/ipsec/plugins/libstrongswan-eap-aka-broker.so && \
-    rm -rf /usr/src/strongswan /tmp/eap_aka_broker_plugin.c
+    rm -rf /usr/src/strongswan /tmp/eap_aka_broker_plugin.c /tmp/strongswan-message-id-sync.patch
 
 COPY engine/strongswan/strongswan.conf /etc/strongswan.conf
 COPY engine/strongswan_adapter.py /usr/local/bin/strongswan_adapter.py

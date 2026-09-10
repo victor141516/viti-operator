@@ -51,8 +51,10 @@ typedef struct {
 
 typedef struct {
 	enumerator_t public;
-	bool request_ipv4;
-	bool request_ipv6;
+	bool request_ipv4_dns;
+	bool request_ipv4_pcscf;
+	bool request_ipv6_dns;
+	bool request_ipv6_pcscf;
 } attr_enumerator_t;
 
 struct private_eap_aka_broker_t {
@@ -341,18 +343,32 @@ METHOD(enumerator_t, enumerate_attributes, bool,
 	chunk_t *data;
 
 	VA_ARGS_VGET(args, type, data);
-	if (this->request_ipv4)
+	if (this->request_ipv4_dns)
+	{
+		*type = INTERNAL_IP4_DNS;
+		*data = chunk_empty;
+		this->request_ipv4_dns = FALSE;
+		return TRUE;
+	}
+	if (this->request_ipv4_pcscf)
 	{
 		*type = P_CSCF_IP4_ADDRESS;
 		*data = chunk_empty;
-		this->request_ipv4 = FALSE;
+		this->request_ipv4_pcscf = FALSE;
 		return TRUE;
 	}
-	if (this->request_ipv6)
+	if (this->request_ipv6_dns)
+	{
+		*type = INTERNAL_IP6_DNS;
+		*data = chunk_empty;
+		this->request_ipv6_dns = FALSE;
+		return TRUE;
+	}
+	if (this->request_ipv6_pcscf)
 	{
 		*type = P_CSCF_IP6_ADDRESS;
 		*data = chunk_empty;
-		this->request_ipv6 = FALSE;
+		this->request_ipv6_pcscf = FALSE;
 		return TRUE;
 	}
 	return FALSE;
@@ -410,6 +426,12 @@ METHOD(attribute_handler_t, handle_attribute, bool,
 	int family;
 	bool persisted;
 
+	if (type == INTERNAL_IP4_DNS || type == INTERNAL_IP6_DNS)
+	{
+		/* Match the UE configuration request without replacing the container's
+		 * LAN resolver. IMS traffic uses the returned P-CSCF directly. */
+		return TRUE;
+	}
 	if (type != P_CSCF_IP4_ADDRESS && type != P_CSCF_IP6_ADDRESS)
 	{
 		return FALSE;
@@ -443,8 +465,10 @@ METHOD(attribute_handler_t, create_attribute_enumerator, enumerator_t*,
 			.venumerate = _enumerate_attributes,
 			.destroy = (void*)free,
 		},
-		.request_ipv4 = has_host_family(vips, AF_INET),
-		.request_ipv6 = has_host_family(vips, AF_INET6),
+		.request_ipv4_dns = has_host_family(vips, AF_INET),
+		.request_ipv4_pcscf = has_host_family(vips, AF_INET),
+		.request_ipv6_dns = has_host_family(vips, AF_INET6),
+		.request_ipv6_pcscf = has_host_family(vips, AF_INET6),
 	);
 	return &enumerator->public;
 }

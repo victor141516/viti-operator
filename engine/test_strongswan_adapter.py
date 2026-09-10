@@ -36,6 +36,12 @@ class StrongSwanAdapterTest(unittest.TestCase):
         self.assertEqual(connection["children"]["ims"]["local_ts"], ["dynamic"])
         self.assertEqual(connection["children"]["ims"]["remote_ts"], ["::/0"])
         self.assertEqual(connection["rekey_time"], "2700s")
+        self.assertEqual(connection["children"]["ims"]["esp_proposals"][:4], [
+            "aes128-sha1",
+            "aes256-sha256",
+            "aes128-sha256",
+            "aes256-sha1",
+        ])
 
     def test_fqdn_responder_identity_matches_3gpp_format(self):
         connection = strongswan_adapter.build_connection(
