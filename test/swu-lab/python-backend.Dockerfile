@@ -1,6 +1,6 @@
 FROM fedora:40
 
-RUN dnf -y install iproute procps-ng python3 python3-pip python3-pyscard && \
+RUN dnf -y install gcc git iproute net-tools procps-ng python3 python3-devel python3-pip python3-pyscard && \
     dnf clean all
 
 RUN pip install --no-cache-dir pyserial pycryptodome cryptography requests \
@@ -12,5 +12,6 @@ COPY engine/tunnel_backend.py /usr/local/bin/tunnel_backend.py
 COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
 COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
 COPY test/swu-lab/aka_broker.py /opt/swu-lab/aka_broker.py
+COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py
 
 ENTRYPOINT ["python3", "/usr/local/bin/tunnel_backend.py"]

@@ -3,7 +3,7 @@ FROM fedora:40
 ARG STRONGSWAN_COMMIT=b43f6bfeed34b4afc8a7eb0c0de38e6e70177847
 
 RUN dnf -y install autoconf automake bison flex gcc git gperf iproute \
-    libtool make openssl-devel pkg-config procps-ng && dnf clean all
+    libtool make openssl-devel pkg-config procps-ng python3 && dnf clean all
 
 RUN git init /usr/src/strongswan && \
     cd /usr/src/strongswan && \
@@ -21,6 +21,7 @@ RUN git init /usr/src/strongswan && \
 COPY test/swu-lab/epdg/strongswan.conf /etc/strongswan.conf
 COPY test/swu-lab/epdg/swanctl.conf /etc/swanctl/swanctl.conf
 COPY test/swu-lab/epdg/entrypoint.sh /entrypoint.sh
+COPY test/swu-lab/echo_server.py /opt/swu-lab/echo_server.py
 
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

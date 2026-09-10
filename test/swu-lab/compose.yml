@@ -47,11 +47,24 @@ services:
       SWU_REDACT_SECRETS: "1"
       VOWIFI_RUNDIR: /run/vowifi
       VITI_EVENT_OUTBOX_DIR: /run/vowifi/event-outbox
-    tmpfs:
-      - /run/vowifi
+    volumes:
+      - python-runtime:/run/vowifi
     networks:
       outer:
         ipv4_address: 172.30.39.20
+
+  python-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/python-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    depends_on: [python-backend]
+    network_mode: service:python-backend
+    environment:
+      LAB_EXPECTED_BACKEND: python
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - python-runtime:/run/vowifi:ro
 
 networks:
   outer:
@@ -59,3 +72,6 @@ networks:
     ipam:
       config:
         - subnet: 172.30.39.0/24
+
+volumes:
+  python-runtime:
