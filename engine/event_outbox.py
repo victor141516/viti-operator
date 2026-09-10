@@ -82,7 +82,7 @@ def enqueue_event(event, args, recorded_at_ns=None, outbox=None, extra=None):
         "args": [str(value) for value in args],
         "recorded_at_ns": int(recorded_at_ns or time.time_ns()),
     }
-    for key in ("tunnel_generation", "tunnel_sequence"):
+    for key in ("tunnel_generation", "tunnel_sequence", "call_id", "trace_id"):
         if extra and key in extra:
             payload[key] = extra[key]
     final_path = directory / ("%020d-%s.json" % (payload["recorded_at_ns"], event_id))

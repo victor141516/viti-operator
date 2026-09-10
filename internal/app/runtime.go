@@ -48,6 +48,12 @@ func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, ge
 			return previous, false
 		}
 	}
+	// Legacy engines have no process epoch, so their recorded timestamp is the
+	// only cross-generation ordering evidence available. A delayed pre-upgrade
+	// legacy claim must not retire a newer modern generation.
+	if previous.Generation != "" && strings.HasPrefix(generation, "legacy:") && !at.After(previous.UpdatedAt) {
+		return previous, false
+	}
 	// Only a durable process-start or tunnel-up event can transfer ownership to
 	// a generation that the manager has never observed. A standalone down event
 	// cannot prove that it belongs to the currently established data plane.

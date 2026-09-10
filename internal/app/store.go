@@ -379,7 +379,7 @@ func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uin
 	changedCalls := make([]Call, 0)
 	if previous.Ready && !next.Ready {
 		for id, call := range s.calls {
-			if call.EndedAt != nil {
+			if call.EndedAt != nil || (!call.StartedAt.IsZero() && call.StartedAt.After(at)) {
 				continue
 			}
 			previousCalls[id] = call

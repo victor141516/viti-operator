@@ -267,17 +267,22 @@ func TestLegacyTunnelEventsCanTakeOwnershipAgainAfterModernEngineRollback(t *tes
 		}, http.StatusNoContent)
 	}
 	legacy("tunnel_up", now)
-	postTunnelEvent(t, server.URL, "modern", 1, true, now.Add(time.Second), http.StatusNoContent)
-	postTunnelEvent(t, server.URL, "modern", 2, false, now.Add(2*time.Second), http.StatusNoContent)
-	legacy("tunnel_up", now.Add(3*time.Second))
+	postTunnelEvent(t, server.URL, "modern", 1, true, now.Add(2*time.Second), http.StatusNoContent)
+	legacy("tunnel_up", now.Add(time.Second))
 	checkpoint, ok := app.store.EngineTunnelCheckpoint("engine-1")
+	if !ok || checkpoint.Generation != "modern" || !checkpoint.Ready {
+		t.Fatalf("delayed legacy up retired a newer modern generation: %#v", checkpoint)
+	}
+	postTunnelEvent(t, server.URL, "modern", 2, false, now.Add(3*time.Second), http.StatusNoContent)
+	legacy("tunnel_up", now.Add(4*time.Second))
+	checkpoint, ok = app.store.EngineTunnelCheckpoint("engine-1")
 	if !ok || !checkpoint.Ready || !strings.HasPrefix(checkpoint.Generation, "legacy:") {
 		t.Fatalf("legacy rollback did not reclaim tunnel ownership: %#v", checkpoint)
 	}
 	if err := app.store.SaveCall(Call{ID: "legacy-call", Direction: DirectionOutgoing, Peer: "+15555550103", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	legacy("tunnel_down", now.Add(4*time.Second))
+	legacy("tunnel_down", now.Add(5*time.Second))
 	call, _ := app.store.GetCall("legacy-call")
 	if call.EndedAt == nil || call.State != "interrupted" {
 		t.Fatalf("legacy down event was not correlated to its rollback era: %#v", call)
@@ -312,6 +317,29 @@ func TestTunnelTransitionPersistenceFailureRollsBackCallAndCursor(t *testing.T) 
 	call, _ = app.store.GetCall("active-call")
 	if call.EndedAt == nil || call.State != "interrupted" {
 		t.Fatalf("rolled-back cursor did not accept the durable retry: %#v", call)
+	}
+}
+
+func TestHistoricalTunnelTransitionDoesNotInterruptALaterCall(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	now := time.Now().UTC()
+	postTunnelEvent(t, server.URL, "process-one", 1, true, now, http.StatusNoContent)
+	started := now.Add(3 * time.Second)
+	if err := app.store.SaveCall(Call{ID: "later-call", Direction: DirectionOutgoing, Peer: "+15555550104", State: "active", StartedAt: started, UpdatedAt: started}); err != nil {
+		t.Fatal(err)
+	}
+	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(time.Second), http.StatusNoContent)
+	call, _ := app.store.GetCall("later-call")
+	if call.EndedAt != nil || call.State != "active" {
+		t.Fatalf("historical transport event interrupted a later call: %#v", call)
 	}
 }
 
