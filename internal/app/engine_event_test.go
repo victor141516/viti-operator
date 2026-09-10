@@ -380,6 +380,48 @@ func TestDelayedCallStartUsesEngineTimeBeforeTunnelFailure(t *testing.T) {
 	}
 }
 
+func TestDelayedCallStartAfterActiveStillPrecedesTunnelFailure(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	tunnelUpAt := time.Date(2026, 9, 10, 10, 30, 0, 0, time.UTC)
+	callStartedAt := tunnelUpAt.Add(time.Second)
+	tunnelDownAt := tunnelUpAt.Add(1200 * time.Millisecond)
+	callActiveAt := tunnelUpAt.Add(1400 * time.Millisecond)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, tunnelUpAt, http.StatusNoContent)
+
+	// The active hook overtakes the earlier start hook on delivery.
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_active", "call_id": "reordered-call",
+		"recorded_at_ns": callActiveAt.UnixNano(), "args": []string{"out", "+15555550107"},
+	}, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_out", "call_id": "reordered-call",
+		"recorded_at_ns": callStartedAt.UnixNano(), "args": []string{"+15555550107"},
+	}, http.StatusOK)
+
+	beforeDown, _ := app.store.GetCallByEngineID("engine-1", "reordered-call")
+	if beforeDown.State != "active" || !beforeDown.StartedAt.Equal(callStartedAt) || !beforeDown.UpdatedAt.Equal(callActiveAt) {
+		t.Fatalf("delayed start regressed the active lifecycle: %#v", beforeDown)
+	}
+	postTunnelEvent(t, server.URL, "process-one", 2, false, tunnelDownAt, http.StatusNoContent)
+
+	call, _ := app.store.GetCallByEngineID("engine-1", "reordered-call")
+	if call.State != "interrupted" || call.EndedAt == nil || !call.EndedAt.Equal(tunnelDownAt) {
+		t.Fatalf("transport failure did not interrupt reordered call: %#v", call)
+	}
+	if call.AnsweredAt != nil {
+		t.Fatalf("historical active evidence survived an earlier terminal boundary: %#v", call)
+	}
+}
+
 func TestDelayedTerminalCallResultUsesEngineTime(t *testing.T) {
 	app, err := New(Config{
 		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},

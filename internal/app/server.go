@@ -376,8 +376,18 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		previousState := call.State
-		call.State = map[Direction]string{DirectionIncoming: "ringing", DirectionOutgoing: "dialing"}[direction]
-		call.UpdatedAt = eventAt
+		if call.StartedAt.IsZero() || eventAt.Before(call.StartedAt) {
+			call.StartedAt = eventAt
+		}
+		// Independent hook processes can deliver call_active before call_in/out.
+		// A delayed start supplies an earlier lifecycle boundary but must not
+		// regress an already active call or move its latest update backwards.
+		if call.State != "active" {
+			call.State = map[Direction]string{DirectionIncoming: "ringing", DirectionOutgoing: "dialing"}[direction]
+		}
+		if call.UpdatedAt.IsZero() || eventAt.After(call.UpdatedAt) {
+			call.UpdatedAt = eventAt
+		}
 		a.diag.RecordTrace("manager.call", "state.transition", call.TraceID, map[string]any{"event": request.Event, "from": previousState, "to": call.State, "call": call})
 	case "call_active":
 		if len(request.Args) < 2 {

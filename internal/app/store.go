@@ -384,6 +384,9 @@ func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uin
 			}
 			previousCalls[id] = call
 			call.State = "interrupted"
+			if call.AnsweredAt != nil && call.AnsweredAt.After(at) {
+				call.AnsweredAt = nil
+			}
 			call.UpdatedAt = at
 			call.EndedAt = &at
 			s.calls[id] = call
