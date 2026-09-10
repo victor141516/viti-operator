@@ -287,6 +287,43 @@ USB-to-Bluetooth changes, car-session disconnect/reconnect, and foreground cold
 start. A compiled instrumentation APK is not evidence that those physical paths
 were exercised.
 
+## National dialing and country evidence
+
+The web and Android clients detect a country once per fresh application session.
+They do not expose a country setting and do not persist the result. Reloading the
+web application, reopening the Android task after it was destroyed, or creating
+a new Android Auto session performs a new detection; ordinary navigation and
+Activity recreation do not.
+
+Android prefers the serving country of the selected default-data subscription
+when the OS supplies a fresh in-service observation. The optional **Cellular
+network details** permission improves that signal, but denying it does not block
+the conservative fallback. The browser and Android fallback use a direct HTTPS
+request to `https://api.country.is/` and require its country to agree with the
+device timezone or, for non-country-specific timezones, the locale region. The
+request omits Viti credentials and referrer data, disables caching and redirects,
+and accepts at most 1 KiB of JSON. The external service still observes the
+client's public source IP; self-host or replace this dependency before deployment
+if that disclosure is unacceptable.
+
+VPNs and Tailscale exit nodes can make IP location disagree with the physical
+country. That disagreement is intentionally an error, not an instruction to dial
+using either country. If detection is unavailable, still initializing, or
+ambiguous, enter the complete international number beginning with `+`. Explicit
+canonical E.164 input never waits for country detection.
+
+Viti parses national trunk prefixes and recognized IDD prefixes with established
+numbering metadata and submits canonical E.164 to IMS. It does not rely on a
+carrier to interpret national input or infer the user's current country while
+roaming. Emergency numbers, short/service codes, extensions, and pause/wait
+sequences are outside the supported dialing scope. Use the ordinary carrier
+dialer for emergency service.
+
+Automated normalization tests do not place calls. A carrier smoke test is still
+a real billed network operation and must use an explicitly approved destination.
+To diagnose a rejection without calling, send the intended input and transient
+country to `POST /api/v1/calls/normalize` and inspect the returned E.164 value.
+
 ## Browser audio devices
 
 Open **Connection → Call audio** to select this browser's microphone and, when
@@ -547,5 +584,10 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
   real-vehicle validation for each supported combination.
 - Carrier Wi-Fi Calling provisioning and policy remain outside the project's
   control.
+- National dialing depends on volatile current-country evidence. VPN/exit-node
+  disagreement or unavailable evidence deliberately requires explicit E.164;
+  the server never guesses from its own location or the SIM home country.
+- The default web/Android fallback contacts `api.country.is`, which observes the
+  client's public source IP. Country data is not persisted by Viti.
 - Destination SMS delivery reports depend on carrier/SMSC support and may remain
   unconfirmed; the service never equates acceptance with a read receipt.

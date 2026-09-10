@@ -12,6 +12,9 @@ IMS and conference audio.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.
+- National-format calling from web, Android, and Android Auto with per-session
+  country detection, established numbering rules, and a fail-closed international
+  fallback when the current country is ambiguous.
 - Per-participant audio mixing and independent departure.
 - Client-local microphone mute on web and Android; other participants and
   incoming audio remain unaffected.

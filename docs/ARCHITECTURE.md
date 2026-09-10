@@ -433,6 +433,41 @@ server, then restores the phone's saved network mask and native IMS setting.
 
 ## Calling architecture
 
+### Destination normalization and session country
+
+Every public carrier destination crosses a canonical E.164 boundary before it
+is sent or persisted. The clients keep the country evidence volatile and detect
+it once per fresh UI session. A web page reload or a new Android task/car session
+creates new evidence; navigation and Android Activity recreation reuse the
+existing session result. No country preference is stored, and the manager never
+uses its own host location as a substitute for the user.
+
+Android first requests a fresh service-state observation for the selected
+default-data subscription. A current in-service `networkCountryIso` is the
+strong source. Initial callback registration is polled for at most two seconds;
+if it remains pending, detection fails closed rather than committing weaker
+evidence for the session. If phone-state permission is denied, cellular service
+is unsupported, or the subscription is not in service, the app may use the same
+conservative fallback as the browser. That fallback requires the direct public
+IP country to agree with a uniquely mapped system timezone, or with the locale
+region only when the timezone is not country-specific. A VPN/Tailscale exit-node
+conflict, missing signal, or other disagreement yields no country.
+
+Canonical `+` E.164 input bypasses country detection and remains usable against
+an older manager. Formatted `+` input, national trunk prefixes, and recognized
+international-dialing prefixes go through the manager normalizer backed by the
+phone-number metadata library. Emergency, short, service, extension, pause/wait,
+and URI inputs are rejected. The private `*43` echo and `*44` conference-join
+extensions use separate explicit paths and never enter public normalization.
+
+Web, Compose, and Android Auto serialize destination preparation and revalidate
+line/call state before issuing the SIP INVITE. The manager also normalizes the
+non-interactive call API before persistence. Asterisk is the final defense: its
+public outbound route accepts only `+` followed by 8–15 digits with a non-zero
+first digit, and rejects everything else before lifecycle notification or
+carrier dialing. Carrier interpretation of national input—especially while
+roaming—is therefore not assumed.
+
 ### Signaling
 
 Web and Android clients register a trusted local SIP identity with Asterisk over
