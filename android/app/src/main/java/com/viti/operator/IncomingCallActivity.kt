@@ -39,6 +39,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +50,8 @@ import androidx.lifecycle.lifecycleScope
 import com.viti.operator.ui.VitiTheme
 import com.viti.operator.voice.VoiceCallService
 import com.viti.operator.voice.VoiceCallSnapshot
+import com.viti.operator.voice.IncomingCallActivityMemory
+import com.viti.operator.voice.memoryForIncomingIntent
 import com.viti.operator.voice.shouldShowIncomingCall
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -65,6 +69,7 @@ class IncomingCallActivity : ComponentActivity() {
     private var snapshotJob: Job? = null
     private var actionSubmitted by mutableStateOf(false)
     private var notice by mutableStateOf("")
+    private var serviceValidated by mutableStateOf(false)
     private var permissionRequestToken: String? = null
     private var autoAnswerToken: String? = null
 
@@ -91,6 +96,7 @@ class IncomingCallActivity : ComponentActivity() {
                 closePresentation()
                 return
             }
+            serviceValidated = true
             snapshotJob?.cancel()
             snapshotJob = lifecycleScope.launch {
                 connected.snapshot.collect { current ->
@@ -105,6 +111,7 @@ class IncomingCallActivity : ComponentActivity() {
             snapshotJob?.cancel()
             snapshotJob = null
             service = null
+            serviceValidated = false
             closePresentation()
         }
 
@@ -112,11 +119,13 @@ class IncomingCallActivity : ComponentActivity() {
             snapshotJob?.cancel()
             snapshotJob = null
             service = null
+            serviceValidated = false
             closePresentation()
         }
 
         override fun onNullBinding(name: ComponentName) {
             service = null
+            serviceValidated = false
             closePresentation()
         }
     }
@@ -125,6 +134,7 @@ class IncomingCallActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         configureLockScreenPresentation()
         enableEdgeToEdge()
+        restorePresentationState(savedInstanceState)
         acceptIntent(intent)
         if (expectedToken.isBlank()) {
             closePresentation()
@@ -134,7 +144,11 @@ class IncomingCallActivity : ComponentActivity() {
             VitiTheme {
                 IncomingCallScreen(
                     peer = snapshot.displayName.ifBlank { snapshot.peer }.ifBlank { fallbackPeer }.ifBlank { "Private number" },
-                    detail = snapshot.voice.detail.ifBlank { "Incoming service call" },
+                    detail = if (serviceValidated) {
+                        snapshot.voice.detail.ifBlank { "Incoming service call" }
+                    } else {
+                        "Checking the current call…"
+                    },
                     busy = actionSubmitted,
                     notice = notice,
                     onAnswer = ::answer,
@@ -154,6 +168,16 @@ class IncomingCallActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_EXPECTED_TOKEN, expectedToken)
+        outState.putString(STATE_FALLBACK_PEER, fallbackPeer)
+        outState.putString(STATE_PERMISSION_TOKEN, permissionRequestToken)
+        outState.putString(STATE_AUTO_ANSWER_TOKEN, autoAnswerToken)
+        outState.putBoolean(STATE_ACTION_SUBMITTED, actionSubmitted)
+        outState.putString(STATE_NOTICE, notice)
+    }
+
     override fun onStart() {
         super.onStart()
         if (expectedToken.isBlank() || bindingRequested) return
@@ -171,23 +195,54 @@ class IncomingCallActivity : ComponentActivity() {
             bindingRequested = false
         }
         service = null
+        serviceValidated = false
         super.onStop()
     }
 
     private fun acceptIntent(intent: Intent) {
         val next = intent.getStringExtra(VoiceCallService.EXTRA_LEG_TOKEN).orEmpty()
-        if (next != expectedToken) {
-            expectedToken = next
-            fallbackPeer = intent.getStringExtra(VoiceCallService.EXTRA_CALLER_NAME).orEmpty()
-            actionSubmitted = false
-            notice = ""
-            permissionRequestToken = null
-            autoAnswerToken = null
-        }
-        if (intent.action == ACTION_ANSWER_CALL && permissionRequestToken != next && !actionSubmitted) {
-            autoAnswerToken = next
+        val memory = memoryForIncomingIntent(
+            current = presentationMemory(),
+            token = next,
+            fallbackPeer = intent.getStringExtra(VoiceCallService.EXTRA_CALLER_NAME).orEmpty(),
+            requestAnswer = intent.action == ACTION_ANSWER_CALL,
+        )
+        applyPresentationMemory(memory)
+        if (intent.action == ACTION_ANSWER_CALL) {
             intent.action = null
         }
+    }
+
+    private fun restorePresentationState(savedInstanceState: Bundle?) {
+        if (savedInstanceState == null) return
+        applyPresentationMemory(
+            IncomingCallActivityMemory(
+                expectedToken = savedInstanceState.getString(STATE_EXPECTED_TOKEN).orEmpty(),
+                fallbackPeer = savedInstanceState.getString(STATE_FALLBACK_PEER).orEmpty(),
+                permissionRequestToken = savedInstanceState.getString(STATE_PERMISSION_TOKEN),
+                autoAnswerToken = savedInstanceState.getString(STATE_AUTO_ANSWER_TOKEN),
+                actionSubmitted = savedInstanceState.getBoolean(STATE_ACTION_SUBMITTED),
+                notice = savedInstanceState.getString(STATE_NOTICE).orEmpty(),
+            ),
+        )
+    }
+
+    private fun presentationMemory() = IncomingCallActivityMemory(
+        expectedToken = expectedToken,
+        fallbackPeer = fallbackPeer,
+        permissionRequestToken = permissionRequestToken,
+        autoAnswerToken = autoAnswerToken,
+        actionSubmitted = actionSubmitted,
+        notice = notice,
+    )
+
+    private fun applyPresentationMemory(memory: IncomingCallActivityMemory) {
+        expectedToken = memory.expectedToken
+        fallbackPeer = memory.fallbackPeer
+        permissionRequestToken = memory.permissionRequestToken
+        autoAnswerToken = memory.autoAnswerToken
+        actionSubmitted = memory.actionSubmitted
+        notice = memory.notice
     }
 
     private fun answer() {
@@ -255,6 +310,12 @@ class IncomingCallActivity : ComponentActivity() {
 
     companion object {
         const val ACTION_ANSWER_CALL = "com.viti.operator.incoming.action.ANSWER"
+        private const val STATE_EXPECTED_TOKEN = "incoming.expected-token"
+        private const val STATE_FALLBACK_PEER = "incoming.fallback-peer"
+        private const val STATE_PERMISSION_TOKEN = "incoming.permission-token"
+        private const val STATE_AUTO_ANSWER_TOKEN = "incoming.auto-answer-token"
+        private const val STATE_ACTION_SUBMITTED = "incoming.action-submitted"
+        private const val STATE_NOTICE = "incoming.notice"
     }
 }
 
@@ -365,7 +426,9 @@ private fun CallActionButton(
         Surface(
             onClick = onClick,
             enabled = enabled,
-            modifier = Modifier.size(72.dp),
+            modifier = Modifier
+                .size(72.dp)
+                .semantics { contentDescription = label },
             shape = CircleShape,
             color = containerColor,
             contentColor = contentColor,

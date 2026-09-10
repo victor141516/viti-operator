@@ -2,6 +2,8 @@ package com.viti.operator.voice
 
 import android.app.NotificationManager
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,5 +50,53 @@ class IncomingCallPresentationTest {
         assertFalse(reduced.prominentCallChannel)
         assertTrue(high.callChannelEnabled)
         assertTrue(high.prominentCallChannel)
+    }
+
+    @Test
+    fun recreationPreservesPendingPermissionOnlyForTheSameLeg() {
+        val beforeRecreation = IncomingCallActivityMemory(
+            expectedToken = "leg-7",
+            fallbackPeer = "Ada",
+            permissionRequestToken = "leg-7",
+            notice = "Waiting for microphone permission",
+        )
+
+        val restored = memoryForIncomingIntent(
+            current = beforeRecreation,
+            token = "leg-7",
+            fallbackPeer = "",
+            requestAnswer = false,
+        )
+        assertEquals("leg-7", restored.permissionRequestToken)
+        assertEquals("Ada", restored.fallbackPeer)
+
+        val reusedForAnotherCall = memoryForIncomingIntent(
+            current = beforeRecreation,
+            token = "leg-8",
+            fallbackPeer = "Grace",
+            requestAnswer = false,
+        )
+        assertNull(reusedForAnotherCall.permissionRequestToken)
+        assertNull(reusedForAnotherCall.autoAnswerToken)
+        assertFalse(reusedForAnotherCall.actionSubmitted)
+        assertEquals("", reusedForAnotherCall.notice)
+    }
+
+    @Test
+    fun repeatedAnswerIntentDoesNotReplaceAnActivePermissionRequest() {
+        val waiting = IncomingCallActivityMemory(
+            expectedToken = "leg-7",
+            permissionRequestToken = "leg-7",
+        )
+
+        val repeated = memoryForIncomingIntent(
+            current = waiting,
+            token = "leg-7",
+            fallbackPeer = "Ada",
+            requestAnswer = true,
+        )
+
+        assertEquals("leg-7", repeated.permissionRequestToken)
+        assertNull(repeated.autoAnswerToken)
     }
 }

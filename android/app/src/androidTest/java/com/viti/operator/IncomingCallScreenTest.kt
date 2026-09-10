@@ -2,7 +2,9 @@ package com.viti.operator
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.junit4.v2.createComposeRule
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.viti.operator.ui.VitiTheme
@@ -33,8 +35,10 @@ class IncomingCallScreenTest {
 
         compose.onNodeWithText("Ada Lovelace").assertIsDisplayed()
         compose.onNodeWithText("+34 600 000 000").assertIsDisplayed()
-        compose.onNodeWithText("Answer").performClick()
-        compose.onNodeWithText("Decline").performClick()
+        compose.onNodeWithContentDescription("Answer").assertHasClickAction()
+        compose.onNodeWithContentDescription("Decline").assertHasClickAction()
+        compose.onNodeWithContentDescription("Answer").performClick()
+        compose.onNodeWithContentDescription("Decline").performClick()
         assertEquals(1, answered)
         assertEquals(1, declined)
     }
@@ -54,8 +58,8 @@ class IncomingCallScreenTest {
             }
         }
 
-        compose.onNodeWithText("Answer").assertIsNotEnabled()
-        compose.onNodeWithText("Decline").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Answer").assertIsNotEnabled()
+        compose.onNodeWithContentDescription("Decline").assertIsNotEnabled()
         compose.onNodeWithText("Answering…").assertIsDisplayed()
     }
 }
