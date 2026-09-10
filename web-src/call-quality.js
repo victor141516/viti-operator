@@ -136,7 +136,7 @@ export function collectCallQuality(stats, previous = {}) {
   const valuesAvailable = [inboundLoss.value, outboundLoss.value, currentJitter(inbound, previousInbound), roundTripTimeMs].some((value) => value !== null)
   return {
     sample: {
-      status: valuesAvailable || route ? 'available' : 'collecting',
+      status: valuesAvailable ? 'available' : 'collecting',
       inboundLossPercent: inboundLoss.value,
       outboundLossPercent: outboundLoss.value,
       inboundJitterMs: currentJitter(inbound, previousInbound),

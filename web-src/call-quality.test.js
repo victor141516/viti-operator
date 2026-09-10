@@ -16,6 +16,7 @@ test('derives interval inbound loss, jitter, media RTT and a UDP TURN route', ()
     { id: 'remote', type: 'remote-candidate', candidateType: 'srflx', protocol: 'udp' },
   )
   const baseline = collectCallQuality(first)
+  assert.equal(baseline.sample.route.mode, 'turn-relay')
   const second = report(
     { id: 'in-1', type: 'inbound-rtp', kind: 'audio', packetsReceived: 198, packetsLost: 4, jitter: 0.009, timestamp: 2_500, transportId: 'transport' },
     { id: 'out-1', type: 'outbound-rtp', kind: 'audio', packetsSent: 180, timestamp: 2_500, transportId: 'transport', remoteId: 'remote-in-1' },
@@ -100,6 +101,7 @@ test('uses the audio transport selected pair and refuses an ambiguous legacy rou
     { id: 'video-remote', type: 'remote-candidate', candidateType: 'relay', protocol: 'tcp' },
   ))
   assert.equal(exact.sample.route.mode, 'direct')
+  assert.equal(exact.sample.status, 'collecting')
 
   const ambiguous = collectCallQuality(report(
     { id: 'in', type: 'inbound-rtp', kind: 'audio', packetsReceived: 1, packetsLost: 0, timestamp: 1 },
