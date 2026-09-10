@@ -108,6 +108,7 @@ if os.environ.get("SWU_APDU_DEBUG", "0") not in ("0", "", "no"):
 # =============================================================================================
 import json as _json
 import signal as _signal
+from tunnel_contract import normalize_control_action as _normalize_control_action
 from tunnel_contract import status_payload as _status_payload
 
 SWU_RUNDIR = os.environ.get("VOWIFI_RUNDIR", "/run/vowifi")
@@ -5219,23 +5220,23 @@ class swu():
                     msg = ctl_src.readline()
                     if msg == "":            # control channel closed -> ignore (daemon keeps running)
                         continue
-                    msg = msg.strip() + "\n"
-                    if msg == "q\n":  #quit
+                    try:
+                        action = _normalize_control_action(msg)
+                    except Exception:
+                        continue
+                    if action == "stop":
                         self.state_delete(True)
-                    elif msg =="i\n": #rekey ike
+                    elif action == "rekey-ike":
                         self.state_ue_create_sa()
-                    elif msg =="c\n": #rekey sa child
+                    elif action == "rekey-child":
                         self.state_ue_create_sa_child()
-                    elif msg =="r\n": # restart process
+                    elif action == "reauth":
                         self.state_delete(True,False)
                         self.set_identification(IDI, ID_RFC822_ADDR,
                                                 self.reauth_identity() or self.permanent_nai())
 
                         self.iterations = 2
                         return
-
-                    else:
-                        pass
 
             # G4: after servicing whatever woke select() (or on a plain timeout with no sockets
             # ready), run the initiator liveness check. On an idle tunnel this is the only thing

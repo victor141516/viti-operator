@@ -89,6 +89,52 @@ def wait_for_backend_exit(service, timeout=15, require_failure=True):
     raise AssertionError(f"{service} did not exit within {timeout}s")
 
 
+def backend_container_state(service):
+    container = compose("ps", "-a", "-q", service, capture=True).stdout.strip()
+    if not container:
+        return "missing", None
+    result = subprocess.run(
+        [
+            "docker", "inspect", "--format",
+            "{{.State.Status}} {{.State.ExitCode}}", container,
+        ],
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    status, exit_code = result.stdout.strip().split()
+    return status, int(exit_code)
+
+
+def run_probe(service, mode=None):
+    args = ["run", "--rm"]
+    if mode:
+        args.extend(("-e", f"LAB_PROBE_MODE={mode}"))
+    compose(*args, service)
+
+
+def request_control(service, action):
+    if action not in {"stop", "reauth", "rekey-child", "rekey-ike"}:
+        raise ValueError(f"unsupported backend control action: {action}")
+    compose(
+        "exec", "-T", service, "sh", "-c",
+        f"printf '{action}\\n' > /run/vowifi/swu.ctl",
+    )
+
+
+def wait_for_broker_requests(minimum, timeout=30):
+    deadline = time.monotonic() + timeout
+    state = {}
+    while time.monotonic() < deadline:
+        state = broker_request("/state")
+        if state.get("authenticate_requests", 0) >= minimum:
+            return state
+        time.sleep(0.2)
+    raise AssertionError(
+        f"AKA broker did not receive {minimum} request(s) within {timeout}s: {state}"
+    )
+
+
 def reset_lab():
     compose("down", "-v", "--remove-orphans")
 
@@ -291,6 +337,154 @@ def run_operator_delete(backend, connected_probe, terminated_probe):
     print(f"LAB_OPERATOR_DELETE_OBSERVED={backend.removesuffix('-backend')}")
 
 
+def run_full_reauthentication(backend, connected_probe):
+    start_protocol_lab(
+        backend,
+        connected_probe,
+        LAB_SWU_LIVENESS_PERIOD=0,
+        LAB_SWU_CHILD_REKEY_MINUTES=0,
+        LAB_SWU_IKE_REKEY_MINUTES=0,
+    )
+    before_sa = epdg_sa_state()
+    before_auth = broker_request("/state")["authenticate_requests"]
+    request_control(backend, "reauth")
+    wait_for_broker_requests(before_auth + 1)
+    after_sa = wait_for_sa_change(before_sa, "ike", timeout=30)
+    if "remote-vips=[2001:db8:39:100::1]" not in after_sa["raw"]:
+        raise AssertionError("full reauthentication changed the assigned inner address")
+    run_probe(connected_probe, "reauth")
+    print(f"LAB_FULL_REAUTH_OBSERVED={backend.removesuffix('-backend')}")
+
+
+def run_auth_source_loss(backend, connected_probe, lifecycle_probe):
+    start_protocol_lab(
+        backend,
+        connected_probe,
+        LAB_SWU_LIVENESS_PERIOD=0,
+        LAB_SWU_CHILD_REKEY_MINUTES=0,
+        LAB_SWU_IKE_REKEY_MINUTES=0,
+    )
+    before_sa = epdg_sa_state()
+    broker_request("/control", {"mode": "unavailable", "reset_count": True})
+    run_probe(connected_probe, "transport")
+    print(f"LAB_AUTH_SOURCE_LOSS_OK={backend.removesuffix('-backend')}")
+
+    request_control(backend, "reauth")
+    wait_for_broker_requests(1)
+    if backend.startswith("python-"):
+        wait_for_backend_exit(backend, timeout=30)
+        run_probe(lifecycle_probe, "failed_reauth")
+        broker_request("/control", {"mode": "success"})
+        compose("start", backend)
+        run_probe(connected_probe)
+        run_probe(lifecycle_probe, "auth_recovered")
+    else:
+        time.sleep(2)
+        status, _ = backend_container_state(backend)
+        if status != "running":
+            raise AssertionError("backend exited after authentication-source loss")
+        after_sa = epdg_sa_state()
+        if after_sa["ike"] != before_sa["ike"]:
+            raise AssertionError("failed reauthentication replaced the valid IKE SA")
+        run_probe(connected_probe, "transport")
+        run_probe(connected_probe, "reauth")
+        broker_request("/control", {"mode": "success"})
+    print(f"LAB_FAILED_REAUTH_OBSERVED={backend.removesuffix('-backend')}")
+
+
+def run_colliding_rekeys(backend, connected_probe, kind):
+    timers = {
+        "child": {
+            "LAB_SWU_CHILD_REKEY_MINUTES": 0.1,
+            "LAB_SWU_IKE_REKEY_MINUTES": 0,
+        },
+        "ike": {
+            "LAB_SWU_CHILD_REKEY_MINUTES": 0,
+            "LAB_SWU_IKE_REKEY_MINUTES": 0.1,
+        },
+    }[kind]
+    start_protocol_lab(
+        backend,
+        connected_probe,
+        LAB_SWU_LIVENESS_PERIOD=0,
+        LAB_SWU_REKEY_TIMEOUT=3,
+        **timers,
+    )
+    before_sa = epdg_sa_state()
+    compose(
+        "exec", "-T", backend, "tc", "qdisc", "replace", "dev", "eth0",
+        "root", "netem", "delay", "600ms",
+    )
+    needle = {
+        "child": "initiating proactive PFS rekey",
+        "ike": "initiating make-before-break rekey",
+    }[kind]
+    wait_for_log(backend, needle, timeout=12)
+    responder_result = None
+    try:
+        compose(
+            "exec", "-T", "epdg", "swanctl", "--rekey", f"--{kind}",
+            "ims" if kind == "child" else "viti-lab",
+        )
+    except subprocess.CalledProcessError as error:
+        responder_result = error.returncode
+    time.sleep(2)
+
+    status, _ = backend_container_state(backend)
+    transport_ok = False
+    if status == "running":
+        try:
+            run_probe(connected_probe, "transport")
+            transport_ok = True
+        except subprocess.CalledProcessError:
+            transport_ok = False
+
+    if backend.startswith("python-"):
+        if transport_ok:
+            after_sa = epdg_sa_state()
+            target = "children" if kind == "child" else "ike"
+            if after_sa[target] == before_sa[target]:
+                print(f"LAB_XFAIL=python:colliding_{kind}_rekey_no_sa_change")
+            else:
+                print(f"LAB_COLLIDING_REKEY_OK=python:{kind}")
+        else:
+            print(f"LAB_XFAIL=python:colliding_{kind}_rekey_transport")
+    else:
+        if responder_result is not None:
+            raise AssertionError(
+                f"responder-side colliding {kind} rekey failed with {responder_result}"
+            )
+        if not transport_ok:
+            raise AssertionError(f"transport failed after colliding {kind} rekeys")
+        wait_for_sa_change(before_sa, "children" if kind == "child" else "ike")
+        print(f"LAB_COLLIDING_REKEY_OK={backend.removesuffix('-backend')}:{kind}")
+    print(f"LAB_COLLIDING_REKEY_OBSERVED={backend.removesuffix('-backend')}:{kind}")
+
+
+def crash_backend(service):
+    if service.startswith("python-"):
+        compose("kill", "-s", "SIGKILL", service)
+    else:
+        compose("exec", "-T", service, "pkill", "-KILL", "-x", "charon")
+    wait_for_backend_exit(service)
+
+
+def run_crash_recovery(backend, connected_probe, lifecycle_probe):
+    start_protocol_lab(
+        backend,
+        connected_probe,
+        LAB_SWU_LIVENESS_PERIOD=0,
+        LAB_SWU_CHILD_REKEY_MINUTES=0,
+        LAB_SWU_IKE_REKEY_MINUTES=0,
+    )
+    crash_backend(backend)
+    run_probe(lifecycle_probe, "crashed")
+    compose("start", backend)
+    run_probe(connected_probe, "transport")
+    run_probe(lifecycle_probe, "recovered")
+    print(f"LAB_CRASH_RECOVERY_OBSERVED={backend.removesuffix('-backend')}")
+
+
 def run_protocol_scenarios(
     backend, connected_probe, lifecycle_probe, terminated_probe
 ):
@@ -302,12 +496,20 @@ def run_protocol_scenarios(
     run_operator_delete(backend, connected_probe, terminated_probe)
 
 
+def run_resilience_scenarios(backend, connected_probe, lifecycle_probe):
+    run_full_reauthentication(backend, connected_probe)
+    run_auth_source_loss(backend, connected_probe, lifecycle_probe)
+    run_colliding_rekeys(backend, connected_probe, "child")
+    run_colliding_rekeys(backend, connected_probe, "ike")
+    run_crash_recovery(backend, connected_probe, lifecycle_probe)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=sorted(BACKEND_SERVICES), required=True)
     parser.add_argument(
         "--scenario",
-        choices=("all", "attach", "auth-faults", "protocol"),
+        choices=("all", "attach", "auth-faults", "protocol", "resilience"),
         default="all",
     )
     parser.add_argument("--no-build", action="store_true")
@@ -334,6 +536,8 @@ def main():
             run_protocol_scenarios(
                 backend, connected_probe, lifecycle_probe, terminated_probe
             )
+        if args.scenario in ("all", "resilience"):
+            run_resilience_scenarios(backend, connected_probe, lifecycle_probe)
         print(f"LAB_SUITE_OK={args.backend}")
     except Exception:
         try:

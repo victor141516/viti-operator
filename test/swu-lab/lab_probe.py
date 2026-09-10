@@ -57,13 +57,18 @@ def wait_for_down():
     raise AssertionError(f"backend did not stop within {TIMEOUT}s: {last}")
 
 
-def load_transitions():
+def load_all_transitions():
     events = []
     for path in (RUNDIR / "event-outbox").glob("*.json"):
         event = json.loads(path.read_text(encoding="utf-8"))
         if event.get("event") in {"tunnel_start", "tunnel_up", "tunnel_down"}:
             events.append(event)
     events.sort(key=lambda event: event["recorded_at_ns"])
+    return events
+
+
+def load_transitions():
+    events = load_all_transitions()
     starts = [event for event in events if event["event"] == "tunnel_start"]
     if not starts:
         return events
@@ -72,6 +77,20 @@ def load_transitions():
         (event for event in events if event["tunnel_generation"] == latest_generation),
         key=lambda event: event["tunnel_sequence"],
     )
+
+
+def grouped_transitions():
+    groups = []
+    by_generation = {}
+    for event in load_all_transitions():
+        generation = event["tunnel_generation"]
+        if generation not in by_generation:
+            by_generation[generation] = []
+            groups.append(by_generation[generation])
+        by_generation[generation].append(event)
+    for events in groups:
+        events.sort(key=lambda event: event["tunnel_sequence"])
+    return groups
 
 
 def echo(sock_type, payload):
@@ -98,16 +117,12 @@ def echo(sock_type, payload):
         raise AssertionError(f"echo mismatch: {received!r} != {payload!r}")
 
 
-def probe_connected():
+def probe_transport():
     observation = wait_for_connected()
     assert observation.backend == EXPECTED_BACKEND
     assert observation.inner_ip == EXPECTED_INNER
     assert observation.pcscf == EXPECTED_PCSCF
     assert observation.iface == "ipsec0"
-
-    transitions = load_transitions()
-    validate_transition_sequence(transitions)
-    assert [event["event"] for event in transitions] == ["tunnel_start", "tunnel_up"]
 
     link = command("ip", "-details", "link", "show", "dev", observation.iface)
     assert "tun type tun" in link
@@ -127,7 +142,105 @@ def probe_connected():
     echo(socket.SOCK_STREAM, b"viti-swu-lab-tcp")
     echo(socket.SOCK_DGRAM, bytes(range(256)) * 16)
     echo(socket.SOCK_STREAM, bytes(range(256)) * 512)
+    return observation
+
+
+def probe_connected():
+    probe_transport()
+    transitions = load_transitions()
+    validate_transition_sequence(transitions)
+    assert [event["event"] for event in transitions] == ["tunnel_start", "tunnel_up"]
     print(f"LAB_BACKEND_OK={EXPECTED_BACKEND}")
+
+
+def probe_transport_only():
+    probe_transport()
+    print(f"LAB_TRANSPORT_OK={EXPECTED_BACKEND}")
+
+
+def probe_reauthentication():
+    probe_transport()
+    transitions = load_transitions()
+    names = [event["event"] for event in transitions]
+    if EXPECTED_BACKEND == "python":
+        assert names == ["tunnel_start", "tunnel_up", "tunnel_up"]
+        try:
+            validate_transition_sequence(transitions)
+        except ContractViolation as error:
+            assert "invalid tunnel lifecycle" in str(error)
+        else:
+            raise AssertionError("legacy duplicate reauthentication up was accepted")
+        print("LAB_XFAIL=python:duplicate_reauth_tunnel_up")
+    else:
+        validate_transition_sequence(transitions)
+        assert names == ["tunnel_start", "tunnel_up"]
+    print(f"LAB_REAUTH_OK={EXPECTED_BACKEND}")
+
+
+def probe_crashed():
+    transitions = load_transitions()
+    names = [event["event"] for event in transitions]
+    if EXPECTED_BACKEND == "python":
+        observation = validate_status(json.loads(
+            (RUNDIR / "swu_status.json").read_text(encoding="utf-8")
+        ))
+        assert observation.state == "CONNECTED"
+        assert names == ["tunnel_start", "tunnel_up"]
+        print("LAB_XFAIL=python:crash_missing_down")
+    else:
+        observation = wait_for_down()
+        assert observation.backend == EXPECTED_BACKEND
+        validate_transition_sequence(transitions)
+        assert names == ["tunnel_start", "tunnel_up", "tunnel_down"]
+    print(f"LAB_CRASH_OBSERVED={EXPECTED_BACKEND}")
+
+
+def probe_recovered():
+    observation = wait_for_connected()
+    assert observation.backend == EXPECTED_BACKEND
+    groups = grouped_transitions()
+    assert len(groups) == 2
+    assert groups[0][0]["tunnel_generation"] != groups[1][0]["tunnel_generation"]
+    first_names = [event["event"] for event in groups[0]]
+    second_names = [event["event"] for event in groups[1]]
+    if EXPECTED_BACKEND == "python":
+        assert first_names == ["tunnel_start", "tunnel_up"]
+        print("LAB_XFAIL=python:crash_missing_down")
+    else:
+        assert first_names == ["tunnel_start", "tunnel_up", "tunnel_down"]
+    validate_transition_sequence(groups[0])
+    validate_transition_sequence(groups[1])
+    assert second_names == ["tunnel_start", "tunnel_up"]
+    assert groups[0][-1]["recorded_at_ns"] < groups[1][0]["recorded_at_ns"]
+    print(f"LAB_RECOVERY_OK={EXPECTED_BACKEND}")
+
+
+def probe_failed_reauthentication():
+    observation = wait_for_down()
+    assert observation.backend == EXPECTED_BACKEND
+    transitions = load_transitions()
+    validate_transition_sequence(transitions)
+    assert [event["event"] for event in transitions] == [
+        "tunnel_start", "tunnel_up", "tunnel_down"
+    ]
+    assert EXPECTED_BACKEND == "python"
+    print("LAB_XFAIL=python:failed_reauth_destroys_valid_sa")
+
+
+def probe_authentication_recovered():
+    observation = wait_for_connected()
+    assert observation.backend == EXPECTED_BACKEND
+    groups = grouped_transitions()
+    assert len(groups) == 2
+    assert [event["event"] for event in groups[0]] == [
+        "tunnel_start", "tunnel_up", "tunnel_down"
+    ]
+    assert [event["event"] for event in groups[1]] == [
+        "tunnel_start", "tunnel_up"
+    ]
+    for events in groups:
+        validate_transition_sequence(events)
+    print(f"LAB_AUTH_RECOVERY_OK={EXPECTED_BACKEND}")
 
 
 def probe_lifecycle():
@@ -180,6 +293,18 @@ def main():
         probe_failed_attach()
     elif MODE == "terminated":
         probe_terminated()
+    elif MODE == "transport":
+        probe_transport_only()
+    elif MODE == "reauth":
+        probe_reauthentication()
+    elif MODE == "crashed":
+        probe_crashed()
+    elif MODE == "recovered":
+        probe_recovered()
+    elif MODE == "failed_reauth":
+        probe_failed_reauthentication()
+    elif MODE == "auth_recovered":
+        probe_authentication_recovered()
     else:
         raise ValueError(f"unknown LAB_PROBE_MODE: {MODE}")
 

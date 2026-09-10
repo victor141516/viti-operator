@@ -31,7 +31,12 @@
     "client_child_sa_rekey",
     "client_ike_sa_rekey",
     "operator_delete",
-    "operator_delete_exact_lifecycle"
+    "operator_delete_exact_lifecycle",
+    "full_reauthentication",
+    "authentication_source_loss_preserves_existing_sa",
+    "authentication_provider_recovery_after_failed_reauth",
+    "crash_restart_new_generation",
+    "crash_restart_transport_recovery"
   ],
   "lifecycle": [
     "tunnel_start",
@@ -57,6 +62,31 @@
     {
       "id": "responder_ike_sa_rekey",
       "contract_requirement": "complete a responder-initiated IKE SA rekey without losing transport",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "duplicate_reauth_tunnel_up",
+      "contract_requirement": "successful reauthentication must not publish a duplicate tunnel_up in the same generation",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "failed_reauth_destroys_valid_sa",
+      "contract_requirement": "a failed reauthentication must retain the still-valid existing IKE SA and transport",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "colliding_child_rekey_transport",
+      "contract_requirement": "simultaneous client and responder CHILD rekeys must converge without losing transport",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "colliding_ike_rekey_transport",
+      "contract_requirement": "simultaneous client and responder IKE rekeys must deterministically converge without losing transport",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "crash_missing_down",
+      "contract_requirement": "the supervisor must publish one terminal tunnel_down when the tunnel implementation crashes",
       "strongswan_must_pass": true
     }
   ],

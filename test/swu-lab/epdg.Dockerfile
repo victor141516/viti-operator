@@ -2,7 +2,7 @@ FROM fedora:40
 
 ARG STRONGSWAN_COMMIT=b43f6bfeed34b4afc8a7eb0c0de38e6e70177847
 
-RUN dnf -y install autoconf automake bison flex gcc git gperf iproute \
+RUN dnf -y install autoconf automake bison flex gcc git gperf iproute iproute-tc \
     libtool make openssl-devel pkg-config procps-ng python3 tcpdump && dnf clean all
 
 RUN git init /usr/src/strongswan && \

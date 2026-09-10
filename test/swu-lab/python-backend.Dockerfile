@@ -1,6 +1,6 @@
 FROM fedora:40
 
-RUN dnf -y install gcc git iproute net-tools procps-ng python3 python3-devel python3-pip python3-pyscard && \
+RUN dnf -y install gcc git iproute iproute-tc net-tools procps-ng python3 python3-devel python3-pip python3-pyscard && \
     dnf clean all
 
 RUN pip install --no-cache-dir pyserial pycryptodome cryptography requests \

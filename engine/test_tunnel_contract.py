@@ -8,6 +8,13 @@ import tunnel_contract
 
 
 class TunnelContractTest(unittest.TestCase):
+    def test_control_actions_have_stable_names_and_legacy_aliases(self):
+        self.assertEqual(tunnel_contract.normalize_control_action("reauth\n"), "reauth")
+        self.assertEqual(tunnel_contract.normalize_control_action("r"), "reauth")
+        self.assertEqual(tunnel_contract.encode_control_action("rekey-child"), b"rekey-child\n")
+        with self.assertRaisesRegex(tunnel_contract.ContractViolation, "unknown"):
+            tunnel_contract.normalize_control_action("erase-everything")
+
     def test_connected_status_requires_backend_inner_address_and_interface(self):
         payload = tunnel_contract.status_payload(
             "python", "CONNECTED", 1,

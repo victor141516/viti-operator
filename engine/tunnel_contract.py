@@ -17,10 +17,30 @@ CONTRACT_VERSION = 1
 BACKENDS = frozenset(("python", "strongswan"))
 STATES = frozenset(("CONNECTING", "CONNECTED", "DOWN"))
 TRANSITIONS = frozenset(("tunnel_start", "tunnel_up", "tunnel_down"))
+CONTROL_ACTIONS = frozenset(("stop", "reauth", "rekey-child", "rekey-ike"))
+CONTROL_ALIASES = {
+    "q": "stop",
+    "r": "reauth",
+    "c": "rekey-child",
+    "i": "rekey-ike",
+}
 
 
 class ContractViolation(ValueError):
     """Raised when a backend publishes an invalid observable value."""
+
+
+def normalize_control_action(action):
+    """Normalize one newline-delimited command accepted by ``swu.ctl``."""
+    action = str(action).strip().lower()
+    action = CONTROL_ALIASES.get(action, action)
+    if action not in CONTROL_ACTIONS:
+        raise ContractViolation("unknown tunnel control action")
+    return action
+
+
+def encode_control_action(action):
+    return (normalize_control_action(action) + "\n").encode("ascii")
 
 
 @dataclass(frozen=True)
