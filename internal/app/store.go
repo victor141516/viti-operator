@@ -307,12 +307,166 @@ func (s *Store) SaveCall(call Call) error {
 	previous, existed := s.calls[call.ID]
 	s.calls[call.ID] = call
 	err := s.flushLocked()
+	if err != nil {
+		if existed {
+			s.calls[call.ID] = previous
+		} else {
+			delete(s.calls, call.ID)
+		}
+	}
 	s.mu.Unlock()
 	s.diag.RecordTrace("manager.store", "call.saved", call.TraceID, map[string]any{
 		"existed": existed, "previous": previous, "current": call,
 		"path": s.path, "persist_error": errorString(err),
 	})
 	return err
+}
+
+type engineCallUpdate struct {
+	ProposedID   string
+	Instance     string
+	EngineCallID string
+	TraceID      string
+	Event        string
+	Direction    Direction
+	Peer         string
+	At           time.Time
+	DialStatus   string
+	HangupCause  string
+}
+
+// ApplyEngineCallEvent performs lookup, lifecycle mutation, tunnel
+// reconciliation and persistence under one lock. Engine hooks are independent
+// processes, so composing GetCall and SaveCall in the HTTP handler would allow
+// duplicate rows, state regression, or resurrection across a concurrent down.
+func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var call Call
+	found := false
+	if update.EngineCallID != "" {
+		for _, candidate := range s.calls {
+			if candidate.Instance == update.Instance && candidate.EngineCallID == update.EngineCallID {
+				call, found = candidate, true
+				break
+			}
+		}
+	} else {
+		for _, candidate := range s.calls {
+			if candidate.EndedAt == nil && candidate.Direction == update.Direction && (update.Peer == "" || candidate.Peer == update.Peer) {
+				call, found = candidate, true
+				break
+			}
+		}
+	}
+
+	if found && call.EndedAt != nil {
+		// A start hook may itself have been delayed beyond the terminal event.
+		// It may refine the immutable start boundary, but must never resurrect or
+		// otherwise rewrite the completed lifecycle.
+		if (update.Event != "call_in" && update.Event != "call_out") ||
+			(!call.StartedAt.IsZero() && !update.At.Before(call.StartedAt)) {
+			return call, false, nil
+		}
+		previous := call
+		call.StartedAt = update.At
+		if call.State == "interrupted" {
+			if checkpoint, ok := s.engineTunnels[update.Instance]; ok && !checkpoint.Ready &&
+				!checkpoint.UpdatedAt.Before(call.StartedAt) && call.EndedAt != nil && checkpoint.UpdatedAt.Before(*call.EndedAt) {
+				endedAt := checkpoint.UpdatedAt
+				call.UpdatedAt = endedAt
+				call.EndedAt = &endedAt
+				if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
+					call.AnsweredAt = nil
+				}
+			}
+		}
+		s.calls[call.ID] = call
+		if err := s.flushLocked(); err != nil {
+			s.calls[call.ID] = previous
+			return previous, false, err
+		}
+		return call, true, nil
+	}
+	if !found {
+		call = Call{
+			ID: update.ProposedID, TraceID: update.TraceID, EngineCallID: update.EngineCallID,
+			Instance: update.Instance, Direction: update.Direction, Peer: update.Peer,
+			StartedAt: update.At,
+		}
+	}
+	previous, existed := call, found
+	if call.TraceID == "" {
+		call.TraceID = update.TraceID
+	}
+	if call.StartedAt.IsZero() || update.At.Before(call.StartedAt) {
+		call.StartedAt = update.At
+	}
+
+	switch update.Event {
+	case "call_in", "call_out":
+		if call.State != "active" {
+			call.State = map[Direction]string{DirectionIncoming: "ringing", DirectionOutgoing: "dialing"}[update.Direction]
+		}
+		if call.UpdatedAt.IsZero() || update.At.After(call.UpdatedAt) {
+			call.UpdatedAt = update.At
+		}
+	case "call_active":
+		call.State = "active"
+		if call.AnsweredAt == nil || update.At.Before(*call.AnsweredAt) {
+			answeredAt := update.At
+			call.AnsweredAt = &answeredAt
+		}
+		if call.UpdatedAt.IsZero() || update.At.After(call.UpdatedAt) {
+			call.UpdatedAt = update.At
+		}
+	case "call_result":
+		call.State = callResultState(update.DialStatus, call.State, update.HangupCause)
+		if call.AnsweredAt != nil && call.AnsweredAt.After(update.At) {
+			call.AnsweredAt = nil
+		}
+		if call.UpdatedAt.IsZero() || update.At.After(call.UpdatedAt) {
+			call.UpdatedAt = update.At
+		}
+		endedAt := update.At
+		call.EndedAt = &endedAt
+	}
+
+	// A durable down may overtake an older best-effort call webhook. Reconcile
+	// the call in the same critical section so either ordering produces the same
+	// terminal state and a concurrent handler cannot resurrect it afterward.
+	if call.EndedAt == nil {
+		if checkpoint, ok := s.engineTunnels[update.Instance]; ok && !checkpoint.Ready {
+			call.State = "interrupted"
+			endedAt := checkpoint.UpdatedAt
+			// An event claiming to start after the latest observed down has no
+			// established carrier path. Keep it terminal without manufacturing an
+			// end before its provisional start; a later start hook can refine both.
+			if endedAt.Before(call.StartedAt) {
+				endedAt = update.At
+				if endedAt.Before(call.StartedAt) {
+					endedAt = call.StartedAt
+				}
+			}
+			if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
+				call.AnsweredAt = nil
+			}
+			call.UpdatedAt = endedAt
+			call.EndedAt = &endedAt
+		}
+	}
+
+	s.calls[call.ID] = call
+	if err := s.flushLocked(); err != nil {
+		if existed {
+			s.calls[call.ID] = previous
+		} else {
+			delete(s.calls, call.ID)
+		}
+		return previous, false, err
+	}
+	return call, true, nil
 }
 
 // ReconcilePersistedCalls removes only records that are structurally invalid.

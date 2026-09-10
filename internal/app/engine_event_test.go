@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -419,6 +420,158 @@ func TestDelayedCallStartAfterActiveStillPrecedesTunnelFailure(t *testing.T) {
 	}
 	if call.AnsweredAt != nil {
 		t.Fatalf("historical active evidence survived an earlier terminal boundary: %#v", call)
+	}
+}
+
+func TestHistoricalCallEventsAfterTunnelFailureCannotReopenCall(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	tunnelUpAt := time.Date(2026, 9, 10, 10, 45, 0, 0, time.UTC)
+	callStartedAt := tunnelUpAt.Add(time.Second)
+	callActiveAt := tunnelUpAt.Add(1400 * time.Millisecond)
+	tunnelDownAt := tunnelUpAt.Add(1200 * time.Millisecond)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, tunnelUpAt, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-one", 2, false, tunnelDownAt, http.StatusNoContent)
+
+	// Both call hooks arrive only after the durable down has been committed.
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_active", "call_id": "post-down-call",
+		"recorded_at_ns": callActiveAt.UnixNano(), "args": []string{"out", "+15555550108"},
+	}, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_out", "call_id": "post-down-call",
+		"recorded_at_ns": callStartedAt.UnixNano(), "args": []string{"+15555550108"},
+	}, http.StatusOK)
+
+	call, ok := app.store.GetCallByEngineID("engine-1", "post-down-call")
+	if !ok || call.State != "interrupted" || call.EndedAt == nil || !call.EndedAt.Equal(tunnelDownAt) {
+		t.Fatalf("historical call hooks reopened a call after tunnel failure: %#v", call)
+	}
+	if !call.StartedAt.Equal(callStartedAt) || call.AnsweredAt != nil {
+		t.Fatalf("late lifecycle refinement produced inconsistent history: %#v", call)
+	}
+}
+
+func TestConcurrentCallHooksAndTunnelFailureConvergeAtomically(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tunnelUpAt := time.Date(2026, 9, 10, 12, 0, 0, 0, time.UTC)
+	callStartedAt := tunnelUpAt.Add(time.Second)
+	callActiveAt := tunnelUpAt.Add(2 * time.Second)
+	tunnelDownAt := tunnelUpAt.Add(3 * time.Second)
+	if _, _, _, err := store.ApplyEngineTunnelEvent("engine-1", "process-one", 1, true, true, tunnelUpAt); err != nil {
+		t.Fatal(err)
+	}
+
+	updates := make([]engineCallUpdate, 0, 40)
+	for index := 0; index < 20; index++ {
+		updates = append(updates,
+			engineCallUpdate{ProposedID: "candidate-start", Instance: "engine-1", EngineCallID: "concurrent-call", Event: "call_out", Direction: DirectionOutgoing, Peer: "+15555550109", At: callStartedAt},
+			engineCallUpdate{ProposedID: "candidate-active", Instance: "engine-1", EngineCallID: "concurrent-call", Event: "call_active", Direction: DirectionOutgoing, Peer: "+15555550109", At: callActiveAt},
+		)
+	}
+	start := make(chan struct{})
+	errors := make(chan error, len(updates)+1)
+	var group sync.WaitGroup
+	for _, update := range updates {
+		update := update
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			_, _, err := store.ApplyEngineCallEvent(update)
+			errors <- err
+		}()
+	}
+	group.Add(1)
+	go func() {
+		defer group.Done()
+		<-start
+		_, _, _, err := store.ApplyEngineTunnelEvent("engine-1", "process-one", 2, false, false, tunnelDownAt)
+		errors <- err
+	}()
+	close(start)
+	group.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	calls := store.Calls()
+	if len(calls) != 1 || calls[0].State != "interrupted" || calls[0].EndedAt == nil || !calls[0].EndedAt.Equal(tunnelDownAt) {
+		t.Fatalf("concurrent call and tunnel events did not converge: %#v", calls)
+	}
+}
+
+func TestDurableCallResultRetriesAfterPersistenceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	app, err := New(Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	startedAt := time.Date(2026, 9, 10, 13, 0, 0, 0, time.UTC)
+	endedAt := startedAt.Add(time.Minute)
+	base := map[string]any{"instance": "engine-1", "call_id": "retry-result"}
+	base["event"], base["recorded_at_ns"], base["args"] = "call_out", startedAt.UnixNano(), []string{"+15555550110"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+
+	originalPath := app.store.path
+	app.store.path = t.TempDir() // Atomic replacement over a directory must fail.
+	base["event"], base["recorded_at_ns"], base["args"] = "call_result", endedAt.UnixNano(), []string{"out", "+15555550110", "ANSWER", "16"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusInternalServerError)
+	call, _ := app.store.GetCallByEngineID("engine-1", "retry-result")
+	if call.EndedAt != nil {
+		t.Fatalf("failed persistence leaked terminal state into memory: %#v", call)
+	}
+
+	app.store.path = originalPath
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, ok := reopened.GetCallByEngineID("engine-1", "retry-result")
+	if !ok || call.EndedAt == nil || !call.EndedAt.Equal(endedAt) {
+		t.Fatalf("retried terminal result was not durable after restart: %#v", call)
+	}
+}
+
+func TestSaveCallRollsBackMemoryWhenPersistenceFails(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	startedAt := time.Date(2026, 9, 10, 14, 0, 0, 0, time.UTC)
+	call := Call{ID: "rollback-call", Direction: DirectionOutgoing, Peer: "+15555550111", State: "active", StartedAt: startedAt, UpdatedAt: startedAt}
+	if err := store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	store.path = t.TempDir()
+	endedAt := startedAt.Add(time.Minute)
+	call.State, call.UpdatedAt, call.EndedAt = "ended", endedAt, &endedAt
+	if err := store.SaveCall(call); err == nil {
+		t.Fatal("SaveCall unexpectedly persisted over a directory")
+	}
+	stored, _ := store.GetCall(call.ID)
+	if stored.State != "active" || stored.EndedAt != nil {
+		t.Fatalf("failed SaveCall mutated the in-memory source of truth: %#v", stored)
 	}
 }
 
