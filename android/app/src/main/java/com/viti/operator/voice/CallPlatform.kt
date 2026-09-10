@@ -73,10 +73,10 @@ interface VoiceEngineControl {
 
 interface VoiceCallSessionControl {
 	suspend fun isCarrierCallActive(traceId: String): Boolean
-	suspend fun leave(traceId: String, connectionId: String, operationId: String)
+	suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String)
 }
 
 object NoOpVoiceCallSessionControl : VoiceCallSessionControl {
 	override suspend fun isCarrierCallActive(traceId: String) = false
-	override suspend fun leave(traceId: String, connectionId: String, operationId: String) = Unit
+	override suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) = Unit
 }

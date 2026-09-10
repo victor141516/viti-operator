@@ -74,6 +74,8 @@ class VoiceCallRuntime(
         var audio: PlatformAudioState = PlatformAudioState(),
 		var traceId: String = "",
 		var connectionId: String = "",
+		var registeredConnectionId: String = "",
+		var previousConnectionId: String = "",
 		var wasActive: Boolean = false,
 		var desiredMuted: Boolean = false,
 		var recoveryJob: Job? = null,
@@ -562,7 +564,7 @@ class VoiceCallRuntime(
             failure = error
         }
 		if (!rejected && current.wasActive && current.traceId.isNotBlank() && current.connectionId.isNotBlank()) {
-			submitExplicitLeave(current.traceId, current.connectionId, UUID.randomUUID().toString())
+			submitExplicitLeave(current.traceId, current.connectionId, current.previousConnectionId, UUID.randomUUID().toString())
 		}
         if (!fromPlatform) {
             try {
@@ -638,7 +640,7 @@ class VoiceCallRuntime(
         if (current.phase == VoiceCallPhase.ENDING) return
         current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
 		current.traceId = event.traceId.ifBlank { current.traceId }
-		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		updateConnectionGeneration(current, event.connectionId, registered = true)
 		current.wasActive = true
 		current.sipStarted = true
 		current.recoveryJob?.cancel()
@@ -677,7 +679,7 @@ class VoiceCallRuntime(
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
 		current.traceId = event.traceId.ifBlank { current.traceId }
-		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		updateConnectionGeneration(current, event.connectionId)
 		voice = voice.copy(state = event.type, peer = event.peer.ifBlank { current.peer }, detail = detail)
         publish()
     }
@@ -686,7 +688,7 @@ class VoiceCallRuntime(
 		val current = leg ?: return
 		if (!current.wasActive || current.phase == VoiceCallPhase.ENDING || current.action == LegAction.LEAVING) return
 		current.traceId = event.traceId.ifBlank { current.traceId }
-		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		updateConnectionGeneration(current, event.connectionId)
 		current.sipStarted = false
 		current.phase = VoiceCallPhase.RECONNECTING
 		voice = voice.copy(state = "reconnecting", peer = current.peer, detail = "Reconnecting call media…", quality = null)
@@ -718,10 +720,24 @@ class VoiceCallRuntime(
 		}
 	}
 
-	private fun submitExplicitLeave(traceId: String, connectionId: String, operationId: String) {
+	private fun updateConnectionGeneration(current: Leg, nextConnectionId: String, registered: Boolean = false) {
+		if (nextConnectionId.isBlank()) return
+		if (registered) {
+			current.connectionId = nextConnectionId
+			current.registeredConnectionId = nextConnectionId
+			return
+		}
+		if (nextConnectionId == current.connectionId) return
+		if (current.registeredConnectionId.isNotBlank()) {
+			current.previousConnectionId = current.registeredConnectionId
+		}
+		current.connectionId = nextConnectionId
+	}
+
+	private fun submitExplicitLeave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) {
 		scope.launch {
 			while (true) {
-				val result = runCatching { callSessionControl.leave(traceId, connectionId, operationId) }
+				val result = runCatching { callSessionControl.leave(traceId, connectionId, previousConnectionId, operationId) }
 				if (result.isSuccess) return@launch
 				onDiagnostic("telecom.explicit-leave-retry", mapOf("trace_id" to traceId, "connection_id" to connectionId, "operation_id" to operationId, "error" to result.exceptionOrNull().toString()))
 				delay(RECOVERY_RETRY_MS)

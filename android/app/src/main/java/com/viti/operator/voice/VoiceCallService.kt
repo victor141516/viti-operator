@@ -116,9 +116,9 @@ class VoiceCallService : Service() {
 					return VitiApi(settings).isCarrierCallActive(traceId)
 				}
 
-				override suspend fun leave(traceId: String, connectionId: String, operationId: String) {
+				override suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) {
 					val settings = settingsStore.settings.first()
-					VitiApi(settings).leaveCallParticipant(traceId, identity, connectionId, operationId)
+					VitiApi(settings).leaveCallParticipant(traceId, identity, connectionId, previousConnectionId, operationId)
 				}
 			},
             onSnapshot = ::onSnapshot,

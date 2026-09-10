@@ -881,9 +881,33 @@ class VoiceCallRuntimeTest {
         assertEquals(1, sessions.leaves.size)
         assertEquals("trace-leave", sessions.leaves.single().traceId)
         assertEquals("connection-current", sessions.leaves.single().connectionId)
+		assertEquals("", sessions.leaves.single().previousConnectionId)
         assertTrue(sessions.leaves.single().operationId.isNotBlank())
         runtime.close()
     }
+
+	@Test
+	fun hangupDuringPendingReconnectAlsoIdentifiesThePreviousRegisteredGeneration() = runTest(UnconfinedTestDispatcher()) {
+		val engine = FakeVoiceEngine()
+		val sessions = FakeSessionControl(active = true)
+		val runtime = runtime(engine, null, FakeLegacyAudio(), sessions)
+
+		runtime.placeCall("+34600000103")
+		runCurrent()
+		val token = runtime.snapshot.value.legToken
+		runtime.onVoiceEvent(VoiceEngineEvent("active", traceId = "trace-pending", legToken = token, connectionId = "connection-old"))
+		runtime.onVoiceEvent(VoiceEngineEvent("interrupted", traceId = "trace-pending", legToken = token, connectionId = "connection-old"))
+		runCurrent()
+		runtime.onVoiceEvent(VoiceEngineEvent("calling", traceId = "trace-pending", legToken = token, connectionId = "connection-pending-one"))
+		runtime.onVoiceEvent(VoiceEngineEvent("calling", traceId = "trace-pending", legToken = token, connectionId = "connection-pending-two"))
+		runtime.hangup(token)
+		runCurrent()
+
+		assertEquals(1, sessions.leaves.size)
+		assertEquals("connection-pending-two", sessions.leaves.single().connectionId)
+		assertEquals("connection-old", sessions.leaves.single().previousConnectionId)
+		runtime.close()
+	}
 
     private fun kotlinx.coroutines.test.TestScope.runtime(
         engine: FakeVoiceEngine,
@@ -948,7 +972,7 @@ class VoiceCallRuntimeTest {
     }
 
     private class FakeSessionControl(var active: Boolean) : VoiceCallSessionControl {
-        data class Leave(val traceId: String, val connectionId: String, val operationId: String)
+		data class Leave(val traceId: String, val connectionId: String, val previousConnectionId: String, val operationId: String)
 
         val activeQueries = mutableListOf<String>()
         val leaves = mutableListOf<Leave>()
@@ -958,9 +982,9 @@ class VoiceCallRuntimeTest {
             return active
         }
 
-        override suspend fun leave(traceId: String, connectionId: String, operationId: String) {
-            leaves += Leave(traceId, connectionId, operationId)
-        }
+		override suspend fun leave(traceId: String, connectionId: String, previousConnectionId: String, operationId: String) {
+			leaves += Leave(traceId, connectionId, previousConnectionId, operationId)
+		}
     }
 
     private class FakeGateway(

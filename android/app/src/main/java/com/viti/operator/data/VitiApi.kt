@@ -124,7 +124,7 @@ class VitiApi(private val settings: ServerSettings) {
 	suspend fun isCarrierCallActive(traceId: String): Boolean =
 		calls().any { it.traceId == traceId && it.endedAt.isBlank() && it.state == "active" }
 
-	suspend fun leaveCallParticipant(traceId: String, identity: ClientIdentity, connectionId: String, operationId: String) {
+	suspend fun leaveCallParticipant(traceId: String, identity: ClientIdentity, connectionId: String, previousConnectionId: String, operationId: String) {
 		rawRequest(
 			path = "/api/v1/calls/participants/leave",
 			method = "POST",
@@ -132,6 +132,7 @@ class VitiApi(private val settings: ServerSettings) {
 				.put("trace_id", traceId)
 				.put("client_id", identity.id)
 				.put("connection_id", connectionId)
+				.put("previous_connection_id", previousConnectionId)
 				.put("operation_id", operationId),
 			acceptedStatuses = setOf(200),
 		)

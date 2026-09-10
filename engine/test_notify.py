@@ -101,6 +101,12 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("${VITI_CONNECTION_ID}", client_context)
         self.assertNotIn("ConfKick", client_context)
         self.assertIn("explicit, idempotent manager operation", client_context)
+        join_hook = client_context.index("System(python3 /usr/local/bin/notify.py participant_joined")
+        join_guard = client_context.index("${SYSTEMSTATUS}", join_hook)
+        conference = client_context.index("ConfBridge", join_guard)
+        self.assertLess(join_hook, join_guard)
+        self.assertLess(join_guard, conference)
+        self.assertIn("join_admission_failed", client_context[join_guard:])
 
     def test_participant_event_keeps_call_and_trace_identity(self):
         with mock.patch.dict(os.environ, {}, clear=True), \
@@ -110,13 +116,27 @@ class NotifyTest(unittest.TestCase):
                 ]), \
                 mock.patch.object(notify, "load_env", return_value={"VOWIFI_ID": "engine-one", "MANAGER_URL": "http://manager"}), \
                 mock.patch.object(event_outbox, "enqueue_event", return_value=Path("queued.json")) as enqueue, \
-                mock.patch.object(event_outbox, "deliver_file") as deliver:
-            notify.main()
+                mock.patch.object(event_outbox, "deliver_file", return_value=True) as deliver:
+            result = notify.main()
 
         args, kwargs = enqueue.call_args
         self.assertEqual(args, ("participant_joined", ["web-a", "web-a", "leg-a", "PJSIP/web-0001"]))
         self.assertEqual(kwargs["extra"], {"call_id": "linked-42", "trace_id": "trace-99"})
         deliver.assert_called_once_with(Path("queued.json"))
+        self.assertEqual(result, 0)
+
+    def test_participant_join_fails_closed_when_manager_admission_is_deferred(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(sys, "argv", [
+                    "notify.py", "participant_joined", "linked-42", "trace-99",
+                    "web-a", "web-a", "leg-a", "PJSIP/web-0001",
+                ]), \
+                mock.patch.object(notify, "load_env", return_value={"VOWIFI_ID": "engine-one", "MANAGER_URL": "http://manager"}), \
+                mock.patch.object(event_outbox, "enqueue_event", return_value=Path("queued.json")), \
+                mock.patch.object(event_outbox, "deliver_file", return_value=False):
+            result = notify.main()
+
+        self.assertEqual(result, 1)
 
 
 if __name__ == "__main__":

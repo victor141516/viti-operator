@@ -69,8 +69,8 @@ func TestReconnectSupersedesOldLegAndLateLeaveCannotDisconnectNewLeg(t *testing.
 	call := sessionTestCall()
 	now := time.Now().UTC()
 	r.joined(call, "phone-a", "phone-a", "leg-1", "PJSIP/web-1", now)
-	if got := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", now.Add(time.Second)); got.supersededChannel != "PJSIP/web-1" {
-		t.Fatalf("superseded channel = %q, want old channel", got.supersededChannel)
+	if got := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", now.Add(time.Second)); len(got.channelsToDrop) != 1 || got.channelsToDrop[0] != "PJSIP/web-1" {
+		t.Fatalf("channels to drop = %#v, want old channel", got.channelsToDrop)
 	}
 	r.left(call, "phone-a", "phone-a", "leg-1", now.Add(2*time.Second))
 
@@ -80,6 +80,74 @@ func TestReconnectSupersedesOldLegAndLateLeaveCannotDisconnectNewLeg(t *testing.
 	}
 	if operation.channel != "PJSIP/web-2" || !operation.endCarrier {
 		t.Fatalf("leave used stale state: %+v", operation)
+	}
+}
+
+func TestSupersededDropRemainsPendingUntilAMIConfirmsIt(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-1", "PJSIP/web-1", now)
+	first := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", now.Add(time.Second))
+	if len(first.channelsToDrop) != 1 || first.channelsToDrop[0] != "PJSIP/web-1" {
+		t.Fatalf("first pending drops = %#v", first.channelsToDrop)
+	}
+	duplicate := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", now.Add(time.Second))
+	if len(duplicate.channelsToDrop) != 1 || duplicate.channelsToDrop[0] != "PJSIP/web-1" {
+		t.Fatalf("failed drop was not retained for retry: %#v", duplicate.channelsToDrop)
+	}
+	r.completeDrop(call, "PJSIP/web-1")
+	completed := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", now.Add(time.Second))
+	if len(completed.channelsToDrop) != 0 {
+		t.Fatalf("confirmed drop remained pending: %#v", completed.channelsToDrop)
+	}
+}
+
+func TestFinalExplicitLeaveClosesAdmissionBeforeExternalHangup(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "web-a", "web-a", "leg-a", "PJSIP/a", now)
+	operation, err := r.beginLeave(call, "web-a", "leg-a", "leave-a")
+	if err != nil || !operation.endCarrier {
+		t.Fatalf("final leave = %+v, err=%v", operation, err)
+	}
+
+	late := r.joined(call, "phone-b", "phone-b", "leg-b", "PJSIP/b", now.Add(time.Second))
+	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/b" {
+		t.Fatalf("join racing with terminal leave was admitted: %#v", late.channelsToDrop)
+	}
+	if _, err := r.beginLeave(call, "phone-b", "leg-b", "leave-b"); !errors.Is(err, errCallParticipantNotFound) {
+		t.Fatalf("rejected racing join became a logical participant: %v", err)
+	}
+}
+
+func TestLeaveDuringPendingReconnectMatchesPreviousGenerationOnly(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-old", "PJSIP/old", now)
+	r.left(call, "phone-a", "phone-a", "leg-old", now.Add(time.Second))
+
+	operation, err := r.beginLeaveWithPrevious(call, "phone-a", "leg-pending", "leg-old", "leave-pending")
+	if err != nil || operation.matchedConnectionID != "leg-old" || !operation.endCarrier {
+		t.Fatalf("pending reconnect leave = %+v, err=%v", operation, err)
+	}
+	late := r.joined(call, "phone-a", "phone-a", "leg-pending", "PJSIP/pending", now.Add(2*time.Second))
+	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/pending" {
+		t.Fatalf("explicitly departed pending generation was resurrected: %#v", late.channelsToDrop)
+	}
+}
+
+func TestPreviousGenerationCannotLeaveAnAlreadyRegisteredReplacement(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-old", "PJSIP/old", now)
+	r.joined(call, "phone-a", "phone-a", "leg-current", "PJSIP/current", now.Add(time.Second))
+
+	if _, err := r.beginLeaveWithPrevious(call, "phone-a", "leg-pending", "leg-old", "stale-leave"); !errors.Is(err, errCallParticipantNotFound) {
+		t.Fatalf("stale generations left the current replacement: %v", err)
 	}
 }
 
@@ -93,7 +161,7 @@ func TestLateJoinCannotResurrectExplicitlyDepartedGeneration(t *testing.T) {
 	}
 
 	late := r.joined(call, "phone-a", "phone-a", "leg-1", "PJSIP/web-late", now.Add(time.Second))
-	if late.rejectedChannel != "PJSIP/web-late" {
+	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/web-late" {
 		t.Fatalf("late departed generation was not rejected: %+v", late)
 	}
 	if _, err := r.beginLeave(call, "phone-a", "leg-1", "leave-again"); !errors.Is(err, errCallParticipantNotFound) {
@@ -106,12 +174,13 @@ func TestNewGenerationCanJoinAfterExplicitDeparture(t *testing.T) {
 	call := sessionTestCall()
 	now := time.Now().UTC().Add(-time.Minute)
 	r.joined(call, "phone-a", "phone-a", "leg-1", "PJSIP/web-1", now)
+	r.joined(call, "web-b", "web-b", "leg-b", "PJSIP/web-b", now)
 	if _, err := r.beginLeave(call, "phone-a", "leg-1", "leave-1"); err != nil {
 		t.Fatal(err)
 	}
 
 	joined := r.joined(call, "phone-a", "phone-a", "leg-2", "PJSIP/web-2", time.Now().UTC().Add(time.Second))
-	if joined.rejectedChannel != "" {
+	if len(joined.channelsToDrop) != 0 {
 		t.Fatalf("newer generation was rejected: %+v", joined)
 	}
 	if _, err := r.beginLeave(call, "phone-a", "leg-2", "leave-2"); err != nil {
@@ -327,6 +396,109 @@ func TestParticipantLeaveRetryRepeatsTheSameExternalAction(t *testing.T) {
 	}
 }
 
+func TestParticipantJoinRetriesASupersededDropAfterAMIFailure(t *testing.T) {
+	application, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "engine-secret"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &conferenceControlFixture{dropErrors: []error{errors.New("temporary AMI failure")}}
+	application.gateway = gateway
+	call := sessionTestCall()
+	call.StartedAt, call.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	application.callSessions.joined(call, "web-a", "web-a", "leg-old", "PJSIP/old", now)
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+
+	payload, _ := json.Marshal(map[string]any{
+		"instance": call.Instance, "event": "participant_joined", "call_id": call.EngineCallID, "trace_id": call.TraceID,
+		"recorded_at_ns": now.Add(time.Second).UnixNano(),
+		"args":           []string{"web-a", "web-a", "leg-new", "PJSIP/new"},
+	})
+	post := func() int {
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/api/engine/event", bytes.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Viti-Engine-Token", "engine-secret")
+		response, requestErr := http.DefaultClient.Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if got := post(); got != http.StatusBadGateway {
+		t.Fatalf("first status = %d, want 502", got)
+	}
+	if got := post(); got != http.StatusNoContent {
+		t.Fatalf("retry status = %d, want 204", got)
+	}
+	operation, err := application.callSessions.beginLeave(call, "web-a", "leg-new", "leave-new")
+	if err != nil || operation.channel != "PJSIP/new" {
+		t.Fatalf("replacement was not retained after drop retry: %+v, err=%v", operation, err)
+	}
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	if len(gateway.dropped) != 2 || gateway.dropped[0] != "PJSIP/old" || gateway.dropped[1] != "PJSIP/old" {
+		t.Fatalf("superseded drop attempts = %#v", gateway.dropped)
+	}
+}
+
+func TestFailedFinalLeaveRejectsALaterJoinBeforeRetry(t *testing.T) {
+	application, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "engine-secret"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateway := &conferenceControlFixture{endErrors: []error{errors.New("temporary AMI failure")}}
+	application.gateway = gateway
+	call := sessionTestCall()
+	call.StartedAt, call.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	application.callSessions.joined(call, "web-a", "web-a", "leg-a", "PJSIP/a", time.Now().UTC())
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+
+	leaveBody, _ := json.Marshal(map[string]string{
+		"trace_id": call.TraceID, "client_id": "web-a", "connection_id": "leg-a", "operation_id": "leave-a",
+	})
+	leave := func() int {
+		response, requestErr := http.Post(server.URL+"/api/v1/calls/participants/leave", "application/json", bytes.NewReader(leaveBody))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+	if got := leave(); got != http.StatusBadGateway {
+		t.Fatalf("first final leave status = %d, want 502", got)
+	}
+	postEngineEvent(t, server.URL, "engine-secret", map[string]any{
+		"instance": call.Instance, "event": "participant_joined", "call_id": call.EngineCallID, "trace_id": call.TraceID,
+		"args": []string{"phone-b", "phone-b", "leg-b", "PJSIP/b"},
+	}, http.StatusGone)
+	if got := leave(); got != http.StatusOK {
+		t.Fatalf("final leave retry status = %d, want 200", got)
+	}
+	gateway.mu.Lock()
+	defer gateway.mu.Unlock()
+	if len(gateway.dropped) != 1 || gateway.dropped[0] != "PJSIP/b" {
+		t.Fatalf("join racing with final leave was not rejected: %#v", gateway.dropped)
+	}
+	if len(gateway.conferences) != 2 {
+		t.Fatalf("final conference attempts = %#v", gateway.conferences)
+	}
+}
+
 func TestLateParticipantJoinAfterCallResultIsRejected(t *testing.T) {
 	application, err := New(Config{
 		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
@@ -349,7 +521,11 @@ func TestLateParticipantJoinAfterCallResultIsRejected(t *testing.T) {
 	postEngineEvent(t, server.URL, "engine-secret", map[string]any{
 		"instance": call.Instance, "event": "participant_joined", "call_id": call.EngineCallID, "trace_id": call.TraceID,
 		"args": []string{"web-a", "web-a", "leg-a", "PJSIP/a"},
-	}, http.StatusConflict)
+	}, http.StatusGone)
+	postEngineEvent(t, server.URL, "engine-secret", map[string]any{
+		"instance": call.Instance, "event": "participant_left", "call_id": call.EngineCallID, "trace_id": call.TraceID,
+		"args": []string{"web-a", "web-a", "leg-a", "PJSIP/a"},
+	}, http.StatusNoContent)
 	if _, err := application.callSessions.beginLeave(call, "web-a", "leg-a", "leave-a"); !errors.Is(err, errCallParticipantNotFound) {
 		t.Fatalf("terminal call accepted late participant: %v", err)
 	}

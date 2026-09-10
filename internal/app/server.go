@@ -866,39 +866,58 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		return
 	}
 	call, found := a.store.GetCallByEngineID(instance, engineCallID)
-	if !found || call.EndedAt != nil {
-		writeError(w, http.StatusConflict, "carrier call is no longer active")
+	if !found {
+		writeError(w, http.StatusConflict, "carrier call is not available yet")
+		return
+	}
+	if call.EndedAt != nil {
+		if event == "participant_joined" {
+			writeError(w, http.StatusGone, "carrier call is no longer active")
+			return
+		}
+		// A late or repeated departure already agrees with the terminal call.
+		// Acknowledge it so the durable engine outbox can converge.
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if event == "participant_left" {
-		a.callSessions.left(call, clientID, participantID, connectionID, at)
+		a.callSessions.leftChannel(call, clientID, participantID, connectionID, channel, at)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	joinResult := a.callSessions.joined(call, clientID, participantID, connectionID, channel, at)
-	channelToDrop := joinResult.supersededChannel
-	if joinResult.rejectedChannel != "" {
-		channelToDrop = joinResult.rejectedChannel
-	}
-	if channelToDrop != "" {
-		if controller, ok := a.gateway.(ConferenceCallController); ok {
+	if len(joinResult.channelsToDrop) > 0 {
+		controller, ok := a.gateway.(ConferenceCallController)
+		if !ok {
+			writeError(w, http.StatusNotImplemented, "the telephony provider cannot remove superseded conference participants")
+			return
+		}
+		for _, channelToDrop := range joinResult.channelsToDrop {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			err := controller.DropConferenceLeg(ctx, channelToDrop)
 			cancel()
 			if err != nil {
-				a.diag.RecordTrace("manager.call", "participant.supersede.failed", call.TraceID, map[string]any{"channel": channelToDrop, "connection_id": connectionID, "rejected_current": joinResult.rejectedChannel != "", "error": err.Error()})
+				a.diag.RecordTrace("manager.call", "participant.supersede.failed", call.TraceID, map[string]any{"channel": channelToDrop, "connection_id": connectionID, "error": err.Error()})
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
 			}
+			a.callSessions.completeDrop(call, channelToDrop)
 		}
+	}
+	if !joinResult.admitted {
+		writeError(w, http.StatusGone, "participant admission was rejected")
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		TraceID      string `json:"trace_id"`
-		ClientID     string `json:"client_id"`
-		ConnectionID string `json:"connection_id"`
-		OperationID  string `json:"operation_id"`
+		TraceID              string `json:"trace_id"`
+		ClientID             string `json:"client_id"`
+		ConnectionID         string `json:"connection_id"`
+		PreviousConnectionID string `json:"previous_connection_id,omitempty"`
+		OperationID          string `json:"operation_id"`
 	}
 	if err := readJSON(r, &request, 8<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -907,9 +926,14 @@ func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
 	request.TraceID = strings.TrimSpace(request.TraceID)
 	request.ClientID = strings.TrimSpace(request.ClientID)
 	request.ConnectionID = strings.TrimSpace(request.ConnectionID)
+	request.PreviousConnectionID = strings.TrimSpace(request.PreviousConnectionID)
 	request.OperationID = strings.TrimSpace(request.OperationID)
 	if !validCallControlID(request.TraceID) || !validCallControlID(request.ClientID) || !validCallControlID(request.ConnectionID) || !validCallControlID(request.OperationID) {
 		writeError(w, http.StatusBadRequest, "trace_id, client_id, connection_id and operation_id are required")
+		return
+	}
+	if request.PreviousConnectionID != "" && !validCallControlID(request.PreviousConnectionID) {
+		writeError(w, http.StatusBadRequest, "previous_connection_id is invalid")
 		return
 	}
 	call, found := a.store.GetCallByTraceID(request.TraceID)
@@ -921,7 +945,7 @@ func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"operation_id": request.OperationID, "carrier_ended": true, "already_ended": true})
 		return
 	}
-	operation, err := a.callSessions.beginLeave(call, request.ClientID, request.ConnectionID, request.OperationID)
+	operation, err := a.callSessions.beginLeaveWithPrevious(call, request.ClientID, request.ConnectionID, request.PreviousConnectionID, request.OperationID)
 	if errors.Is(err, errLeaveOperationConflict) {
 		writeError(w, http.StatusConflict, err.Error())
 		return

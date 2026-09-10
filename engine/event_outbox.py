@@ -127,21 +127,30 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
             headers={"X-Viti-Engine-Token": token} if token else {},
             timeout=10,
         )
+    except FileNotFoundError:
+        # Another worker may have delivered and removed this exact durable
+        # event between discovery and read.
+        return True
     except (OSError, ValueError, urllib.error.URLError) as error:
         print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
         return False
-    if response.status_code < 200 or response.status_code >= 300:
+    terminal_rejection = response.status_code == 410 and payload.get("event") == "participant_joined"
+    if not terminal_rejection and (response.status_code < 200 or response.status_code >= 300):
         print("[event-outbox] manager returned HTTP %d for %s; retrying" %
               (response.status_code, path.name), flush=True)
         return False
     try:
         path.unlink()
         _sync_directory(str(path.parent))
+    except FileNotFoundError:
+        return True
     except OSError as error:
         print("[event-outbox] accepted event could not be removed %s: %r" %
               (path.name, error), flush=True)
         return False
-    return True
+    # A terminally rejected join is durably consumed but deliberately not
+    # admitted. notify.py must fail its dialplan System() call in that case.
+    return not terminal_rejection
 
 
 def flush_once(outbox=None, manager_url=None, token=None, session=HTTP):
