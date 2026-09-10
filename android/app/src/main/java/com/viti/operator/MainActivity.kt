@@ -17,6 +17,8 @@ import android.os.Handler
 import android.os.Looper
 import android.database.ContentObserver
 import android.provider.ContactsContract
+import android.provider.Settings
+import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -27,6 +29,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.lifecycleScope
 import com.viti.operator.auth.RemoteAuthService
 import com.viti.operator.auth.ShizukuSetup
@@ -38,6 +41,8 @@ import com.viti.operator.data.vitiClientIdentity
 import com.viti.operator.ui.VitiApp
 import com.viti.operator.ui.VitiTheme
 import com.viti.operator.voice.VoiceCallService
+import com.viti.operator.voice.IncomingCallPresentationStatus
+import com.viti.operator.voice.fullScreenIntentAllowed
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -56,11 +61,13 @@ class MainActivity : ComponentActivity() {
     private var pendingMicrophoneAction: (() -> Unit)? = null
     private var contactsObserver: ContentObserver? = null
     private var contactReloadJob: Job? = null
+    private var callPresentationStatus by mutableStateOf(IncomingCallPresentationStatus())
     private val voiceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: android.os.IBinder) {
             val service = (binder as VoiceCallService.LocalBinder).service
             voiceService = service
             voiceServiceBound = true
+            refreshCallPresentationStatus()
             service.detachVoiceView()
             voiceSnapshotJob?.cancel()
             voiceSnapshotJob = lifecycleScope.launch {
@@ -76,7 +83,9 @@ class MainActivity : ComponentActivity() {
             voiceServiceBound = false
         }
     }
-    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+    private val notificationPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        refreshCallPresentationStatus()
+    }
     private val bluetoothPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val microphonePermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         val action = pendingMicrophoneAction
@@ -100,6 +109,7 @@ class MainActivity : ComponentActivity() {
         applyDebugServerOverride(intent)
         publishClientIdentity()
         createNotificationChannels()
+        refreshCallPresentationStatus()
         lifecycleScope.launch {
             viewModel.incomingMessages.collect(::showIncomingMessageNotification)
         }
@@ -124,6 +134,10 @@ class MainActivity : ComponentActivity() {
 						onEnableServerLine = ::enableServerLine,
 						onReturnLineToPhone = ::returnLineToPhone,
                         onRequestContacts = ::requestContacts,
+                        callPresentationStatus = callPresentationStatus,
+                        onRequestCallNotifications = ::requestCallNotificationAccess,
+                        onOpenFullScreenCallSettings = ::openFullScreenCallSettings,
+                        onOpenCallChannelSettings = ::openCallChannelSettings,
                     )
                 }
             }
@@ -183,6 +197,11 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        refreshCallPresentationStatus()
+    }
+
     override fun onStop() {
         contactsObserver?.let(contentResolver::unregisterContentObserver)
         contactsObserver = null
@@ -238,6 +257,70 @@ class MainActivity : ComponentActivity() {
             createNotificationChannel(messageChannel)
             deleteNotificationChannel(LEGACY_CALL_CHANNEL_ID)
         }
+    }
+
+    private fun refreshCallPresentationStatus() {
+        val manager = getSystemService(NotificationManager::class.java)
+        val channelImportance = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            manager.getNotificationChannel(VoiceCallService.CALL_CHANNEL_ID)?.importance
+                ?: NotificationManager.IMPORTANCE_UNSPECIFIED
+        } else {
+            null
+        }
+        val platformAllowsFullScreen = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            manager.canUseFullScreenIntent()
+        } else {
+            true
+        }
+        callPresentationStatus = IncomingCallPresentationStatus(
+            notificationsEnabled = NotificationManagerCompat.from(this).areNotificationsEnabled(),
+            callChannelImportance = channelImportance,
+            fullScreenIntentAllowed = fullScreenIntentAllowed(Build.VERSION.SDK_INT, platformAllowsFullScreen),
+            fullScreenSettingAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE,
+        )
+    }
+
+    private fun requestCallNotificationAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+            return
+        }
+        openSettings(appNotificationSettingsIntent())
+    }
+
+    private fun openFullScreenCallSettings() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+        openSettings(
+            Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                .setData(Uri.parse("package:$packageName")),
+        )
+    }
+
+    private fun openCallChannelSettings() {
+        val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, VoiceCallService.CALL_CHANNEL_ID)
+        } else {
+            appNotificationSettingsIntent()
+        }
+        openSettings(intent)
+    }
+
+    private fun appNotificationSettingsIntent(): Intent =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+        } else {
+            Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.parse("package:$packageName"))
+        }
+
+    private fun openSettings(intent: Intent) {
+        runCatching { startActivity(intent) }
+            .onFailure { viewModel.showNotice("Android did not provide this settings screen") }
     }
 
     private fun showIncomingMessageNotification(message: Message) {

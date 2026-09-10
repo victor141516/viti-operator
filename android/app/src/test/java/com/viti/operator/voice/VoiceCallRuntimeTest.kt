@@ -76,6 +76,119 @@ class VoiceCallRuntimeTest {
     }
 
     @Test
+    fun duplicateAnswerActionsExecuteOnlyOneSipAnswer() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { answerGate = gate }
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+        val token = "duplicate-answer"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000030", legToken = token))
+        runtime.answer(token)
+        runtime.answer(token)
+        runCurrent()
+
+        assertEquals(1, engine.answerAttempts)
+        gate.complete(Unit)
+        runCurrent()
+        assertEquals(listOf("answer:$token"), engine.commands.filter { it.startsWith("answer:") })
+        runtime.close()
+    }
+
+    @Test
+    fun rejectSupersedesAnAnswerStillWaitingOnSip() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { answerGate = gate }
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+        val token = "answer-before-reject"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000031", legToken = token))
+        runtime.answer(token)
+        runCurrent()
+        runtime.reject(token)
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+
+        assertEquals(1, engine.answerAttempts)
+        assertTrue(engine.commands.contains("reject:$token"))
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun firstRejectWinsAgainstConcurrentAnswerOnTheSameLeg() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val runtime = runtime(engine, null, FakeLegacyAudio())
+        val token = "reject-before-answer"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000032", legToken = token))
+        runtime.reject(token)
+        runtime.answer(token)
+        runCurrent()
+
+        assertEquals(0, engine.answerAttempts)
+        assertEquals(listOf("reject:$token"), engine.commands.filter { it.startsWith("reject:") })
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun remoteCancellationDuringAnswerRollsBackAnyLateSipAcceptance() = runTest(UnconfinedTestDispatcher()) {
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { answerGate = gate }
+        val runtime = runtime(engine, FakeGateway(), FakeLegacyAudio())
+        val token = "cancel-during-answer"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000033", legToken = token))
+        runCurrent()
+        runtime.answer(token)
+        runCurrent()
+        runtime.onVoiceEvent(VoiceEngineEvent("ended", legToken = token))
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun twoClientsRingUntilOneAnswersAndTheOtherCannotAnswerAfterCancellation() = runTest(UnconfinedTestDispatcher()) {
+        val winnerEngine = FakeVoiceEngine()
+        val waitingEngine = FakeVoiceEngine().apply { microphonePermission = false }
+        val winner = runtime(winnerEngine, null, FakeLegacyAudio())
+        val waiting = runtime(waitingEngine, null, FakeLegacyAudio())
+        val winnerToken = "fork-winner"
+        val waitingToken = "fork-waiting"
+
+        winner.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000034", legToken = winnerToken))
+        waiting.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000034", legToken = waitingToken))
+        runCurrent()
+        assertTrue(shouldShowIncomingCall(winner.snapshot.value, winnerToken))
+        assertTrue(shouldShowIncomingCall(waiting.snapshot.value, waitingToken))
+
+        waiting.answer(waitingToken)
+        winner.answer(winnerToken)
+        runCurrent()
+        winner.onVoiceEvent(VoiceEngineEvent("active", peer = "+34600000034", legToken = winnerToken))
+        waiting.onVoiceEvent(VoiceEngineEvent("ended", peer = "+34600000034", legToken = waitingToken))
+        runCurrent()
+
+        waitingEngine.microphonePermission = true
+        waiting.answer(waitingToken)
+        runCurrent()
+        assertEquals(listOf("answer:$winnerToken"), winnerEngine.commands.filter { it.startsWith("answer:") })
+        assertEquals(0, waitingEngine.answerAttempts)
+        assertFalse(shouldShowIncomingCall(winner.snapshot.value, winnerToken))
+        assertFalse(shouldShowIncomingCall(waiting.snapshot.value, waitingToken))
+        assertTrue(waiting.snapshot.value.legToken.isBlank())
+        winner.close()
+        waiting.close()
+    }
+
+    @Test
     fun telecomCallbacksControlTheExactIncomingLegAndSystemSuppression() = runTest(UnconfinedTestDispatcher()) {
         val engine = FakeVoiceEngine()
         val gateway = FakeGateway()
@@ -636,6 +749,7 @@ class VoiceCallRuntimeTest {
         var answerGate: CompletableDeferred<Unit>? = null
         var hangGate: CompletableDeferred<Unit>? = null
         var answerFailure: Throwable? = null
+        var answerAttempts = 0
         var inactiveFailure: Throwable? = null
         var inactiveTrueGate: CompletableDeferred<Unit>? = null
 
@@ -647,6 +761,7 @@ class VoiceCallRuntimeTest {
             commands += "call:$number"
         }
         override suspend fun answer(legToken: String) {
+            answerAttempts += 1
             answerGate?.await()
             answerFailure?.let { throw it }
             commands += "answer:$legToken"

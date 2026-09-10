@@ -55,6 +55,8 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.MicOff
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.ContactPhone
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
@@ -131,6 +133,7 @@ import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.PhoneContact
 import com.viti.operator.data.VitiApi
 import com.viti.operator.voice.VoiceCallRuntime
+import com.viti.operator.voice.IncomingCallPresentationStatus
 import com.viti.operator.voice.VoiceCallSnapshot
 import com.viti.operator.voice.VoiceWebViewClient
 import org.json.JSONObject
@@ -169,6 +172,10 @@ fun VitiApp(
 	onEnableServerLine: () -> Unit,
 	onReturnLineToPhone: () -> Unit,
     onRequestContacts: () -> Unit,
+    callPresentationStatus: IncomingCallPresentationStatus,
+    onRequestCallNotifications: () -> Unit,
+    onOpenFullScreenCallSettings: () -> Unit,
+    onOpenCallChannelSettings: () -> Unit,
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -253,6 +260,10 @@ fun VitiApp(
 						onEnableServerLine = onEnableServerLine,
 						onReturnLineToPhone = onReturnLineToPhone,
                         onSetRecordingEnabled = viewModel::setRecordingEnabled,
+                        callPresentationStatus = callPresentationStatus,
+                        onRequestCallNotifications = onRequestCallNotifications,
+                        onOpenFullScreenCallSettings = onOpenFullScreenCallSettings,
+                        onOpenCallChannelSettings = onOpenCallChannelSettings,
                     )
                 }
             }
@@ -1313,6 +1324,10 @@ private fun ConnectionScreen(
 	onEnableServerLine: () -> Unit,
 	onReturnLineToPhone: () -> Unit,
     onSetRecordingEnabled: (Boolean) -> Unit,
+    callPresentationStatus: IncomingCallPresentationStatus,
+    onRequestCallNotifications: () -> Unit,
+    onOpenFullScreenCallSettings: () -> Unit,
+    onOpenCallChannelSettings: () -> Unit,
 ) {
     var url by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
     var token by rememberSaveable(settings.apiKey) { mutableStateOf(settings.apiKey) }
@@ -1349,6 +1364,12 @@ private fun ConnectionScreen(
             TopologyOverallChip(topologyOverallState(ui.topology))
         }
         TopologyViewerCard(settings, ui.clientId)
+        IncomingCallAlertsCard(
+            status = callPresentationStatus,
+            onRequestNotifications = onRequestCallNotifications,
+            onOpenFullScreenSettings = onOpenFullScreenCallSettings,
+            onOpenChannelSettings = onOpenCallChannelSettings,
+        )
         ElevatedCard {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text("Server", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
@@ -1490,6 +1511,104 @@ private fun ConnectionScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun IncomingCallAlertsCard(
+    status: IncomingCallPresentationStatus,
+    onRequestNotifications: () -> Unit,
+    onOpenFullScreenSettings: () -> Unit,
+    onOpenChannelSettings: () -> Unit,
+) {
+    ElevatedCard(Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.NotificationsActive, contentDescription = null)
+                Spacer(Modifier.width(10.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Incoming call alerts", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Android presents Viti service calls without replacing your cellular dialer.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            HorizontalDivider()
+            CallAlertCapabilityRow(
+                icon = Icons.Default.NotificationsActive,
+                title = "Notifications",
+                detail = if (status.notificationsEnabled) "Allowed" else "Blocked — calls can ring without a visible alert",
+                available = status.notificationsEnabled,
+            )
+            if (!status.notificationsEnabled) {
+                Button(onClick = onRequestNotifications, modifier = Modifier.fillMaxWidth()) {
+                    Text("Allow call notifications")
+                }
+            }
+            CallAlertCapabilityRow(
+                icon = Icons.Default.Call,
+                title = "Call alert channel",
+                detail = when {
+                    status.callChannelImportance == null -> "Managed by this Android version"
+                    !status.callChannelEnabled -> "Blocked"
+                    status.prominentCallChannel -> "High priority"
+                    else -> "Reduced priority — heads-up alerts may not appear"
+                },
+                available = status.callChannelEnabled && status.prominentCallChannel,
+            )
+            OutlinedButton(onClick = onOpenChannelSettings, modifier = Modifier.fillMaxWidth()) {
+                Text("Manage call alert channel")
+            }
+            CallAlertCapabilityRow(
+                icon = Icons.Default.Fullscreen,
+                title = "Full screen while locked",
+                detail = if (status.fullScreenIntentAllowed) {
+                    "Allowed by Android"
+                } else {
+                    "Not allowed — Android will use a heads-up fallback"
+                },
+                available = status.fullScreenIntentAllowed,
+            )
+            if (status.fullScreenSettingAvailable && !status.fullScreenIntentAllowed) {
+                FilledTonalButton(onClick = onOpenFullScreenSettings, modifier = Modifier.fillMaxWidth()) {
+                    Text("Allow full-screen call alerts")
+                }
+            }
+            Text(
+                "The final full-screen or heads-up presentation is chosen by Android and the device manufacturer. " +
+                    "Viti keeps its own ringtone active until this device's call leg is answered or ended.",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+@Composable
+private fun CallAlertCapabilityRow(
+    icon: ImageVector,
+    title: String,
+    detail: String,
+    available: Boolean,
+) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Surface(
+            modifier = Modifier.size(40.dp),
+            shape = CircleShape,
+            color = if (available) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.errorContainer,
+            contentColor = if (available) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(22.dp))
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(Modifier.weight(1f)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            Text(detail, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
