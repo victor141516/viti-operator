@@ -108,6 +108,7 @@ if os.environ.get("SWU_APDU_DEBUG", "0") not in ("0", "", "no"):
 # =============================================================================================
 import json as _json
 import signal as _signal
+from tunnel_contract import status_payload as _status_payload
 
 SWU_RUNDIR = os.environ.get("VOWIFI_RUNDIR", "/run/vowifi")
 SWU_IFACE = os.environ.get("SWU_IFACE", "ipsec0")          # tun device name (pjsip binds this)
@@ -158,8 +159,7 @@ def swu_log(msg):
 def swu_write_status(state, **extra):
     try:
         os.makedirs(SWU_RUNDIR, exist_ok=True)
-        data = {"state": state, "ts": int(time.time())}
-        data.update(extra)
+        data = _status_payload("python", state, int(time.time()), **extra)
         tmp = os.path.join(SWU_RUNDIR, "swu_status.json.tmp")
         with open(tmp, "w") as f:
             _json.dump(data, f)

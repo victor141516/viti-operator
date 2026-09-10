@@ -25,7 +25,8 @@ python3 /usr/local/bin/render.py || { log "render failed"; exit 1; }
 # shellcheck disable=SC1091
 set -a; . "$VOWIFI_RUNDIR/engine.env"; set +a
 export USIM_PIN USIM_READER USIM_READER_INDEX USIM_READER_PORT USIM_IMSI VOWIFI_ID MANAGER_URL VOWIFI_RUNDIR
-export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID
+export SWU_BACKEND="${SWU_BACKEND:-python}"
+export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID SWU_BACKEND
 export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 
 # Delivery reports are irreplaceable protocol evidence. They are committed to
@@ -63,7 +64,7 @@ if [ -z "${SWU_HTTP_AKA_URL:-}" ]; then
 fi
 
 # --- 3. Bring up the SWu (python IKEv2/IPsec) tunnel, supervised ------------------
-log "starting SWu IKEv2 tunnel (epdg=$SWU_EPDG apn=$SWU_APN reader=$USIM_READER_INDEX port=${USIM_READER_PORT:-none})..."
+log "starting SWu tunnel backend=$SWU_BACKEND (epdg=$SWU_EPDG apn=$SWU_APN reader=$USIM_READER_INDEX port=${USIM_READER_PORT:-none})..."
 if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
   : > "$VOWIFI_RUNDIR/charon.log"
   SWU_LOG_TARGET="$VOWIFI_RUNDIR/charon.log"
@@ -88,16 +89,7 @@ rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
       tail -c 524288 "$SWU_OPERATIONAL_LOG" > "$SWU_OPERATIONAL_LOG.tmp"
       mv "$SWU_OPERATIONAL_LOG.tmp" "$SWU_OPERATIONAL_LOG"
     fi
-    python3 -u /usr/local/bin/swu_ike.py \
-        -m "${USIM_READER_INDEX:-0}" \
-        -s "$SWU_SOURCE" \
-        -d "$SWU_EPDG" \
-        -a "${SWU_APN:-ims}" \
-        -I "$USIM_IMSI" \
-        -M "$SWU_MCC" \
-        -N "$SWU_MNC" \
-        -E "${SWU_IMEI:-}" \
-        -V "${SWU_IMEISV:-}" 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
+    python3 -u /usr/local/bin/tunnel_backend.py 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
           awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
         else
           tee -a "$SWU_LOG_TARGET" | awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
