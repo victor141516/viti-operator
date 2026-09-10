@@ -139,6 +139,12 @@ def probe_transport():
     inner_route = command("ip", "-6", "route", "get", EXPECTED_PCSCF)
     assert "dev ipsec0" in inner_route
 
+    # Both implementations are userspace ESP dataplanes. In particular, loading
+    # kernel-netlink for Linux address/route discovery must never select its XFRM
+    # IPsec backend instead of kernel-libipsec.
+    assert command("ip", "xfrm", "state").strip() == ""
+    assert command("ip", "xfrm", "policy").strip() == ""
+
     echo(socket.SOCK_DGRAM, b"viti-swu-lab-udp")
     echo(socket.SOCK_STREAM, b"viti-swu-lab-tcp")
     echo(socket.SOCK_DGRAM, bytes(range(256)) * 16)

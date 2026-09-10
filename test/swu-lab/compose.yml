@@ -92,6 +92,7 @@ services:
     entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
     depends_on: [python-backend]
     network_mode: service:python-backend
+    cap_add: [NET_ADMIN]
     environment:
       LAB_EXPECTED_BACKEND: python
       PYTHONPATH: /usr/local/bin
@@ -189,6 +190,7 @@ services:
     entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
     depends_on: [strongswan-backend]
     network_mode: service:strongswan-backend
+    cap_add: [NET_ADMIN]
     environment:
       LAB_EXPECTED_BACKEND: strongswan
       PYTHONPATH: /usr/local/bin

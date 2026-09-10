@@ -13,6 +13,7 @@ RUN git init /usr/src/strongswan && \
     ./autogen.sh && \
     ./configure --prefix=/usr --sysconfdir=/etc \
       --enable-swanctl --enable-vici --enable-openssl \
+      --enable-aes --enable-sha1 --enable-sha2 --enable-hmac \
       --enable-kernel-libipsec --enable-eap-identity --enable-eap-aka \
       --enable-eap-aka-3gpp --enable-p-cscf && \
     make -j"$(nproc)" && make install && ldconfig && \

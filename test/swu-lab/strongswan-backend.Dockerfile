@@ -14,6 +14,7 @@ RUN git init /usr/src/strongswan && \
     ./autogen.sh && \
     ./configure --prefix=/usr --sysconfdir=/etc \
       --enable-swanctl --enable-vici --enable-python-wheels --enable-openssl \
+      --enable-aes --enable-sha1 --enable-sha2 --enable-hmac \
       --enable-kernel-libipsec --enable-eap-identity --enable-eap-aka && \
     make -j"$(nproc)" && make install && ldconfig && \
     python3 -m pip install --no-cache-dir ./src/libcharon/plugins/vici/python
