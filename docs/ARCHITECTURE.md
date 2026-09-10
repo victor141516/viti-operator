@@ -364,6 +364,16 @@ Authentication mode is dynamic:
 The same selected provider handles challenges originating from both the SWu
 EAP-AKA exchange and IMS SIP AKA. Role changes are persisted and published to
 all clients. A phone that loses ownership stops its remote agent automatically.
+A challenge is pinned to the provider selected when that challenge is created;
+a concurrent ownership change cannot redirect it halfway through. No cached or
+fabricated AKA result substitutes for a fresh SIM calculation.
+
+Authentication availability is not evidence about an established carrier
+session. Losing the selected phone, unplugging OpenStick, or removing its SIM
+makes overall line readiness false and blocks operations that may need fresh AKA,
+but it does not overwrite the last observed ePDG, IMS, or call state. An already
+established call continues until the carrier or engine supplies actual terminal
+transport evidence.
 
 Cellular observations describe only the selected phone subscription. They do
 not participate in authentication arbitration and do not imply that the
@@ -397,6 +407,18 @@ EAP-AKA with the selected SIM provider. Successful IKE_AUTH creates IPsec
 security associations and a carrier-assigned inner connection through the TUN
 interface. NAT-T keepalives, liveness probes, fragmentation, reauthentication,
 and tunnel supervision are handled by the SWu client.
+
+Every SWu process creates a random generation and monotonically increasing event
+sequence. `tunnel_start`, `tunnel_up`, and `tunnel_down` attempt a synchronous
+commit to the bind-mounted event outbox before network delivery. Failure to
+persist `tunnel_start` aborts the process before tunnel setup; a failed
+`tunnel_up` or `tunnel_down` commit is logged, and its call site may continue or
+terminate without direct HTTP fallback. The manager persists the current
+generation, sequence, readiness, retired generations, and most recent causal
+down boundary in the same state file as call history. Duplicate, retired,
+out-of-order, and older cross-generation claims are ignored. The down boundary
+survives a later up and manager restart so a delayed call hook from an older data
+plane cannot reopen a terminated call.
 
 ### IMS
 
@@ -549,14 +571,33 @@ a webhook retry cannot create a second conversation row.
 
 ## Failure and recovery model
 
-- Removing the modem changes line readiness but does not stop the manager.
+- Removing the modem or losing a remote SIM agent changes authentication and
+  overall line readiness but does not stop the manager or terminate an
+  established call. New outgoing calls and outgoing SMS submissions remain
+  blocked until fresh AKA is available again. Incoming traffic may continue
+  while the existing tunnel and IMS registration remain valid.
 - The adaptive authenticator probes for the configured ADB serial and resumes
-  when it returns.
-- Tunnel and engine lifecycle events update clients through the event hub.
-- Open call rows older than the recovery threshold are finalized as
-  `interrupted` after an unclean restart.
-- An engine outage interrupts open calls so a stale row cannot permanently lock
-  all clients.
+  when it returns. OpenStick is advertised only after ADB reports `device`, the
+  SIM property is exactly `READY`, and the bridge package, executable helper,
+  and content provider all respond.
+- Manager restart restores open call rows and the durable tunnel checkpoint;
+  record age alone is not proof that a carrier call ended.
+- A confirmed current-generation tunnel down or a newer engine-process start
+  interrupts calls that existed on that data plane. A SIM-health failure alone
+  does not.
+- Engine call lookup, lifecycle mutation, comparison with the persisted down
+  boundary, and state-file replacement are one atomic store operation. A flush
+  failure rolls memory back before HTTP returns an error.
+- When local outbox storage is writable, Asterisk call lifecycle hooks
+  synchronously commit `call_in`, `call_out`, `call_active`, and `call_result`
+  with stable call and trace IDs plus their source timestamp before attempting
+  delivery. Network or manager failures are retried; a retry cannot duplicate,
+  regress, or resurrect the call. Local outbox write failure falls back to a
+  direct best-effort HTTP delivery and therefore does not provide this durability
+  guarantee.
+- Independent hook processes may finish out of order. Source timestamps refine
+  the earliest start/answer and latest update, while the durable down boundary
+  determines whether the call belongs to a failed data plane.
 - Client histories are recovered from disk, not reconstructed from transient
   browser or Android state.
 - Android activity recreation reattaches to the process-owned call service and

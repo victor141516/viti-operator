@@ -411,13 +411,47 @@ do not add them to source-controlled configuration.
 ### Modem was unplugged
 
 Leave the manager running. Reconnect the same ADB serial. The local fallback is
-probed and selected automatically when no phone owns the SIM role.
+probed and selected automatically when no phone owns the SIM role, but it is
+advertised as ready only when ADB reports `device`, the SIM state is exactly
+`READY`, and the bridge package, executable helper, and content provider all
+respond.
+
+An established carrier call survives loss of the authentication source. New
+operations that may require fresh AKA remain blocked. A real tunnel-down event,
+a newer engine-process boundary, a carrier hangup, or a later authentication
+challenge that cannot be answered may still end the carrier session. Reconnecting
+the modem restores future AKA service; the manager never fabricates or replays
+authentication material.
 
 ### UI says another device has a call
 
-Check Asterisk channels and manager call history. Stale calls are reconciled on
-restart, but an actually active conference must not be destroyed merely to
-clear the UI. Export its trace before intervention.
+Check Asterisk channels, the durable engine event outbox, the persisted tunnel
+checkpoint, and manager call history. A manager restart deliberately preserves
+an open call row because record age is not evidence that the carrier session
+ended. A confirmed current tunnel-down event or a newer engine process boundary
+interrupts calls from the superseded data plane automatically. Export the trace
+before manual intervention.
+
+### Call lifecycle event remains queued
+
+When local outbox storage is writable, `call_in`, `call_out`, `call_active`, and
+`call_result` are written synchronously under
+`${VITI_DIAGNOSTICS_DIR}/engine/runtime/event-outbox` before delivery is
+attempted. A file is removed only after the manager returns a successful 2xx
+response.
+
+If creating, writing, syncing, or renaming the local artifact fails, the notifier
+falls back to direct best-effort HTTP delivery. In that exceptional case no
+durable artifact may exist, so an empty outbox is not by itself proof that every
+event was delivered. Inspect the engine log for an outbox error before drawing
+that conclusion.
+
+A 409 response for a private `call_active` or `call_result` event with an empty
+peer means its matching start event is not durable yet, so the outbox retains and
+retries it. A truly orphaned event can therefore remain queued indefinitely, but
+it does not block later files. After confirming that no matching start event can
+return, move only that artifact out of the outbox for forensic retention; do not
+delete or clear the entire queue.
 
 ### Audio is intermittent
 

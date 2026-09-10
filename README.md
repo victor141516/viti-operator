@@ -28,6 +28,8 @@ IMS and conference audio.
 - Browser-local microphone and speaker preferences with safe default fallback
   and automatic restoration when a remembered device reconnects.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
+- Established carrier sessions survive temporary loss of the SIM authentication
+  source; new operations remain unavailable until fresh AKA can be served.
 - Shared connection topology with live device presence, selected SIM-auth source,
   and evidence-backed Android carrier, registration, access-technology, and
   signal details when the OS exposes them.
@@ -102,9 +104,10 @@ source assets and must not be committed.
 - [Operations and deployment](docs/OPERATIONS.md)
 - [Third-party source provenance](THIRD_PARTY_NOTICES.md)
 
-The current implementation ends the carrier leg when its last participant leaves
-and may reconcile calls when SIM availability is lost. Preserving calls through
-unexpected client or SIM disconnections is tracked as upcoming work in GitHub issues.
+The carrier leg ends when its last participant leaves or when the carrier or
+engine reports a real terminal transport event. SIM-reader availability, ePDG
+tunnel state, IMS registration, and call state are tracked independently; losing
+the reader alone never manufactures a call failure.
 
 ## Source scope
 
