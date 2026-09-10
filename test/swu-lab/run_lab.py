@@ -68,6 +68,18 @@ def compose_environment():
     return {**os.environ, **COMPOSE_FIXED_OVERRIDES, **COMPOSE_OVERRIDES}
 
 
+def build_services_serially(services):
+    """Build lab services one solve at a time.
+
+    Docker Engine 29.6.1 embeds BuildKit 0.31.1, whose concurrent job-value
+    iteration can panic the whole daemon when a multi-service Compose build
+    resolves shared vertices.  Separate solves avoid that upstream race and
+    still reuse BuildKit's layer cache for services sharing a Dockerfile.
+    """
+    for service in services:
+        compose("build", service)
+
+
 def broker_request(path, payload=None):
     encoded = json.dumps(payload).encode().hex() if payload is not None else ""
     script = (
@@ -573,7 +585,7 @@ def main():
                 service for service in services
                 if not args.backend_image or service != backend
             )
-            compose("build", *build_services)
+            build_services_serially(build_services)
         if args.backend_image:
             inspected = subprocess.run(
                 ["docker", "image", "inspect", args.backend_image],
