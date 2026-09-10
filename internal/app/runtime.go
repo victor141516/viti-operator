@@ -52,10 +52,10 @@ func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, ge
 			return previous, false
 		}
 	}
-	// Legacy engines have no process epoch, so their recorded timestamp is the
-	// only cross-generation ordering evidence available. A delayed pre-upgrade
-	// legacy claim must not retire a newer modern generation.
-	if previous.Generation != "" && strings.HasPrefix(generation, "legacy:") && !at.After(previous.UpdatedAt) {
+	// Generations share the engine host's clock. An unobserved older process can
+	// be retried from the durable outbox after a newer process has already taken
+	// ownership; it must not retire that newer generation.
+	if previous.Generation != "" && !at.After(previous.UpdatedAt) {
 		return previous, false
 	}
 	// Only a durable process-start or tunnel-up event can transfer ownership to

@@ -290,6 +290,45 @@ func TestLegacyTunnelEventsCanTakeOwnershipAgainAfterModernEngineRollback(t *tes
 	}
 }
 
+func TestDelayedUnobservedModernGenerationCannotRetireNewerOwner(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "state.json")
+	app, err := New(Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	baseAt := time.Date(2026, 9, 10, 9, 0, 0, 0, time.UTC)
+	oldStartAt := baseAt.Add(3 * time.Second)
+	newStartAt := baseAt.Add(4 * time.Second)
+	newUpAt := baseAt.Add(5 * time.Second)
+	oldStart := map[string]any{
+		"instance": "engine-1", "event": "tunnel_start", "recorded_at_ns": oldStartAt.UnixNano(),
+		"tunnel_generation": "process-c", "tunnel_sequence": 1, "args": []string{"old process"},
+	}
+
+	originalPath := app.store.path
+	app.store.path = directory // Atomic replacement over this directory fails.
+	postEngineEvent(t, server.URL, "test-token", oldStart, http.StatusInternalServerError)
+	app.store.path = originalPath
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "tunnel_start", "recorded_at_ns": newStartAt.UnixNano(),
+		"tunnel_generation": "process-d", "tunnel_sequence": 1, "args": []string{"new process"},
+	}, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-d", 2, true, newUpAt, http.StatusNoContent)
+
+	// The outbox retries C after D has already become the live owner.
+	postEngineEvent(t, server.URL, "test-token", oldStart, http.StatusNoContent)
+	checkpoint, ok := app.store.EngineTunnelCheckpoint("engine-1")
+	if !ok || checkpoint.Generation != "process-d" || !checkpoint.Ready || checkpoint.Sequence != 2 {
+		t.Fatalf("delayed older generation retired the current owner: %#v", checkpoint)
+	}
+}
+
 func TestTunnelTransitionPersistenceFailureRollsBackCallAndCursor(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "state.json")
