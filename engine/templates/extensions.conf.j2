@@ -262,20 +262,24 @@ same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID
 same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${CHANNEL(uniqueid)}))
 same => n,ExecIf($["${VITI_CONNECTION_ID}" = ""]?Set(__VITI_CONNECTION_ID=${CHANNEL(uniqueid)}))
 same => n,ExecIf($["${VITI_RECORDING_FILE_ID}" = ""]?Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)}))
+same => n,Set(VITI_JOIN_ADMITTED=0)
 same => n,System(python3 /usr/local/bin/notify.py participant_joined "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_CLIENT_ID}" "${VITI_PARTICIPANT_ID}" "${VITI_CONNECTION_ID}" "${CHANNEL(name)}")
 same => n,GotoIf($["${SYSTEMSTATUS}" != "SUCCESS"]?join_admission_failed)
+same => n,Set(VITI_JOIN_ADMITTED=1)
 same => n,Gosub(viti-start-client-recording,s,1(${VITI_PARTICIPANT_ID},${VITI_CLIENT_ID},${VITI_RECORDING_FILE_ID}))
 same => n,ConfBridge(${VITI_CALL_ID},viti_bridge,viti_client)
 same => n,Hangup()
 same => n(join_admission_failed),Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-client-admission-failed)
+same => n,TrySystem(python3 /usr/local/bin/notify.py participant_join_aborted "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_CLIENT_ID}" "${VITI_PARTICIPANT_ID}" "${VITI_CONNECTION_ID}" "${CHANNEL(name)}")
 same => n,Hangup()
 exten => h,1,Set(VITI_PARTIES=${CONFBRIDGE_INFO(parties,${VITI_CALL_ID})})
 same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-client-left parties=${VITI_PARTIES})
 ; Losing a SIP/WebRTC leg is not evidence that the user chose to hang up. Keep the marked
 ; carrier leg indefinitely; an explicit, idempotent manager operation removes logical
 ; membership and ends the carrier only after the last logical participant leaves.
+same => n,GotoIf($["${VITI_JOIN_ADMITTED}" != "1"]?done)
 same => n,TrySystem(python3 /usr/local/bin/notify.py participant_left "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_CLIENT_ID}" "${VITI_PARTICIPANT_ID}" "${VITI_CONNECTION_ID}" "${CHANNEL(name)}")
-same => n,Hangup()
+same => n(done),Hangup()
 
 [viti-carrier-conference]
 exten => s,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-carrier-enter direction=${VITI_DIRECTION} peer=${CALLPEER})

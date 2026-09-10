@@ -121,21 +121,37 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
         return False
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        # Another worker completed this asynchronous event.
+        return True
+    except (OSError, ValueError) as error:
+        print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
+        return False
+    if payload.get("event") == "participant_joined":
+        # Releases before synchronous admission may have left these files
+        # behind. No dialplan caller is waiting now, so replaying one could
+        # create a participant that never entered ConfBridge.
+        try:
+            path.unlink()
+            _sync_directory(str(path.parent))
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            print("[event-outbox] obsolete admission could not be removed %s: %r" %
+                  (path.name, error), flush=True)
+            return False
+        return True
+    try:
         response = session.post(
             manager_url + "/api/engine/event",
             json=payload,
             headers={"X-Viti-Engine-Token": token} if token else {},
             timeout=10,
         )
-    except FileNotFoundError:
-        # Another worker may have delivered and removed this exact durable
-        # event between discovery and read.
-        return True
-    except (OSError, ValueError, urllib.error.URLError) as error:
+    except (OSError, urllib.error.URLError) as error:
         print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
         return False
-    terminal_rejection = response.status_code == 410 and payload.get("event") == "participant_joined"
-    if not terminal_rejection and (response.status_code < 200 or response.status_code >= 300):
+    if response.status_code < 200 or response.status_code >= 300:
         print("[event-outbox] manager returned HTTP %d for %s; retrying" %
               (response.status_code, path.name), flush=True)
         return False
@@ -148,9 +164,7 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
         print("[event-outbox] accepted event could not be removed %s: %r" %
               (path.name, error), flush=True)
         return False
-    # A terminally rejected join is durably consumed but deliberately not
-    # admitted. notify.py must fail its dialplan System() call in that case.
-    return not terminal_rejection
+    return True
 
 
 def flush_once(outbox=None, manager_url=None, token=None, session=HTTP):

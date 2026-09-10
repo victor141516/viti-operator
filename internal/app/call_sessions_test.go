@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -114,8 +115,8 @@ func TestFinalExplicitLeaveClosesAdmissionBeforeExternalHangup(t *testing.T) {
 	}
 
 	late := r.joined(call, "phone-b", "phone-b", "leg-b", "PJSIP/b", now.Add(time.Second))
-	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/b" {
-		t.Fatalf("join racing with terminal leave was admitted: %#v", late.channelsToDrop)
+	if late.admitted || len(late.channelsToDrop) != 0 {
+		t.Fatalf("join racing with terminal leave was admitted: %+v", late)
 	}
 	if _, err := r.beginLeave(call, "phone-b", "leg-b", "leave-b"); !errors.Is(err, errCallParticipantNotFound) {
 		t.Fatalf("rejected racing join became a logical participant: %v", err)
@@ -134,8 +135,8 @@ func TestLeaveDuringPendingReconnectMatchesPreviousGenerationOnly(t *testing.T) 
 		t.Fatalf("pending reconnect leave = %+v, err=%v", operation, err)
 	}
 	late := r.joined(call, "phone-a", "phone-a", "leg-pending", "PJSIP/pending", now.Add(2*time.Second))
-	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/pending" {
-		t.Fatalf("explicitly departed pending generation was resurrected: %#v", late.channelsToDrop)
+	if late.admitted || len(late.channelsToDrop) != 0 {
+		t.Fatalf("explicitly departed pending generation was resurrected: %+v", late)
 	}
 }
 
@@ -161,11 +162,89 @@ func TestLateJoinCannotResurrectExplicitlyDepartedGeneration(t *testing.T) {
 	}
 
 	late := r.joined(call, "phone-a", "phone-a", "leg-1", "PJSIP/web-late", now.Add(time.Second))
-	if len(late.channelsToDrop) != 1 || late.channelsToDrop[0] != "PJSIP/web-late" {
+	if late.admitted || len(late.channelsToDrop) != 0 {
 		t.Fatalf("late departed generation was not rejected: %+v", late)
 	}
 	if _, err := r.beginLeave(call, "phone-a", "leg-1", "leave-again"); !errors.Is(err, errCallParticipantNotFound) {
 		t.Fatalf("late join resurrected logical membership: %v", err)
+	}
+}
+
+func TestAbortedAdmissionCannotBecomeGhostOwnershipOnLateDelivery(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	if joined := r.joined(call, "phone-a", "phone-a", "leg-attempt", "PJSIP/attempt", now); !joined.admitted {
+		t.Fatalf("initial admission = %+v", joined)
+	}
+	r.abortJoin(call, "phone-a", "phone-a", "leg-attempt", "PJSIP/attempt", now.Add(time.Second))
+
+	if _, err := r.beginLeave(call, "phone-a", "leg-attempt", "leave-ghost"); !errors.Is(err, errCallParticipantNotFound) {
+		t.Fatalf("aborted admission retained logical ownership: %v", err)
+	}
+	late := r.joined(call, "phone-a", "phone-a", "leg-attempt", "PJSIP/attempt", now)
+	if late.admitted {
+		t.Fatalf("late admission request crossed abort tombstone: %+v", late)
+	}
+	newer := r.joined(call, "phone-a", "phone-a", "leg-new", "PJSIP/new", now.Add(2*time.Second))
+	if !newer.admitted {
+		t.Fatalf("new generation did not supersede abort tombstone: %+v", newer)
+	}
+}
+
+func TestDelayedAbortCannotRemoveANewerAdmittedGeneration(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-old", "PJSIP/old", now)
+	r.joined(call, "phone-a", "phone-a", "leg-new", "PJSIP/new", now.Add(2*time.Second))
+	r.abortJoin(call, "phone-a", "phone-a", "leg-old", "PJSIP/old", now.Add(time.Second))
+
+	operation, err := r.beginLeave(call, "phone-a", "leg-new", "leave-new")
+	if err != nil || operation.matchedConnectionID != "leg-new" {
+		t.Fatalf("delayed old abort removed replacement: operation=%+v err=%v", operation, err)
+	}
+}
+
+func TestLateAbortEndsCarrierAfterAllRealParticipantsExplicitlyLeft(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "web-a", "web-a", "leg-a", "PJSIP/a", now)
+	r.joined(call, "phone-b", "phone-b", "leg-ambiguous", "PJSIP/b", now)
+	operation, err := r.beginLeave(call, "web-a", "leg-a", "leave-a")
+	if err != nil || operation.endCarrier {
+		t.Fatalf("first explicit leave = %+v, err=%v", operation, err)
+	}
+
+	if !r.abortJoin(call, "phone-b", "phone-b", "leg-ambiguous", "PJSIP/b", now.Add(time.Second)) {
+		t.Fatal("late abort did not request carrier termination after the real participant left")
+	}
+	if !r.abortJoin(call, "phone-b", "phone-b", "leg-ambiguous", "PJSIP/b", now.Add(time.Second)) {
+		t.Fatal("replayed abort did not preserve the same carrier termination decision")
+	}
+	late := r.joined(call, "web-c", "web-c", "leg-c", "PJSIP/c", now.Add(2*time.Second))
+	if late.admitted {
+		t.Fatalf("join entered while abort-driven carrier termination was pending: %+v", late)
+	}
+}
+
+func TestClaimMigratesAbortTombstoneBeforeDelayedIncomingJoin(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.abortJoin(call, "", "asterisk-participant", "leg-in", "PJSIP/in", now.Add(time.Second))
+	if !r.claim(call.TraceID, "asterisk-participant", "phone-a") {
+		t.Fatal("claim was rejected")
+	}
+
+	late := r.joined(call, "", "asterisk-participant", "leg-in", "PJSIP/in", now)
+	if late.admitted {
+		t.Fatalf("claim changed the key and bypassed abort tombstone: %+v", late)
+	}
+	newer := r.joined(call, "", "asterisk-participant", "leg-new", "PJSIP/new", now.Add(2*time.Second))
+	if !newer.admitted {
+		t.Fatalf("new incoming generation could not pass migrated tombstone: %+v", newer)
 	}
 }
 
@@ -491,11 +570,45 @@ func TestFailedFinalLeaveRejectsALaterJoinBeforeRetry(t *testing.T) {
 	}
 	gateway.mu.Lock()
 	defer gateway.mu.Unlock()
-	if len(gateway.dropped) != 1 || gateway.dropped[0] != "PJSIP/b" {
-		t.Fatalf("join racing with final leave was not rejected: %#v", gateway.dropped)
+	if len(gateway.dropped) != 0 {
+		t.Fatalf("synchronously rejected join should hang up its own channel: %#v", gateway.dropped)
 	}
 	if len(gateway.conferences) != 2 {
 		t.Fatalf("final conference attempts = %#v", gateway.conferences)
+	}
+}
+
+func TestAbortedParticipantEventRevokesAnAmbiguouslyAdmittedJoin(t *testing.T) {
+	application, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "engine-secret"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := sessionTestCall()
+	call.StartedAt, call.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+	now := time.Now().UTC()
+	base := map[string]any{
+		"instance": call.Instance, "call_id": call.EngineCallID, "trace_id": call.TraceID,
+		"args": []string{"web-a", "web-a", "leg-a", "PJSIP/a"},
+	}
+	joined := maps.Clone(base)
+	joined["event"] = "participant_joined"
+	joined["recorded_at_ns"] = now.UnixNano()
+	postEngineEvent(t, server.URL, "engine-secret", joined, http.StatusNoContent)
+	aborted := maps.Clone(base)
+	aborted["event"] = "participant_join_aborted"
+	aborted["recorded_at_ns"] = now.Add(time.Second).UnixNano()
+	postEngineEvent(t, server.URL, "engine-secret", aborted, http.StatusNoContent)
+
+	if _, err := application.callSessions.beginLeave(call, "web-a", "leg-a", "leave-a"); !errors.Is(err, errCallParticipantNotFound) {
+		t.Fatalf("aborted admission remained logical ownership: %v", err)
 	}
 }
 

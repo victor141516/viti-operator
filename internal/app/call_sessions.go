@@ -33,6 +33,7 @@ type callSession struct {
 	departed           map[string]callParticipantDeparture
 	pendingDrops       map[string]struct{}
 	closingOperationID string
+	explicitLeaveSeen  bool
 }
 
 type callParticipant struct {
@@ -110,7 +111,6 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		r.sessions[key] = session
 	}
 	if session.closingOperationID != "" {
-		session.pendingDrops[channel] = struct{}{}
 		return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
 	}
 	logicalKey := logicalParticipantKey(clientID, participantID)
@@ -120,7 +120,6 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		// engine timestamp is newer than the departure tombstone.
 		_, explicitlyDeparted := departure.connectionIDs[connectionID]
 		if explicitlyDeparted || !at.After(departure.at) {
-			session.pendingDrops[channel] = struct{}{}
 			return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
 		}
 		delete(session.departed, logicalKey)
@@ -128,7 +127,6 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 	previous, found := session.participants[logicalKey]
 	if found && !at.After(previous.updatedAt) {
 		if previous.connectionID != connectionID || previous.channel != channel {
-			session.pendingDrops[channel] = struct{}{}
 			return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
 		}
 		return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true}
@@ -137,7 +135,6 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		// A connection generation identifies exactly one Asterisk channel.
 		// Reusing it for a second channel would make future leave operations
 		// ambiguous, so retain the first channel and reject the duplicate.
-		session.pendingDrops[channel] = struct{}{}
 		return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
 	}
 	if found && previous.connected && previous.connectionID != connectionID && previous.channel != "" {
@@ -148,6 +145,52 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		channel: channel, connected: true, updatedAt: at,
 	}
 	return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true}
+}
+
+// abortJoin revokes a join whose synchronous admission response did not reach
+// the waiting dialplan. The tombstone also fences a delayed copy of that exact
+// request; a genuinely newer connection generation remains free to join.
+func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if clientID == "" {
+		clientID = r.claims[participantClaimKey(call.TraceID, participantID)]
+	}
+	key := callSessionKey(call.Instance, call.EngineCallID)
+	session := r.sessions[key]
+	if session == nil {
+		session = &callSession{
+			instance: call.Instance, engineCallID: call.EngineCallID, traceID: call.TraceID,
+			participants: make(map[string]callParticipant), departed: make(map[string]callParticipantDeparture),
+			pendingDrops: make(map[string]struct{}),
+		}
+		r.sessions[key] = session
+	}
+	delete(session.pendingDrops, channel)
+	logicalKey := logicalParticipantKey(clientID, participantID)
+	removed := false
+	if participant, found := session.participants[logicalKey]; found && participant.connectionID == connectionID && !at.Before(participant.updatedAt) {
+		delete(session.participants, logicalKey)
+		removed = true
+	}
+	departure := session.departed[logicalKey]
+	if departure.connectionIDs == nil {
+		departure.connectionIDs = make(map[string]struct{})
+	}
+	departure.connectionIDs[connectionID] = struct{}{}
+	if departure.at.IsZero() || at.After(departure.at) {
+		departure.at = at
+	}
+	session.departed[logicalKey] = departure
+	abortOperationID := "abort:" + logicalKey + ":" + connectionID
+	if session.closingOperationID == abortOperationID {
+		return true
+	}
+	if removed && len(session.participants) == 0 && session.explicitLeaveSeen && session.closingOperationID == "" {
+		session.closingOperationID = abortOperationID
+		return true
+	}
+	return false
 }
 
 func pendingDropChannels(session *callSession) []string {
@@ -204,13 +247,27 @@ func (r *callSessionRegistry) claim(traceID, participantID, clientID string) boo
 			continue
 		}
 		provisionalKey := logicalParticipantKey("", participantID)
+		stableKey := logicalParticipantKey(clientID, participantID)
+		if provisionalDeparture, found := session.departed[provisionalKey]; found {
+			delete(session.departed, provisionalKey)
+			stableDeparture := session.departed[stableKey]
+			if stableDeparture.connectionIDs == nil {
+				stableDeparture.connectionIDs = make(map[string]struct{})
+			}
+			for connectionID := range provisionalDeparture.connectionIDs {
+				stableDeparture.connectionIDs[connectionID] = struct{}{}
+			}
+			if stableDeparture.at.IsZero() || provisionalDeparture.at.After(stableDeparture.at) {
+				stableDeparture.at = provisionalDeparture.at
+			}
+			session.departed[stableKey] = stableDeparture
+		}
 		participant, found := session.participants[provisionalKey]
 		if !found {
 			return true
 		}
 		delete(session.participants, provisionalKey)
 		participant.clientID = clientID
-		stableKey := logicalParticipantKey(clientID, participantID)
 		if existing, ok := session.participants[stableKey]; ok && existing.updatedAt.After(participant.updatedAt) {
 			return true
 		}
@@ -247,6 +304,7 @@ func (r *callSessionRegistry) beginLeaveWithPrevious(call Call, clientID, connec
 		return callLeaveOperation{}, errCallParticipantNotFound
 	}
 	delete(session.participants, logicalKey)
+	session.explicitLeaveSeen = true
 	connectionIDs := map[string]struct{}{participant.connectionID: {}}
 	if connectionID != "" {
 		connectionIDs[connectionID] = struct{}{}

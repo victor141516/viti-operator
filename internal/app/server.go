@@ -282,7 +282,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		a.ingestRecordingTrack(w, request.Instance, request.CallID, request.Args, request.RecordedAtNS)
 		return
 	}
-	if request.Event == "participant_joined" || request.Event == "participant_left" {
+	if request.Event == "participant_joined" || request.Event == "participant_left" || request.Event == "participant_join_aborted" {
 		a.ingestCallParticipantEvent(w, request.Event, request.Instance, request.CallID, request.Args, eventAt)
 		return
 	}
@@ -877,6 +877,25 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		}
 		// A late or repeated departure already agrees with the terminal call.
 		// Acknowledge it so the durable engine outbox can converge.
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if event == "participant_join_aborted" {
+		if a.callSessions.abortJoin(call, clientID, participantID, connectionID, channel, at) {
+			controller, ok := a.gateway.(ConferenceCallController)
+			if !ok {
+				writeError(w, http.StatusNotImplemented, "the telephony provider cannot end an abandoned conference")
+				return
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			err := controller.EndConference(ctx, call.EngineCallID)
+			cancel()
+			if err != nil {
+				a.diag.RecordTrace("manager.call", "participant.abort-end.failed", call.TraceID, map[string]any{"connection_id": connectionID, "error": err.Error()})
+				writeError(w, http.StatusBadGateway, err.Error())
+				return
+			}
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}

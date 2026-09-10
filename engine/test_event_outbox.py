@@ -49,17 +49,17 @@ class EventOutboxTest(unittest.TestCase):
             self.assertTrue(event_outbox.deliver_file(missing, "http://manager", "", session))
             session.post.assert_not_called()
 
-    def test_terminally_rejected_participant_is_consumed_but_not_admitted(self):
+    def test_obsolete_durable_participant_join_is_discarded_without_replay(self):
         with tempfile.TemporaryDirectory() as directory:
             with mock.patch.object(event_outbox, "load_env", return_value={}):
                 path = event_outbox.enqueue_event(
                     "participant_joined", ["web-a", "web-a", "leg-a", "PJSIP/a"], outbox=directory,
                 )
             session = mock.Mock()
-            session.post.return_value = Response(410)
 
-            self.assertFalse(event_outbox.deliver_file(path, "http://manager", "", session))
+            self.assertTrue(event_outbox.deliver_file(path, "http://manager", "", session))
             self.assertFalse(path.exists())
+            session.post.assert_not_called()
 
     def test_tunnel_ordering_metadata_is_persisted_for_retry(self):
         with tempfile.TemporaryDirectory() as directory:
