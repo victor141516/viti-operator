@@ -55,10 +55,22 @@ def present(command):
     except Exception:
         return False
 
+def process_identity(name):
+    pid = run(["pgrep", "-xo", name]).strip()
+    if not pid.isdigit():
+        return ""
+    try:
+        stat = open("/proc/" + pid + "/stat", encoding="utf-8").read()
+        fields = stat.rsplit(")", 1)[1].split()
+        return pid + ":" + fields[19]
+    except (OSError, IndexError):
+        return ""
+
 registrations = run(["asterisk", "-rx", "pjsip show registrations"])
 channels = run(["asterisk", "-rx", "core show channels count"])
 channelstats = run(["asterisk", "-rx", "pjsip show channelstats"])
 conferences = run(["asterisk", "-rx", "confbridge list"])
+addresses = run(["ip", "-j", "address", "show", "dev", "ipsec0"])
 sas = run(["swanctl", "--list-sas", "--raw"])
 ike_ids, child_ids = [], []
 for event in sas.split("list-sa event ")[1:]:
@@ -92,9 +104,21 @@ for line in channelstats.splitlines():
         "tx_packets": tx_packets,
     })
 media_streams.sort(key=lambda stream: stream["id"])
+try:
+    global_addresses = sorted(
+        address["local"]
+        for interface in json.loads(addresses)
+        for address in interface.get("addr_info", [])
+        if address.get("scope") == "global" and address.get("local")
+    )
+except (ValueError, TypeError, KeyError):
+    global_addresses = []
+inner_address_fingerprint = hashlib.sha256("\0".join(global_addresses).encode()).hexdigest()[:16] if global_addresses else ""
 print(json.dumps({
     "snapshot_ok": bool(channels and registrations and channelstats and conferences),
     "charon": present(["pgrep", "-x", "charon"]),
+    "charon_identity": process_identity("charon"),
+    "asterisk_identity": process_identity("asterisk"),
     "python": present(["pgrep", "-f", "[s]wu_ike.py"]),
     "tunnel": present(["ip", "link", "show", "ipsec0"]),
     "ims": bool(re.search(r"(?m)^\s*volte_ims/.*\sRegistered\s", registrations)),
@@ -109,6 +133,7 @@ print(json.dumps({
     "media_rx_packets": media_rx_packets,
     "media_tx_packets": media_tx_packets,
     "media_streams": media_streams,
+    "inner_address_fingerprint": inner_address_fingerprint,
 }, separators=(",", ":")))
 `
 

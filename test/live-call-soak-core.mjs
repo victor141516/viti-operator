@@ -21,7 +21,30 @@ export class LiveCallSoakTracker {
     this.mediaTxProgressSamples = 0
     this.maxMediaRxStallSeconds = 0
     this.maxMediaTxStallSeconds = 0
+    this.charonIdentity = null
+    this.asteriskIdentity = null
+    this.innerAddressFingerprint = null
+    this.charonRestarts = 0
+    this.asteriskRestarts = 0
+    this.innerAddressChanges = 0
     this.fatalReason = ''
+  }
+
+  observeStableValue(property, value, missingReason, changedReason, changeCounter, reasons) {
+    const normalized = String(value || '')
+    if (!normalized) {
+      reasons.push(missingReason)
+      return
+    }
+    if (this[property] === null) {
+      this[property] = normalized
+      return
+    }
+    if (this[property] !== normalized) {
+      this[property] = normalized
+      this[changeCounter] += 1
+      reasons.push(changedReason)
+    }
   }
 
   observeMediaDirection(stream, direction, packets, at, reasons) {
@@ -119,6 +142,12 @@ export class LiveCallSoakTracker {
     if (!sample.ims) reasons.push('ims_unregistered')
     if (!(sample.ike_ids || []).length) reasons.push('ike_sa_absent')
     if (!(sample.child_ids || []).length) reasons.push('child_sa_absent')
+    this.observeStableValue('charonIdentity', sample.charon_identity, 'charon_identity_unavailable', 'charon_restarted', 'charonRestarts', reasons)
+    this.observeStableValue('asteriskIdentity', sample.asterisk_identity, 'asterisk_identity_unavailable', 'asterisk_restarted', 'asteriskRestarts', reasons)
+    this.observeStableValue(
+      'innerAddressFingerprint', sample.inner_address_fingerprint,
+      'inner_address_unavailable', 'inner_address_changed', 'innerAddressChanges', reasons,
+    )
     this.observeMediaStreams(sample.media_streams, at, reasons)
     if (reasons.length) this.unhealthySamples.push({ timestamp: sample.timestamp, reasons: [...new Set(reasons)] })
 
@@ -172,6 +201,9 @@ export class LiveCallSoakTracker {
       media_tx_progress_samples: this.mediaTxProgressSamples,
       maximum_observed_media_rx_stall_seconds: this.maxMediaRxStallSeconds,
       maximum_observed_media_tx_stall_seconds: this.maxMediaTxStallSeconds,
+      charon_restarts: this.charonRestarts,
+      asterisk_restarts: this.asteriskRestarts,
+      inner_address_changes: this.innerAddressChanges,
       requirements: {
         minimum_call_seconds: this.requirements.minCallSeconds,
         minimum_ike_renewals: this.requirements.minIkeRenewals,

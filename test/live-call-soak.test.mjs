@@ -16,6 +16,9 @@ const sample = (seconds, overrides = {}) => {
     ims: true,
     ike_ids: [1],
     child_ids: [10],
+    charon_identity: '53:1000',
+    asterisk_identity: '7:900',
+    inner_address_fingerprint: 'inner-one',
     media_channels: 2,
     media_rx_packets: seconds * 50,
     media_tx_packets: seconds * 50,
@@ -57,6 +60,9 @@ test('accepts one call only after the required natural SA transitions and post-c
     media_tx_progress_samples: 3,
     maximum_observed_media_rx_stall_seconds: 0,
     maximum_observed_media_tx_stall_seconds: 0,
+    charon_restarts: 0,
+    asterisk_restarts: 0,
+    inner_address_changes: 0,
     requirements: {
       minimum_call_seconds: 100,
       minimum_ike_renewals: 2,
@@ -197,4 +203,37 @@ test('does not count ringing or early media as answered call duration', () => {
   assert.equal(summary.call_detected, false)
   assert.equal(summary.answered_call_detected, false)
   assert.equal(summary.call_duration_seconds, 0)
+})
+
+test('rejects process restarts and inner address changes during an answered call', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(2, {
+    charon_identity: '54:2000',
+    asterisk_identity: '8:2000',
+    inner_address_fingerprint: 'inner-two',
+  }))
+  tracker.observe(sample(3, { active_channels: 0 }))
+  tracker.observe(sample(4, { active_channels: 0 }))
+
+  const summary = tracker.summary()
+  assert.equal(summary.accepted, false)
+  assert.equal(summary.charon_restarts, 1)
+  assert.equal(summary.asterisk_restarts, 1)
+  assert.equal(summary.inner_address_changes, 1)
+  assert.deepEqual(tracker.unhealthySamples[0].reasons, ['charon_restarted', 'asterisk_restarted', 'inner_address_changed'])
+})
+
+test('rejects missing process or inner address identity while a call is active', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1, { charon_identity: '', asterisk_identity: '', inner_address_fingerprint: '' }))
+  tracker.observe(sample(2, { active_channels: 0 }))
+  tracker.observe(sample(3, { active_channels: 0 }))
+
+  assert.equal(tracker.summary().accepted, false)
+  assert.deepEqual(tracker.unhealthySamples[0].reasons, [
+    'charon_identity_unavailable',
+    'asterisk_identity_unavailable',
+    'inner_address_unavailable',
+  ])
 })
