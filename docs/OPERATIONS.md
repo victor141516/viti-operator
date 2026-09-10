@@ -465,12 +465,12 @@ do not add them to source-controlled configuration.
    the local authentication transport and is not the carrier IMS stack.
 
 For an approximately hourly IMS interruption, inspect
-`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for `IKE_SA rekey` and
-`swu_ike exited`. Healthy lifetime maintenance reports `IKE_SA rekey complete`
-without an Asterisk restart. The default proactive periods are 30 minutes for
-the ESP CHILD SA and 45 minutes for the parent IKE SA; `0` disables either timer
-through `SWU_CHILD_REKEY_MINUTES` or `SWU_IKE_REKEY_MINUTES` in the rendered
-engine environment.
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for strongSwan SA state,
+VICI lifecycle events, and `IKE_SA rekey complete`. Healthy lifetime
+maintenance completes without restarting Asterisk. The default proactive
+periods are 30 minutes for the ESP CHILD SA and 45 minutes for the parent IKE SA;
+`0` disables either timer through `SWU_CHILD_REKEY_MINUTES` or
+`SWU_IKE_REKEY_MINUTES` in the rendered engine environment.
 
 ### Modem was unplugged
 
