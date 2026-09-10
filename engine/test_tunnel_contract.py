@@ -3,7 +3,6 @@ from pathlib import Path
 import tempfile
 import unittest
 
-import tunnel_backend
 import tunnel_contract
 
 
@@ -17,11 +16,11 @@ class TunnelContractTest(unittest.TestCase):
 
     def test_connected_status_requires_backend_inner_address_and_interface(self):
         payload = tunnel_contract.status_payload(
-            "python", "CONNECTED", 1,
+            "strongswan", "CONNECTED", 1,
             inner_ip="2001:db8::10", pcscf="2001:db8::20", iface="ipsec0",
         )
         observation = tunnel_contract.validate_status(payload)
-        self.assertEqual(observation.backend, "python")
+        self.assertEqual(observation.backend, "strongswan")
         self.assertEqual(observation.inner_ip, "2001:db8::10")
 
         for missing in ("inner_ip", "iface"):
@@ -36,14 +35,14 @@ class TunnelContractTest(unittest.TestCase):
 
     def test_runtime_status_is_consumed_only_through_public_file(self):
         with tempfile.TemporaryDirectory() as directory:
-            payload = tunnel_contract.status_payload("python", "CONNECTING", 5)
+            payload = tunnel_contract.status_payload("strongswan", "CONNECTING", 5)
             (Path(directory) / "swu_status.json").write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(tunnel_contract.read_status(directory).state, "CONNECTING")
 
     def test_supervisor_honours_remaining_carrier_backoff(self):
         with tempfile.TemporaryDirectory() as directory:
             payload = tunnel_contract.status_payload(
-                "python", "DOWN", 1000, backoff=600,
+                "strongswan", "DOWN", 1000, backoff=600,
                 reason_code="AUTHENTICATION_FAILED",
             )
             (Path(directory) / "swu_status.json").write_text(
@@ -105,44 +104,6 @@ class TunnelContractTest(unittest.TestCase):
             tunnel_contract.ContractViolation, "invalid tunnel lifecycle"
         ):
             tunnel_contract.validate_transition_sequence(events)
-
-    def test_python_backend_command_maps_the_stable_inputs(self):
-        backend, command = tunnel_backend.backend_command({
-            "SWU_BACKEND": "python",
-            "SWU_SOURCE": "192.0.2.10",
-            "SWU_EPDG": "198.51.100.20",
-            "SWU_APN": "ims",
-            "USIM_IMSI": "001010123456789",
-            "SWU_MCC": "001",
-            "SWU_MNC": "01",
-            "SWU_IMEI": "123456789012345",
-            "SWU_IMEISV": "1234567890123456",
-            "USIM_READER_INDEX": "7",
-        })
-        self.assertEqual(backend, "python")
-        self.assertEqual(command[command.index("-m") + 1], "7")
-        self.assertEqual(command[command.index("-d") + 1], "198.51.100.20")
-        self.assertEqual(command[command.index("-I") + 1], "001010123456789")
-
-    def test_strongswan_selection_fails_closed_until_adapter_exists(self):
-        with self.assertRaisesRegex(
-            tunnel_backend.BackendConfigurationError, "adapter is not installed"
-        ):
-            tunnel_backend.backend_command({
-                "SWU_BACKEND": "strongswan",
-                "SWU_STRONGSWAN_BACKEND": "/definitely/missing/adapter.py",
-            })
-
-    def test_strongswan_backend_command_uses_installed_adapter(self):
-        with tempfile.NamedTemporaryFile(suffix=".py") as adapter:
-            backend, command = tunnel_backend.backend_command({
-                "SWU_BACKEND": "strongswan",
-                "SWU_STRONGSWAN_BACKEND": adapter.name,
-                "SWU_PYTHON": "python-for-swu",
-            })
-        self.assertEqual(backend, "strongswan")
-        self.assertEqual(command, ["python-for-swu", adapter.name])
-
 
 if __name__ == "__main__":
     unittest.main()

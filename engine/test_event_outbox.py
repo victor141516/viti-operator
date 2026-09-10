@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -85,13 +86,31 @@ class EventOutboxTest(unittest.TestCase):
 
     def test_uncorrelated_early_event_does_not_block_later_mapping(self):
         with tempfile.TemporaryDirectory() as directory:
-            early = event_outbox.enqueue_event("sms_protocol", ["status_report"], recorded_at_ns=1, outbox=directory)
-            mapping = event_outbox.enqueue_event("sms_protocol", ["submitted"], recorded_at_ns=2, outbox=directory)
+            now = time.time_ns()
+            early = event_outbox.enqueue_event("sms_protocol", ["status_report"], recorded_at_ns=now, outbox=directory)
+            mapping = event_outbox.enqueue_event("sms_protocol", ["submitted"], recorded_at_ns=now + 1, outbox=directory)
             session = mock.Mock()
             session.post.side_effect = [Response(409), Response(200)]
             self.assertEqual(event_outbox.flush_once(directory, "http://manager", "", session), 1)
             self.assertTrue(early.exists())
             self.assertFalse(mapping.exists())
+
+    def test_old_permanent_conflict_is_archived_without_losing_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = event_outbox.enqueue_event(
+                "sms_protocol", ["status_report"], recorded_at_ns=1, outbox=directory
+            )
+            session = mock.Mock()
+            session.post.return_value = Response(409)
+            with mock.patch.dict(
+                event_outbox.os.environ,
+                {"VITI_EVENT_OUTBOX_DEAD_LETTER_SECONDS": "1"},
+            ):
+                self.assertTrue(
+                    event_outbox.deliver_file(path, "http://manager", "", session)
+                )
+            self.assertFalse(path.exists())
+            self.assertTrue((Path(directory) / "dead-letter" / path.name).exists())
 
 
 if __name__ == "__main__":

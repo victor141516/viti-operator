@@ -81,7 +81,7 @@ same => n,TrySystem(python3 /usr/local/bin/notify.py sms_in "${MESSAGE(from)}" "
 {% for t in msg_targets %}
 same => n,MessageSend(pjsip:{{ t }},${MESSAGE(from)},sip:{{ t }})
 {% endfor %}
-same => n,Hangup()
+same => n(done),Hangup()
 
 ; ===== Outgoing call from a local endpoint (softphone / external SIP) =====
 ; Single dial attempt (no auto-redial). The dial result (incl. far-end reject) is

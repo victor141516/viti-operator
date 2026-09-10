@@ -107,7 +107,6 @@ services:
       VOWIFI_ADVERTISE_ADDR: ${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}
       # Both SWu EAP-AKA and SIP IMS-AKA use the manager's selected provider:
       # OpenStick, Android remote, or a generic command adapter.
-      SWU_BACKEND: ${SWU_BACKEND:-python}
       SWU_HTTP_AKA_URL: http://manager:8787/api/v1/authenticate
       SWU_HTTP_AKA_TOKEN: ${VITI_API_KEY:?Set VITI_API_KEY in .env}
       VOWIFI_DIAGNOSTICS_ENABLED: ${VITI_DIAGNOSTICS_ENABLED:-0}

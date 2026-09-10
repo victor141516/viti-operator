@@ -44,6 +44,31 @@ class _HTTPSession:
 HTTP = _HTTPSession()
 
 
+def _archive_permanent_conflict(path, payload, now_ns=None):
+    """Move an old, still-uncorrelatable event aside without deleting evidence."""
+    ttl = float(os.environ.get("VITI_EVENT_OUTBOX_DEAD_LETTER_SECONDS", "86400"))
+    if ttl <= 0:
+        return False
+    recorded = int(payload.get("recorded_at_ns") or 0)
+    now_ns = time.time_ns() if now_ns is None else int(now_ns)
+    if recorded <= 0 or now_ns - recorded < ttl * 1_000_000_000:
+        return False
+    dead_letter = path.parent / "dead-letter"
+    dead_letter.mkdir(parents=True, exist_ok=True)
+    destination = dead_letter / path.name
+    try:
+        os.replace(path, destination)
+        _sync_directory(str(path.parent))
+        _sync_directory(str(dead_letter))
+    except FileNotFoundError:
+        return True
+    print(
+        "[event-outbox] archived permanently uncorrelated event %s" % path.name,
+        flush=True,
+    )
+    return True
+
+
 def load_env():
     values = {}
     path = os.environ.get("VOWIFI_ENV", os.path.join(RUNDIR, "engine.env"))
@@ -153,6 +178,8 @@ def deliver_file(path, manager_url=None, token=None, session=HTTP):
         print("[event-outbox] delivery deferred for %s: %r" % (path.name, error), flush=True)
         return False
     if response.status_code < 200 or response.status_code >= 300:
+        if response.status_code == 409 and _archive_permanent_conflict(path, payload):
+            return True
         print("[event-outbox] manager returned HTTP %d for %s; retrying" %
               (response.status_code, path.name), flush=True)
         return False

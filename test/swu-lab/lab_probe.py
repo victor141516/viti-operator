@@ -8,18 +8,17 @@ import socket
 import subprocess
 import time
 
-from tunnel_contract import ContractViolation, validate_status, validate_transition_sequence
+from tunnel_contract import validate_status, validate_transition_sequence
 
 
 RUNDIR = Path(os.environ.get("VOWIFI_RUNDIR", "/run/vowifi"))
-EXPECTED_BACKEND = os.environ["LAB_EXPECTED_BACKEND"]
+EXPECTED_BACKEND = "strongswan"
 EXPECTED_INNER = os.environ.get("LAB_EXPECTED_INNER", "2001:db8:39:100::1")
 EXPECTED_PCSCF = os.environ.get("LAB_EXPECTED_PCSCF", "2001:db8:39:200::10")
 EPDG_ADDRESS = os.environ.get("LAB_EPDG", os.environ.get("SWU_EPDG", "172.30.40.10"))
 ECHO_PORT = int(os.environ.get("LAB_ECHO_PORT", "18080"))
 TIMEOUT = float(os.environ.get("LAB_ATTACH_TIMEOUT", "30"))
 MODE = os.environ.get("LAB_PROBE_MODE", "connected")
-EXPECT_DUPLICATE_DOWN = os.environ.get("LAB_EXPECT_LEGACY_DUPLICATE_DOWN") == "1"
 
 
 def command(*args):
@@ -97,6 +96,7 @@ def grouped_transitions():
 def echo(sock_type, payload):
     with socket.socket(socket.AF_INET6, sock_type) as sock:
         sock.settimeout(5)
+        sock.bind((EXPECTED_INNER, 0))
         if sock_type == socket.SOCK_DGRAM:
             sock.sendto(payload, (EXPECTED_PCSCF, ECHO_PORT))
             received, _ = sock.recvfrom(len(payload) + 1)
@@ -136,12 +136,17 @@ def probe_transport():
     broker_address = socket.gethostbyname("aka-broker")
     broker_route = command("ip", "route", "get", broker_address)
     assert "dev ipsec0" not in broker_route
-    inner_route = command("ip", "-6", "route", "get", EXPECTED_PCSCF)
+    rules = command("ip", "-6", "rule", "show")
+    assert f"from {EXPECTED_INNER} lookup 220" in rules
+    assert "from all lookup 220" not in rules
+    inner_route = command(
+        "ip", "-6", "route", "get", EXPECTED_PCSCF, "from", EXPECTED_INNER
+    )
     assert "dev ipsec0" in inner_route
 
-    # Both implementations are userspace ESP dataplanes. In particular, loading
-    # kernel-netlink for Linux address/route discovery must never select its XFRM
-    # IPsec backend instead of kernel-libipsec.
+    # This is a userspace ESP dataplane. In particular, loading kernel-netlink
+    # for Linux address/route discovery must never select its XFRM IPsec backend
+    # instead of kernel-libipsec.
     assert command("ip", "xfrm", "state").strip() == ""
     assert command("ip", "xfrm", "policy").strip() == ""
 
@@ -169,36 +174,18 @@ def probe_reauthentication():
     probe_transport()
     transitions = load_transitions()
     names = [event["event"] for event in transitions]
-    if EXPECTED_BACKEND == "python":
-        assert names == ["tunnel_start", "tunnel_up", "tunnel_up"]
-        try:
-            validate_transition_sequence(transitions)
-        except ContractViolation as error:
-            assert "invalid tunnel lifecycle" in str(error)
-        else:
-            raise AssertionError("legacy duplicate reauthentication up was accepted")
-        print("LAB_XFAIL=python:duplicate_reauth_tunnel_up")
-    else:
-        validate_transition_sequence(transitions)
-        assert names == ["tunnel_start", "tunnel_up"]
+    validate_transition_sequence(transitions)
+    assert names == ["tunnel_start", "tunnel_up"]
     print(f"LAB_REAUTH_OK={EXPECTED_BACKEND}")
 
 
 def probe_crashed():
     transitions = load_transitions()
     names = [event["event"] for event in transitions]
-    if EXPECTED_BACKEND == "python":
-        observation = validate_status(json.loads(
-            (RUNDIR / "swu_status.json").read_text(encoding="utf-8")
-        ))
-        assert observation.state == "CONNECTED"
-        assert names == ["tunnel_start", "tunnel_up"]
-        print("LAB_XFAIL=python:crash_missing_down")
-    else:
-        observation = wait_for_down()
-        assert observation.backend == EXPECTED_BACKEND
-        validate_transition_sequence(transitions)
-        assert names == ["tunnel_start", "tunnel_up", "tunnel_down"]
+    observation = wait_for_down()
+    assert observation.backend == EXPECTED_BACKEND
+    validate_transition_sequence(transitions)
+    assert names == ["tunnel_start", "tunnel_up", "tunnel_down"]
     print(f"LAB_CRASH_OBSERVED={EXPECTED_BACKEND}")
 
 
@@ -210,28 +197,12 @@ def probe_recovered():
     assert groups[0][0]["tunnel_generation"] != groups[1][0]["tunnel_generation"]
     first_names = [event["event"] for event in groups[0]]
     second_names = [event["event"] for event in groups[1]]
-    if EXPECTED_BACKEND == "python":
-        assert first_names == ["tunnel_start", "tunnel_up"]
-        print("LAB_XFAIL=python:crash_missing_down")
-    else:
-        assert first_names == ["tunnel_start", "tunnel_up", "tunnel_down"]
+    assert first_names == ["tunnel_start", "tunnel_up", "tunnel_down"]
     validate_transition_sequence(groups[0])
     validate_transition_sequence(groups[1])
     assert second_names == ["tunnel_start", "tunnel_up"]
     assert groups[0][-1]["recorded_at_ns"] < groups[1][0]["recorded_at_ns"]
     print(f"LAB_RECOVERY_OK={EXPECTED_BACKEND}")
-
-
-def probe_failed_reauthentication():
-    observation = wait_for_down()
-    assert observation.backend == EXPECTED_BACKEND
-    transitions = load_transitions()
-    validate_transition_sequence(transitions)
-    assert [event["event"] for event in transitions] == [
-        "tunnel_start", "tunnel_up", "tunnel_down"
-    ]
-    assert EXPECTED_BACKEND == "python"
-    print("LAB_XFAIL=python:failed_reauth_destroys_valid_sa")
 
 
 def probe_authentication_recovered():
@@ -255,17 +226,6 @@ def probe_lifecycle():
     assert observation.backend == EXPECTED_BACKEND
     transitions = load_transitions()
     names = [event["event"] for event in transitions]
-    if EXPECT_DUPLICATE_DOWN:
-        assert EXPECTED_BACKEND == "python"
-        assert names == ["tunnel_start", "tunnel_up", "tunnel_down", "tunnel_down"]
-        try:
-            validate_transition_sequence(transitions)
-        except ContractViolation as error:
-            assert "invalid tunnel lifecycle" in str(error)
-        else:
-            raise AssertionError("legacy duplicate tunnel_down was unexpectedly accepted")
-        print("LAB_XFAIL=python:duplicate_tunnel_down")
-        return
     validate_transition_sequence(transitions)
     assert names == ["tunnel_start", "tunnel_up", "tunnel_down"]
     print(f"LAB_LIFECYCLE_OK={EXPECTED_BACKEND}")
@@ -308,8 +268,6 @@ def main():
         probe_crashed()
     elif MODE == "recovered":
         probe_recovered()
-    elif MODE == "failed_reauth":
-        probe_failed_reauthentication()
     elif MODE == "auth_recovered":
         probe_authentication_recovered()
     else:

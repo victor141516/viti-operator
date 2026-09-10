@@ -33,115 +33,12 @@ services:
   aka-broker:
     build:
       context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
+      dockerfile: test/swu-lab/tools.Dockerfile
     entrypoint: ["python3", "/opt/swu-lab/aka_broker.py"]
     environment:
       LAB_AKA_K: 465B5CE8B199B49FAA5F0A2EE238A6BC
       LAB_AKA_OPC: E8ED289DEBA952E4283B54E88E6183CA
     networks: [outer]
-
-  python-backend:
-    build:
-      context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
-    depends_on:
-      epdg:
-        condition: service_started
-      aka-broker:
-        condition: service_started
-      nat-gateway:
-        condition: service_healthy
-    cap_add: [NET_ADMIN, NET_RAW]
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    environment:
-      SWU_BACKEND: python
-      SWU_SOURCE: 172.30.39.20
-      SWU_EPDG: 172.30.40.10
-      LAB_NAT_GATEWAY: 172.30.39.254
-      SWU_APN: ims
-      USIM_IMSI: "001010123456789"
-      SWU_MCC: "001"
-      SWU_MNC: "001"
-      SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
-      SWU_HTTP_AKA_TOKEN: lab-token
-      SWU_HTTP_AKA_TIMEOUT: "1"
-      SWU_CP_MODE: v6
-      SWU_TS_MODE: auto
-      SWU_TUN_MTU: "1400"
-      SWU_IKE_RETRANS_TIMEOUTS: 1,2,4
-      SWU_LIVENESS_PERIOD: "${LAB_SWU_LIVENESS_PERIOD:-20}"
-      SWU_LIVENESS_RETRIES: "${LAB_SWU_LIVENESS_RETRIES:-4}"
-      SWU_NATT_KEEPALIVE: "${LAB_SWU_NATT_KEEPALIVE:-20}"
-      SWU_CHILD_REKEY_MINUTES: "${LAB_SWU_CHILD_REKEY_MINUTES:-30}"
-      SWU_IKE_REKEY_MINUTES: "${LAB_SWU_IKE_REKEY_MINUTES:-45}"
-      SWU_REKEY_TIMEOUT: "${LAB_SWU_REKEY_TIMEOUT:-10}"
-      SWU_REDACT_SECRETS: "1"
-      VOWIFI_RUNDIR: /run/vowifi
-      VITI_EVENT_OUTBOX_DIR: /run/vowifi/event-outbox
-    volumes:
-      - python-runtime:/run/vowifi
-    networks:
-      outer:
-        ipv4_address: 172.30.39.20
-
-  python-probe:
-    build:
-      context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
-    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
-    depends_on: [python-backend]
-    network_mode: service:python-backend
-    cap_add: [NET_ADMIN]
-    environment:
-      LAB_EXPECTED_BACKEND: python
-      PYTHONPATH: /usr/local/bin
-      VOWIFI_RUNDIR: /run/vowifi
-    volumes:
-      - python-runtime:/run/vowifi:ro
-
-  python-lifecycle-probe:
-    build:
-      context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
-    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
-    network_mode: none
-    environment:
-      LAB_EXPECTED_BACKEND: python
-      LAB_EXPECT_LEGACY_DUPLICATE_DOWN: "1"
-      LAB_PROBE_MODE: lifecycle
-      PYTHONPATH: /usr/local/bin
-      VOWIFI_RUNDIR: /run/vowifi
-    volumes:
-      - python-runtime:/run/vowifi:ro
-
-  python-failure-probe:
-    build:
-      context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
-    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
-    network_mode: none
-    environment:
-      LAB_EXPECTED_BACKEND: python
-      LAB_PROBE_MODE: failed_attach
-      PYTHONPATH: /usr/local/bin
-      VOWIFI_RUNDIR: /run/vowifi
-    volumes:
-      - python-runtime:/run/vowifi:ro
-
-  python-terminated-probe:
-    build:
-      context: ../..
-      dockerfile: test/swu-lab/python-backend.Dockerfile
-    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
-    network_mode: none
-    environment:
-      LAB_EXPECTED_BACKEND: python
-      LAB_PROBE_MODE: terminated
-      PYTHONPATH: /usr/local/bin
-      VOWIFI_RUNDIR: /run/vowifi
-    volumes:
-      - python-runtime:/run/vowifi:ro
 
   strongswan-backend:
     image: ${LAB_STRONGSWAN_BACKEND_IMAGE:-viti-swu-lab-strongswan-backend}
@@ -155,7 +52,7 @@ services:
         if [ -n "$${LAB_NAT_GATEWAY:-}" ]; then
           ip route replace "$${SWU_EPDG}/32" via "$${LAB_NAT_GATEWAY}"
         fi
-        exec python3 /usr/local/bin/tunnel_backend.py
+        exec python3 /usr/local/bin/strongswan_adapter.py
     depends_on:
       epdg:
         condition: service_started
@@ -167,7 +64,6 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     environment:
-      SWU_BACKEND: strongswan
       SWU_SOURCE: 172.30.39.20
       SWU_EPDG: 172.30.40.10
       LAB_NAT_GATEWAY: 172.30.39.254
@@ -202,7 +98,6 @@ services:
     network_mode: service:strongswan-backend
     cap_add: [NET_ADMIN]
     environment:
-      LAB_EXPECTED_BACKEND: strongswan
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
     volumes:
@@ -215,7 +110,6 @@ services:
     entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
     network_mode: none
     environment:
-      LAB_EXPECTED_BACKEND: strongswan
       LAB_PROBE_MODE: lifecycle
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
@@ -229,7 +123,6 @@ services:
     entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
     network_mode: none
     environment:
-      LAB_EXPECTED_BACKEND: strongswan
       LAB_PROBE_MODE: failed_attach
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
@@ -243,7 +136,6 @@ services:
     entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
     network_mode: none
     environment:
-      LAB_EXPECTED_BACKEND: strongswan
       LAB_PROBE_MODE: terminated
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
@@ -263,5 +155,4 @@ networks:
         - subnet: 172.30.40.0/24
 
 volumes:
-  python-runtime:
   strongswan-runtime:

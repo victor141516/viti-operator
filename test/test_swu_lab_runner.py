@@ -44,14 +44,14 @@ class ComposeEnvironmentTests(unittest.TestCase):
 
     @mock.patch.object(RUNNER, "compose")
     def test_lab_services_are_built_in_separate_solves(self, compose):
-        RUNNER.build_services_serially(("epdg", "aka-broker", "python-backend"))
+        RUNNER.build_services_serially(("epdg", "aka-broker", "strongswan-backend"))
 
         self.assertEqual(
             compose.call_args_list,
             [
                 mock.call("build", "epdg"),
                 mock.call("build", "aka-broker"),
-                mock.call("build", "python-backend"),
+                mock.call("build", "strongswan-backend"),
             ],
         )
 

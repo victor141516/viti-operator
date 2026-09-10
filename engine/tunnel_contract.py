@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Stable observable contract shared by SWu tunnel backends.
+"""Stable observable contract exposed by the strongSwan SWu tunnel.
 
 This module deliberately contains no IKE or IPsec implementation details.  It
 defines the runtime state that the engine entrypoint, manager and tests may
-observe regardless of whether the tunnel is owned by the legacy Python client
-or by strongSwan.
+observe without depending on strongSwan's incidental VICI or log representation.
 """
 
 from dataclasses import dataclass
@@ -16,7 +15,7 @@ import time
 
 
 CONTRACT_VERSION = 1
-BACKENDS = frozenset(("python", "strongswan"))
+BACKENDS = frozenset(("strongswan",))
 STATES = frozenset(("CONNECTING", "CONNECTED", "DOWN"))
 TRANSITIONS = frozenset(("tunnel_start", "tunnel_up", "tunnel_down"))
 CONTROL_ACTIONS = frozenset(("stop", "reauth", "rekey-child", "rekey-ike"))

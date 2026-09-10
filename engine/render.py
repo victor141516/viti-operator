@@ -142,25 +142,6 @@ def container_ipv4():
         s.close()
 
 
-def imeisv_from_imei(imei, imeisv="", svn="00"):
-    """Return a 16-digit IMEISV for the ePDG DEVICE_IDENTITY response.
-
-    Explicit IMEISV wins (digits only, padded/truncated to 16). Otherwise derive it from the
-    IMEI's first 14 digits (TAC+SNR, i.e. the IMEI without its check digit) + a 2-digit SVN
-    (default '00'). Mirrors control/app/config.imeisv_from_imei so a hand-authored instance.json
-    (no imeisv field) still gets a valid value. Returns '' if there is no usable IMEI/IMEISV.
-    """
-    isv = "".join(ch for ch in str(imeisv or "") if ch.isdigit())
-    if isv:
-        return (isv + "0" * 16)[:16]
-    digits = "".join(ch for ch in str(imei or "") if ch.isdigit())
-    if not digits:
-        return ""
-    base14 = digits[:14].ljust(14, "0")
-    svn2 = ("".join(ch for ch in str(svn or "") if ch.isdigit()) or "00")[:2].rjust(2, "0")
-    return base14 + svn2
-
-
 def build_context(cfg):
     mcc = str(cfg["mcc"])
     mnc = str(cfg["mnc"]).zfill(3)
@@ -204,8 +185,9 @@ def build_context(cfg):
         "sms_record_command": cfg.get("sms_record_command", ""),
         "pcscf": pcscf,          # explicit or discovered
         # Address family of the discovered P-CSCF. The IMS core transport must bind the same
-        # family or Asterisk cannot reach the P-CSCF over the tunnel: IPv6 P-CSCF (Telus, EE)
-        # -> bind [::]:5060; IPv4 P-CSCF (Vodafone UK, cp_mode=v4) -> bind 0.0.0.0:5060.
+        # family or Asterisk cannot reach the P-CSCF over the tunnel. The current strongSwan
+        # SWu profile is IPv6-only, while explicit development configurations may still render
+        # an IPv4 P-CSCF transport.
         "pcscf_is_v6": (":" in pcscf),
         "local_addr": cfg.get("local_addr") or container_ipv4(),
         "ike_proposals": ike.get("proposals", default_ike),
@@ -308,7 +290,7 @@ def main():
             f.write(rendered)
         print(f"[render] {tpl} -> {dest}")
 
-    # Export env for keeper / ami_usim / swu_ike
+    # Export env for the SIM helpers and strongSwan adapter.
     env_path = os.environ.get("VOWIFI_ENV", "/run/vowifi/engine.env")
     os.makedirs(os.path.dirname(env_path), exist_ok=True)
     with open(env_path, "w") as f:
@@ -317,21 +299,15 @@ def main():
         f.write(f"USIM_ICCID={cfg.get('iccid','')}\n")
         f.write(f"VOWIFI_ID={ctx['id']}\n")
         f.write(f"MANAGER_URL={ctx['manager_url']}\n")
-        # SWu (python IKEv2/IPsec) launch params — consumed by entrypoint.sh to start
-        # swu_ike.py. Reader is addressed by index for swu_ike's smartcard path; source is the
-        # container IP; ePDG FQDN is resolved by swu_ike.
+        # The index is retained for local PC/SC helpers; SWu authentication is
+        # normally delegated to the manager's selected SIM provider.
         f.write(f"USIM_READER_INDEX={cfg.get('reader_index', 0)}\n")
-        # Stable physical USB port path of the reader (e.g. "3-2"). swu_ike/pin_keeper resolve it
+        # Stable physical USB port path of the reader (e.g. "3-2"). pin_keeper resolves it
         # back to a live PC/SC index in-container, so the SIM is always addressed by the reader
         # that PHYSICALLY holds it — surviving pcscd re-enumerating two identical readers into a
         # different order. Empty -> fall back to USIM_READER_INDEX.
         f.write(f"USIM_READER_PORT={cfg.get('reader_port','')}\n")
         f.write(f"USIM_IMSI={ctx['imsi']}\n")
-        # IMEI / IMEISV for the ePDG DEVICE_IDENTITY response. imeisv falls back to a value
-        # derived from the IMEI if the instance didn't carry one (hand-authored config).
-        imei_digits = "".join(ch for ch in str(cfg.get("imei", "")) if ch.isdigit())
-        f.write(f"SWU_IMEI={imei_digits}\n")
-        f.write(f"SWU_IMEISV={cfg.get('imeisv') or imeisv_from_imei(cfg.get('imei',''))}\n")
         f.write(f"SWU_SOURCE={ctx['local_addr']}\n")
         f.write(f"SWU_EPDG={ctx['epdg']}\n")
         f.write(f"SWU_APN={cfg.get('apn','ims')}\n")
@@ -340,16 +316,10 @@ def main():
         # ePDG identity (IDr) encoding: 'apn' (default) sends the bare APN — the form most
         # carriers' ePDGs expect and the proven-safe default; 'fqdn' builds the operator APN-FQDN
         # (<apn>.apn.epc.mnc<MNC3>.mcc<MCC3>.pub.3gppnetwork.org) that a minority of stricter
-        # ePDGs require. Consumed by swu_ike.py's SWU_IDR_MODE. See config.normalize_idr_mode.
+        # ePDGs require. Consumed by strongswan_adapter.py.
         f.write(f"SWU_IDR_MODE={cfg.get('idr_mode','apn')}\n")
-        # CFG (config-request) address-family mode: 'auto' (default) walks a discovery ladder and
-        # keeps the family that yields a usable PDN (see swu_ike SWU_CP_MODE / SWU_CP_MODE_ORDER);
-        # 'v6' (Telus/EE), 'v4' (Vodafone UK), 'dual' pin a single family. SWU_CP_MODE_ORDER is the
-        # auto ladder (carrier-DB preference first), computed by config.render_instance_json.
-        f.write(f"SWU_CP_MODE={cfg.get('cp_mode','auto')}\n")
-        f.write(f"SWU_CP_MODE_ORDER={cfg.get('cp_mode_order','v6,dual,v4')}\n")
         # Proactive CHILD-SA rekey period (minutes; 0 = disabled). IKEv2 does not carry SA
-        # lifetime on the wire, so swu_ike uses this local-policy value to rekey the ESP SA
+        # lifetime on the wire, so strongSwan uses this local-policy value to rekey the ESP SA
         # before it silently ages out (3GPP TS 24.302 7.2.2C). Set by the manager from
         # settings.rekey.minutes (default 30); hand-authored configs may omit it.
         f.write(f"SWU_CHILD_REKEY_MINUTES={cfg.get('rekey_minutes', 30)}\n")
@@ -358,11 +328,7 @@ def main():
         # reconnect that would interrupt active SIP calls. This is deliberately independent from
         # the shorter ESP CHILD-SA rekey period.
         f.write(f"SWU_IKE_REKEY_MINUTES={cfg.get('ike_rekey_minutes', 45)}\n")
-        # EAP-AKA fast re-authentication (RFC 4187 AT_NEXT_REAUTH_ID). '1' (default) presents the
-        # AAA-issued re-auth identity as IDi on a reconnect; swu_ike falls back to the permanent
-        # NAI automatically if the ePDG rejects it. '0' never offers one — for a carrier (O2 UK
-        # observed) whose AAA reliably expires them, this skips the wasted round trip.
-        f.write(f"SWU_USE_REAUTH_ID={1 if cfg.get('use_reauth_id', True) else 0}\n")
+    os.chmod(env_path, 0o600)
     print(f"[render] env -> {env_path}")
 
 

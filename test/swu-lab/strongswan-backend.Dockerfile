@@ -1,4 +1,4 @@
-FROM fedora:40
+FROM fedora:43@sha256:a651ddf48ea28a06ed4e1e6519f51c9f47e7a5a138722ade87369b8fbb7e5b42
 
 ARG STRONGSWAN_COMMIT=b43f6bfeed34b4afc8a7eb0c0de38e6e70177847
 
@@ -38,11 +38,10 @@ RUN cd /usr/src/strongswan && \
 
 COPY engine/strongswan/strongswan.conf /etc/strongswan.conf
 COPY engine/strongswan_adapter.py /usr/local/bin/strongswan_adapter.py
-COPY engine/tunnel_backend.py /usr/local/bin/tunnel_backend.py
 COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
+COPY engine/tunnel_reconcile.py /usr/local/bin/tunnel_reconcile.py
 COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
 COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py
-COPY test/swu-lab/backend-entrypoint.sh /usr/local/bin/backend-entrypoint.sh
 
-RUN chmod +x /usr/local/bin/strongswan_adapter.py /usr/local/bin/backend-entrypoint.sh
-ENTRYPOINT ["/usr/local/bin/backend-entrypoint.sh"]
+RUN chmod +x /usr/local/bin/strongswan_adapter.py
+ENTRYPOINT ["python3", "/usr/local/bin/strongswan_adapter.py"]

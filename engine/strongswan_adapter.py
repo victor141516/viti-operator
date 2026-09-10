@@ -2,12 +2,13 @@
 """Run strongSwan behind the implementation-independent SWu contract.
 
 The adapter owns one charon process, loads the connection through VICI and
-translates VICI state into the same status, event and control files exposed by
-the legacy Python backend.  ESP is handled by strongSwan's kernel-libipsec
+translates VICI state into the engine's stable status, event and control files.
+ESP is handled by strongSwan's kernel-libipsec
 plugin on ``ipsec0``; this module never configures kernel XFRM state.
 """
 
 from collections import OrderedDict
+import ipaddress
 import itertools
 import json
 import os
@@ -24,6 +25,7 @@ import uuid
 
 import event_outbox
 from tunnel_contract import normalize_control_action, status_payload
+from tunnel_reconcile import TunnelReconciler
 
 
 BACKEND = "strongswan"
@@ -259,6 +261,24 @@ def sa_loss_expired(missing_since, now, grace):
     return missing_since is not None and now - missing_since >= grace
 
 
+def isolate_tunnel_route(inner_ip, runner=subprocess.run):
+    """Restrict strongSwan's table-220 default route to IMS-source traffic.
+
+    kernel-libipsec needs the route to feed packets into its TUN device, but its
+    default ``from all`` rule would also capture unrelated IPv6 traffic in the
+    shared Asterisk namespace. IMS sockets bind the assigned virtual address,
+    so a source-specific rule preserves the tunnel without hijacking the host.
+    """
+    address = ipaddress.ip_address(inner_ip)
+    if address.version != 6:
+        raise ValueError("the StrongSwan SWu profile requires an IPv6 inner address")
+    runner(["ip", "-6", "rule", "del", "priority", "220"], check=False)
+    runner([
+        "ip", "-6", "rule", "add", "priority", "220",
+        "from", f"{address}/128", "lookup", "220",
+    ], check=True)
+
+
 class RuntimeContract:
     def __init__(self, env):
         self.rundir = Path(env.get("VOWIFI_RUNDIR", "/run/vowifi"))
@@ -270,6 +290,11 @@ class RuntimeContract:
         self.started = False
         self.up = False
         self.down = False
+        self.last_connected = None
+        self.last_status_write = 0.0
+        self.status_heartbeat = positive_float(
+            env, "SWU_STATUS_HEARTBEAT_SECONDS", "30", allow_zero=True
+        )
         self.rundir.mkdir(parents=True, exist_ok=True)
 
     def write_status(self, state, **extra):
@@ -302,9 +327,19 @@ class RuntimeContract:
         self.started = True
 
     def connected(self, inner_ip, pcscf, iface):
+        observation = (inner_ip, pcscf, iface)
+        now = time.monotonic()
+        if (
+            observation == self.last_connected
+            and self.status_heartbeat
+            and now - self.last_status_write < self.status_heartbeat
+        ):
+            return
         self.write_status(
             "CONNECTED", inner_ip=inner_ip, pcscf=pcscf, iface=iface
         )
+        self.last_connected = observation
+        self.last_status_write = now
         if not self.up:
             self.event("tunnel_up", pcscf or None)
             self.up = True
@@ -341,6 +376,12 @@ class StrongSwanAdapter:
         self.signal_received = None
         self.was_established = False
         self.auth_waiting = False
+        self.routed_inner_ip = ""
+        self.reconciler = TunnelReconciler(
+            self.runtime.rundir,
+            self.env.get("SWU_RENDER", "/usr/local/bin/render.py"),
+            self.log,
+        )
 
     def log(self, message):
         print(f"[strongswan-adapter] {message}", flush=True)
@@ -504,7 +545,10 @@ class StrongSwanAdapter:
                     ["ip", "link", "set", "dev", self.iface, "mtu", str(self.mtu)],
                     check=True,
                 )
+                isolate_tunnel_route(last_sa["inner_ip"])
+                self.routed_inner_ip = last_sa["inner_ip"]
                 self.runtime.connected(last_sa["inner_ip"], pcscf, self.iface)
+                self.reconciler.apply(last_sa["inner_ip"], pcscf)
                 self.was_established = True
                 self.log(
                     f"tunnel connected inner={last_sa['inner_ip']} "
@@ -576,7 +620,11 @@ class StrongSwanAdapter:
                     missing_since = None
                 self.was_established = True
                 pcscf = self.read_pcscf()
+                if sa["inner_ip"] != self.routed_inner_ip:
+                    isolate_tunnel_route(sa["inner_ip"])
+                    self.routed_inner_ip = sa["inner_ip"]
                 self.runtime.connected(sa["inner_ip"], pcscf, self.iface)
+                self.reconciler.apply(sa["inner_ip"], pcscf)
         finally:
             selector.close()
 

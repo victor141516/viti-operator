@@ -1,7 +1,6 @@
 #!/bin/bash
-# Engine entrypoint: render config -> hold PIN -> start the selected SWu backend ->
-# discover P-CSCF -> start Asterisk (IMS registration + voice/SMS). Both backends
-# expose the same ipsec0/status/event/control contract and are supervised identically.
+# Engine entrypoint: render config -> hold PIN -> start strongSwan SWu -> discover
+# P-CSCF -> start Asterisk (IMS registration + voice/SMS).
 #
 # PC/SC: this container is a pcscd CLIENT — it talks to the HOST pcscd via the bind-mounted
 # /run/pcscd socket. The pcsc-lite client library is pinned to the same version as the host
@@ -19,8 +18,7 @@ python3 /usr/local/bin/render.py || { log "render failed"; exit 1; }
 # shellcheck disable=SC1091
 set -a; . "$VOWIFI_RUNDIR/engine.env"; set +a
 export USIM_PIN USIM_READER USIM_READER_INDEX USIM_READER_PORT USIM_IMSI VOWIFI_ID MANAGER_URL VOWIFI_RUNDIR
-export SWU_BACKEND="${SWU_BACKEND:-python}"
-export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_IMEI SWU_IMEISV SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE SWU_CP_MODE SWU_CP_MODE_ORDER SWU_USE_REAUTH_ID SWU_BACKEND
+export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE
 export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 
 # Delivery reports are irreplaceable protocol evidence. They are committed to
@@ -28,10 +26,11 @@ export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 # container restarts until a 2xx acknowledgement is received.
 log "starting durable engine event outbox..."
 python3 -u /usr/local/bin/event_outbox.py &
+OUTBOX_PID=$!
 
 # --- 2. Start PIN keeper and wait for the SIM to be usable ------------------------
-# pin_keeper holds CHV1 verified for ami_usim's SIP IMS-AKA. swu_ike verifies the PIN itself
-# in its own connection for EAP-AKA, so both auth paths work on PIN-enabled SIMs.
+# pin_keeper holds CHV1 verified for ami_usim's SIP IMS-AKA. SWu EAP-AKA is
+# delegated through the same manager authentication provider when configured.
 if [ -n "${SWU_HTTP_AKA_URL:-}" ]; then
     log "SIM authentication delegated to Viti Operator"
     KEEPER_PID=""
@@ -57,42 +56,62 @@ if [ -z "${SWU_HTTP_AKA_URL:-}" ]; then
     wait_pin || true
 fi
 
-# --- 3. Bring up the selected SWu tunnel backend, supervised ----------------------
-log "starting SWu tunnel backend=$SWU_BACKEND (epdg=$SWU_EPDG apn=$SWU_APN reader=$USIM_READER_INDEX port=${USIM_READER_PORT:-none})..."
+# --- 3. Bring up the strongSwan SWu tunnel, supervised ----------------------------
+log "starting strongSwan SWu tunnel (epdg=$SWU_EPDG apn=$SWU_APN reader=$USIM_READER_INDEX port=${USIM_READER_PORT:-none})..."
 if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
   : > "$VOWIFI_RUNDIR/charon.log"
   SWU_LOG_TARGET="$VOWIFI_RUNDIR/charon.log"
 else
-  # swu_ike emits per-packet IKE decode dumps. Keep those available for an
-  # explicit diagnostic run without continuously persisting them by default.
+  # Full charon diagnostics are opt-in; normal operation keeps only bounded,
+  # normalized lifecycle output.
   rm -f "$VOWIFI_RUNDIR/charon.log"
   SWU_LOG_TARGET=/dev/null
 fi
 rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
 
-# Full backend/charon output goes to the opt-in diagnostic file. Normal operation
-# retains only normalized launcher/backend lifecycle evidence in Docker logs and a
-# bounded file, avoiding the legacy backend's per-packet decode dumps.
+# Full adapter/charon output goes to the opt-in diagnostic file. Normal operation
+# retains only normalized lifecycle evidence in Docker logs and a bounded file.
 (
+  stop_supervisor=0
+  active_pid=""
+  stop_adapter() {
+    stop_supervisor=1
+    # The active child is either the adapter or the reconnect delay. Signaling
+    # it keeps container shutdown bounded even when the adapter already failed.
+    [ -n "$active_pid" ] && kill -TERM "$active_pid" 2>/dev/null || true
+  }
+  trap stop_adapter TERM INT
   backoff=4
-  while true; do
-    log "SWu backend starting ($SWU_BACKEND)"
+  while [ "$stop_supervisor" = "0" ]; do
+    log "strongSwan SWu adapter starting"
     SWU_OPERATIONAL_LOG=/logs/swu-operational.log
     if [ -f "$SWU_OPERATIONAL_LOG" ] && [ "$(stat -c %s "$SWU_OPERATIONAL_LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
       tail -c 524288 "$SWU_OPERATIONAL_LOG" > "$SWU_OPERATIONAL_LOG.tmp"
       mv "$SWU_OPERATIONAL_LOG.tmp" "$SWU_OPERATIONAL_LOG"
     fi
-    python3 -u /usr/local/bin/tunnel_backend.py 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
-      awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+    if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
+      python3 -u /usr/local/bin/strongswan_adapter.py \
+        > >(awk '/^\[strongswan-adapter\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG") 2>&1 &
     else
-      tee -a "$SWU_LOG_TARGET" | awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+      python3 -u /usr/local/bin/strongswan_adapter.py \
+        > >(tee -a "$SWU_LOG_TARGET" | awk '/^\[strongswan-adapter\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG") 2>&1 &
     fi
-    rc=${PIPESTATUS[0]}
+    active_pid=$!
+    if wait "$active_pid"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    active_pid=""
+    [ "$stop_supervisor" = "1" ] && break
     retry_delay=$(python3 -c \
       'import sys; from tunnel_contract import supervisor_retry_delay; print(supervisor_retry_delay(sys.argv[1], sys.argv[2]))' \
       "$VOWIFI_RUNDIR" "$backoff" 2>/dev/null || printf '%s' "$backoff")
-    log "SWu backend $SWU_BACKEND exited (rc=$rc); reconnecting in ${retry_delay}s"
-    sleep "$retry_delay"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
+    log "strongSwan SWu adapter exited (rc=$rc); reconnecting in ${retry_delay}s"
+    sleep "$retry_delay" & active_pid=$!
+    wait "$active_pid" 2>/dev/null || true
+    active_pid=""
+    backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
   done
 ) &
 SWU_PID=$!
@@ -132,6 +151,7 @@ fi
 log "starting ami_usim bridge..."
 mkdir -p /logs /recordings
 python3 -u /usr/local/bin/ami_usim.py /usr/local/etc/ami_usim.ini &
+AMI_PID=$!
 
 if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
   # Full SIP and RTP payload tracing is intentionally opt-in.
@@ -144,5 +164,31 @@ if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
     done ) &
 fi
 
+SHUTDOWN_STARTED=0
+shutdown_engine() {
+  [ "$SHUTDOWN_STARTED" = "1" ] && return
+  SHUTDOWN_STARTED=1
+  trap - TERM INT
+  log "stopping engine services..."
+  kill -TERM "$SWU_PID" 2>/dev/null || true
+  wait "$SWU_PID" 2>/dev/null || true
+  # Give the durable worker one final chance to deliver tunnel_down before exit.
+  python3 /usr/local/bin/event_outbox.py --flush-once >/dev/null 2>&1 || true
+  for pid in "${ASTERISK_PID:-}" "$AMI_PID" "$OUTBOX_PID" "${KEEPER_PID:-}"; do
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "${ASTERISK_PID:-}" "$AMI_PID" "$OUTBOX_PID" "${KEEPER_PID:-}"; do
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+  done
+}
+
+trap shutdown_engine TERM INT
 log "starting Asterisk..."
-exec asterisk -f
+asterisk -f &
+ASTERISK_PID=$!
+set +e
+wait "$ASTERISK_PID"
+ASTERISK_RC=$?
+set -e
+shutdown_engine
+exit "$ASTERISK_RC"

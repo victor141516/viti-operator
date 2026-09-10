@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import strongswan_adapter
 import tunnel_contract
@@ -23,6 +24,24 @@ def environment(**extra):
 
 
 class StrongSwanAdapterTest(unittest.TestCase):
+    def test_tunnel_default_route_is_restricted_to_the_assigned_source(self):
+        runner = mock.Mock()
+        strongswan_adapter.isolate_tunnel_route("2001:db8::10", runner)
+        self.assertEqual(runner.call_args_list, [
+            mock.call(
+                ["ip", "-6", "rule", "del", "priority", "220"],
+                check=False,
+            ),
+            mock.call([
+                "ip", "-6", "rule", "add", "priority", "220",
+                "from", "2001:db8::10/128", "lookup", "220",
+            ], check=True),
+        ])
+
+    def test_ipv4_inner_address_is_rejected_by_the_ipv6_only_profile(self):
+        with self.assertRaisesRegex(ValueError, "requires an IPv6"):
+            strongswan_adapter.isolate_tunnel_route("192.0.2.1")
+
     def test_auth_readiness_url_is_derived_from_broker_contract(self):
         self.assertEqual(
             strongswan_adapter.auth_readiness_url({
@@ -243,6 +262,18 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 [event["event"] for event in events],
                 ["tunnel_start", "tunnel_up", "tunnel_down"],
             )
+
+    def test_runtime_deduplicates_connected_status_between_heartbeats(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = strongswan_adapter.RuntimeContract({
+                "VOWIFI_RUNDIR": directory,
+                "VITI_EVENT_OUTBOX_DIR": directory + "/event-outbox",
+                "SWU_STATUS_HEARTBEAT_SECONDS": "30",
+            })
+            with mock.patch.object(runtime, "write_status") as write:
+                runtime.connected("2001:db8::10", "2001:db8::20", "ipsec0")
+                runtime.connected("2001:db8::10", "2001:db8::20", "ipsec0")
+            write.assert_called_once()
 
 
 if __name__ == "__main__":

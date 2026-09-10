@@ -188,7 +188,7 @@ static status_t broker_authenticate(private_eap_aka_broker_t *this,
 	autn64 = chunk_to_base64(chunk_create(autn, AKA_AUTN_LEN), NULL);
 	/* The manager API deliberately uses RFC 4648 raw/unpadded Base64.  The
 	 * strongSwan helper emits canonical padding, which Go's RawStdEncoding
-	 * rejects.  Keep this wire contract identical to the Python backend. */
+	 * rejects.  Keep this wire contract identical to the manager API. */
 	strip_base64_padding(&rand64);
 	strip_base64_padding(&autn64);
 	request = json_object_new_object();

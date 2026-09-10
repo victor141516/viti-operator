@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the same external SWu laboratory lifecycle for either backend."""
+"""Run the deterministic StrongSwan SWu laboratory lifecycle."""
 
 import argparse
 import json
@@ -19,22 +19,13 @@ COMMON_SERVICES = ("epdg", "aka-broker", "nat-gateway")
 # from silently falling back to a different image.
 COMPOSE_FIXED_OVERRIDES = {}
 COMPOSE_OVERRIDES = {}
-BACKEND_SERVICES = {
-    "python": (
-        "python-backend",
-        "python-probe",
-        "python-lifecycle-probe",
-        "python-failure-probe",
-        "python-terminated-probe",
-    ),
-    "strongswan": (
-        "strongswan-backend",
-        "strongswan-probe",
-        "strongswan-lifecycle-probe",
-        "strongswan-failure-probe",
-        "strongswan-terminated-probe",
-    ),
-}
+BACKEND_SERVICES = (
+    "strongswan-backend",
+    "strongswan-probe",
+    "strongswan-lifecycle-probe",
+    "strongswan-failure-probe",
+    "strongswan-terminated-probe",
+)
 
 
 def compose(*args, capture=False):
@@ -205,11 +196,10 @@ def run_auth_failure(
     if state["authenticate_requests"] < 1:
         raise AssertionError(f"{mode} did not exercise the AKA provider")
     if expected_epdg_log:
-        logs = compose("logs", "--no-color", "epdg", capture=True).stdout
-        if expected_epdg_log not in logs:
-            raise AssertionError(
-                f"{mode} did not produce expected ePDG evidence: {expected_epdg_log!r}"
-            )
+        # Docker may report the backend exit before the responder's final log
+        # line has reached the Compose log reader.  Poll the bounded log stream
+        # so the AUTS assertion observes protocol evidence, not log-driver timing.
+        wait_for_log("epdg", expected_epdg_log)
     if recover:
         broker_request("/control", {"mode": "success"})
         compose("start", backend)
@@ -355,14 +345,7 @@ def run_responder_rekey(backend, connected_probe, lifecycle_probe, kind):
     target = "children" if kind == "child" else "ike"
     compose("exec", "-T", "epdg", "swanctl", "--rekey", f"--{kind}",
             "ims" if kind == "child" else "viti-lab")
-    if backend.startswith("python-"):
-        time.sleep(1)
-        after = epdg_sa_state()
-        if after[target] != before[target]:
-            raise AssertionError(f"legacy Python unexpectedly completed responder {kind} rekey")
-        print(f"LAB_XFAIL=python:responder_{kind}_rekey")
-    else:
-        wait_for_sa_change(before, target)
+    wait_for_sa_change(before, target)
     compose("run", "--rm", connected_probe)
     finish_protocol_lab(backend, lifecycle_probe)
     print(f"LAB_RESPONDER_REKEY_OBSERVED={backend.removesuffix('-backend')}:{kind}")
@@ -416,24 +399,16 @@ def run_auth_source_loss(backend, connected_probe, lifecycle_probe):
 
     request_control(backend, "reauth")
     wait_for_broker_requests(1)
-    if backend.startswith("python-"):
-        wait_for_backend_exit(backend, timeout=30)
-        run_probe(lifecycle_probe, "failed_reauth")
-        broker_request("/control", {"mode": "success"})
-        compose("start", backend)
-        run_probe(connected_probe)
-        run_probe(lifecycle_probe, "auth_recovered")
-    else:
-        time.sleep(2)
-        status, _ = backend_container_state(backend)
-        if status != "running":
-            raise AssertionError("backend exited after authentication-source loss")
-        after_sa = epdg_sa_state()
-        if after_sa["ike"] != before_sa["ike"]:
-            raise AssertionError("failed reauthentication replaced the valid IKE SA")
-        run_probe(connected_probe, "transport")
-        run_probe(connected_probe, "reauth")
-        broker_request("/control", {"mode": "success"})
+    time.sleep(2)
+    status, _ = backend_container_state(backend)
+    if status != "running":
+        raise AssertionError("backend exited after authentication-source loss")
+    after_sa = epdg_sa_state()
+    if after_sa["ike"] != before_sa["ike"]:
+        raise AssertionError("failed reauthentication replaced the valid IKE SA")
+    run_probe(connected_probe, "transport")
+    run_probe(connected_probe, "reauth")
+    broker_request("/control", {"mode": "success"})
     print(f"LAB_FAILED_REAUTH_OBSERVED={backend.removesuffix('-backend')}")
 
 
@@ -482,33 +457,19 @@ def run_colliding_rekeys(backend, connected_probe, kind):
         except subprocess.CalledProcessError:
             transport_ok = False
 
-    if backend.startswith("python-"):
-        if transport_ok:
-            after_sa = epdg_sa_state()
-            target = "children" if kind == "child" else "ike"
-            if after_sa[target] == before_sa[target]:
-                print(f"LAB_XFAIL=python:colliding_{kind}_rekey_no_sa_change")
-            else:
-                print(f"LAB_COLLIDING_REKEY_OK=python:{kind}")
-        else:
-            print(f"LAB_XFAIL=python:colliding_{kind}_rekey_transport")
-    else:
-        if responder_result != 0:
-            raise AssertionError(
-                f"responder-side colliding {kind} rekey failed with {responder_result}"
-            )
-        if not transport_ok:
-            raise AssertionError(f"transport failed after colliding {kind} rekeys")
-        wait_for_sa_change(before_sa, "children" if kind == "child" else "ike")
-        print(f"LAB_COLLIDING_REKEY_OK={backend.removesuffix('-backend')}:{kind}")
+    if responder_result != 0:
+        raise AssertionError(
+            f"responder-side colliding {kind} rekey failed with {responder_result}"
+        )
+    if not transport_ok:
+        raise AssertionError(f"transport failed after colliding {kind} rekeys")
+    wait_for_sa_change(before_sa, "children" if kind == "child" else "ike")
+    print(f"LAB_COLLIDING_REKEY_OK={backend.removesuffix('-backend')}:{kind}")
     print(f"LAB_COLLIDING_REKEY_OBSERVED={backend.removesuffix('-backend')}:{kind}")
 
 
 def crash_backend(service):
-    if service.startswith("python-"):
-        compose("kill", "-s", "SIGKILL", service)
-    else:
-        compose("exec", "-T", service, "pkill", "-KILL", "-x", "charon")
+    compose("exec", "-T", service, "pkill", "-KILL", "-x", "charon")
     wait_for_backend_exit(service)
 
 
@@ -549,7 +510,6 @@ def run_resilience_scenarios(backend, connected_probe, lifecycle_probe):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--backend", choices=sorted(BACKEND_SERVICES), required=True)
     parser.add_argument(
         "--backend-image",
         help=(
@@ -572,11 +532,9 @@ def main():
         lifecycle_probe,
         failure_probe,
         terminated_probe,
-    ) = BACKEND_SERVICES[args.backend]
-    services = (*COMMON_SERVICES, *BACKEND_SERVICES[args.backend])
+    ) = BACKEND_SERVICES
+    services = (*COMMON_SERVICES, *BACKEND_SERVICES)
     if args.backend_image:
-        if args.backend != "strongswan":
-            parser.error("--backend-image is only supported with --backend strongswan")
         COMPOSE_FIXED_OVERRIDES["LAB_STRONGSWAN_BACKEND_IMAGE"] = args.backend_image
     reset_lab()
     try:
@@ -606,7 +564,7 @@ def main():
             )
         if args.scenario in ("all", "resilience"):
             run_resilience_scenarios(backend, connected_probe, lifecycle_probe)
-        print(f"LAB_SUITE_OK={args.backend}")
+        print("LAB_SUITE_OK=strongswan")
     except Exception:
         try:
             logs = compose(
