@@ -117,6 +117,22 @@ class InnerAddressRefreshTest(unittest.TestCase):
 
         post.assert_not_called()
 
+    def test_network_backoff_timer_overrides_transient_reject_policy(self):
+        client = object.__new__(self.module.swu)
+        client.reject_reason_code = None
+        client.reject_reason_policy = None
+        client.reject_backoff_seconds = None
+        payloads = [[
+            self.module.N,
+            [self.module.RESERVED, self.module.BACKOFF_TIMER, b"", bytes([0xA5])],
+        ]]
+
+        client.note_reject(self.module.AUTHENTICATION_FAILED, payloads)
+
+        self.assertEqual(client.reject_reason_code, "AUTHENTICATION_FAILED")
+        self.assertEqual(client.reject_reason_policy, "backoff")
+        self.assertEqual(client.reject_backoff_seconds, 600)
+
     def ike_timer_subject(self):
         subject = self.module.swu.__new__(self.module.swu)
         subject.ike_rekey_period = 45 * 60

@@ -83,13 +83,16 @@ rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
       mv "$SWU_OPERATIONAL_LOG.tmp" "$SWU_OPERATIONAL_LOG"
     fi
     python3 -u /usr/local/bin/tunnel_backend.py 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
-          awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
-        else
-          tee -a "$SWU_LOG_TARGET" | awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
-        fi
+      awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+    else
+      tee -a "$SWU_LOG_TARGET" | awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+    fi
     rc=${PIPESTATUS[0]}
-    log "SWu backend $SWU_BACKEND exited (rc=$rc); reconnecting in ${backoff}s"
-    sleep "$backoff"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
+    retry_delay=$(python3 -c \
+      'import sys; from tunnel_contract import supervisor_retry_delay; print(supervisor_retry_delay(sys.argv[1], sys.argv[2]))' \
+      "$VOWIFI_RUNDIR" "$backoff" 2>/dev/null || printf '%s' "$backoff")
+    log "SWu backend $SWU_BACKEND exited (rc=$rc); reconnecting in ${retry_delay}s"
+    sleep "$retry_delay"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
   done
 ) &
 SWU_PID=$!

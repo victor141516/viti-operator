@@ -3815,6 +3815,11 @@ class swu():
         self.reject_reason_policy = reject_policy(code)
         if payload_list is not None:
             self.reject_backoff_seconds = self._scan_backoff_timer(payload_list)
+        # An explicit network timer overrides a generic/transient local
+        # classification. Retrying inside the same process would immediately
+        # violate Tw3 and can extend the carrier-side block.
+        if self.reject_backoff_seconds:
+            self.reject_reason_policy = "backoff"
         bo = (" backoff=%ss" % self.reject_backoff_seconds) if self.reject_backoff_seconds else ""
         swu_log("reject classified: %s (%d) policy=%s%s" %
                 (self.reject_reason_code, code, self.reject_reason_policy, bo))

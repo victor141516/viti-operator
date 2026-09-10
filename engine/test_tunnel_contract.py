@@ -40,6 +40,42 @@ class TunnelContractTest(unittest.TestCase):
             (Path(directory) / "swu_status.json").write_text(json.dumps(payload), encoding="utf-8")
             self.assertEqual(tunnel_contract.read_status(directory).state, "CONNECTING")
 
+    def test_supervisor_honours_remaining_carrier_backoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            payload = tunnel_contract.status_payload(
+                "python", "DOWN", 1000, backoff=600,
+                reason_code="AUTHENTICATION_FAILED",
+            )
+            (Path(directory) / "swu_status.json").write_text(
+                json.dumps(payload), encoding="utf-8"
+            )
+            self.assertEqual(
+                tunnel_contract.supervisor_retry_delay(directory, 8, now=1125),
+                475,
+            )
+            self.assertEqual(
+                tunnel_contract.supervisor_retry_delay(directory, 8, now=1700),
+                8,
+            )
+
+    def test_supervisor_backoff_is_bounded_and_malformed_status_is_ignored(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "swu_status.json"
+            path.write_text("not-json", encoding="utf-8")
+            self.assertEqual(
+                tunnel_contract.supervisor_retry_delay(directory, 4, now=1000),
+                4,
+            )
+            path.write_text(json.dumps(tunnel_contract.status_payload(
+                "strongswan", "DOWN", 1000, backoff=999999,
+            )), encoding="utf-8")
+            self.assertEqual(
+                tunnel_contract.supervisor_retry_delay(
+                    directory, 4, now=1000, maximum=3600
+                ),
+                3600,
+            )
+
     def test_transition_sequence_is_generation_scoped_and_contiguous(self):
         events = [
             {"event": "tunnel_start", "tunnel_generation": "g1", "tunnel_sequence": 1,
