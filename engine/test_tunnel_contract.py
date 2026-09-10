@@ -97,6 +97,16 @@ class TunnelContractTest(unittest.TestCase):
                 "SWU_STRONGSWAN_BACKEND": "/definitely/missing/adapter.py",
             })
 
+    def test_strongswan_backend_command_uses_installed_adapter(self):
+        with tempfile.NamedTemporaryFile(suffix=".py") as adapter:
+            backend, command = tunnel_backend.backend_command({
+                "SWU_BACKEND": "strongswan",
+                "SWU_STRONGSWAN_BACKEND": adapter.name,
+                "SWU_PYTHON": "python-for-swu",
+            })
+        self.assertEqual(backend, "strongswan")
+        self.assertEqual(command, ["python-for-swu", adapter.name])
+
 
 if __name__ == "__main__":
     unittest.main()

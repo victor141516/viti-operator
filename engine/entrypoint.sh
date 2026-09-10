@@ -1,13 +1,7 @@
 #!/bin/bash
-# Engine entrypoint: render config -> hold PIN -> bring up the ePDG (SWu) tunnel with the
-# pure-Python IKEv2/IPsec implementation (swu_ike.py) -> discover P-CSCF -> start Asterisk
-# (IMS registration + voice/SMS).
-#
-# SWu tunnel: swu_ike.py (fasferraz/SWu-IKEv2, patched) is the sole ePDG tunnel path. It does
-# IKEv2 + EAP-AKA (verifying the SIM PIN in its own PC/SC connection), userspace ESP over a
-# tun device named "ipsec0" (so pjsip's bind_interface is unchanged), assigns the IPv6 inner
-# address, and requests the IPv6 P-CSCF. A supervisor restarts it on exit; because every fresh
-# start re-runs EAP-AKA WITH the PIN verify, the tunnel self-heals after a rekey/reauth teardown.
+# Engine entrypoint: render config -> hold PIN -> start the selected SWu backend ->
+# discover P-CSCF -> start Asterisk (IMS registration + voice/SMS). Both backends
+# expose the same ipsec0/status/event/control contract and are supervised identically.
 #
 # PC/SC: this container is a pcscd CLIENT — it talks to the HOST pcscd via the bind-mounted
 # /run/pcscd socket. The pcsc-lite client library is pinned to the same version as the host
@@ -63,7 +57,7 @@ if [ -z "${SWU_HTTP_AKA_URL:-}" ]; then
     wait_pin || true
 fi
 
-# --- 3. Bring up the SWu (python IKEv2/IPsec) tunnel, supervised ------------------
+# --- 3. Bring up the selected SWu tunnel backend, supervised ----------------------
 log "starting SWu tunnel backend=$SWU_BACKEND (epdg=$SWU_EPDG apn=$SWU_APN reader=$USIM_READER_INDEX port=${USIM_READER_PORT:-none})..."
 if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
   : > "$VOWIFI_RUNDIR/charon.log"
@@ -76,26 +70,25 @@ else
 fi
 rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
 
-# swu_ike is very chatty (per-packet IKE decode dumps). Full output goes either to
-# the opt-in diagnostic file or through an operational-line filter. The latter keeps
-# low-volume [swu_ike] lifecycle/rekey evidence in both Docker logs and a bounded file,
-# instead of discarding the exact reason for every supervised reconnect.
+# Full backend/charon output goes to the opt-in diagnostic file. Normal operation
+# retains only normalized launcher/backend lifecycle evidence in Docker logs and a
+# bounded file, avoiding the legacy backend's per-packet decode dumps.
 (
   backoff=4
   while true; do
-    log "swu_ike starting"
+    log "SWu backend starting ($SWU_BACKEND)"
     SWU_OPERATIONAL_LOG=/logs/swu-operational.log
     if [ -f "$SWU_OPERATIONAL_LOG" ] && [ "$(stat -c %s "$SWU_OPERATIONAL_LOG" 2>/dev/null || echo 0)" -gt 1048576 ]; then
       tail -c 524288 "$SWU_OPERATIONAL_LOG" > "$SWU_OPERATIONAL_LOG.tmp"
       mv "$SWU_OPERATIONAL_LOG.tmp" "$SWU_OPERATIONAL_LOG"
     fi
     python3 -u /usr/local/bin/tunnel_backend.py 2>&1 | if [ "$SWU_LOG_TARGET" = "/dev/null" ]; then
-          awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+          awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
         else
-          tee -a "$SWU_LOG_TARGET" | awk '/^\[swu_ike\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
+          tee -a "$SWU_LOG_TARGET" | awk '/^\[(swu_ike|strongswan-adapter|tunnel-backend)\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG"
         fi
     rc=${PIPESTATUS[0]}
-    log "swu_ike exited (rc=$rc); reconnecting in ${backoff}s"
+    log "SWu backend $SWU_BACKEND exited (rc=$rc); reconnecting in ${backoff}s"
     sleep "$backoff"; backoff=$((backoff*2)); [ "$backoff" -gt 60 ] && backoff=60
   done
 ) &
@@ -118,7 +111,7 @@ addr=$(cat "$VOWIFI_RUNDIR/pcscf" 2>/dev/null)
 if [ -n "$addr" ]; then
   log "discovered P-CSCF: $addr"
   python3 /usr/local/bin/render.py || true   # re-render pjsip.conf with pcscf
-  # Seed the applied-marker so swu_ike's in-process P-CSCF watcher only re-renders + reloads
+  # Seed the applied-marker so the tunnel integration only re-renders + reloads
   # Asterisk on a LATER change (reconnect/reauth), not redundantly right after this render.
   printf '%s' "$addr" > "$VOWIFI_RUNDIR/pcscf.applied"
 else
@@ -126,7 +119,7 @@ else
 fi
 
 # PJSIP resolves bind_interface=ipsec0 when its transport starts. Remember the initial inner
-# address so swu_ike can detect a different one on a later reconnect and restart that transport.
+# address so the tunnel integration can detect a later change and restart that transport.
 inner=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json')).get('inner_ip',''))" 2>/dev/null || echo "")
 if [ -n "$inner" ]; then
   printf '%s' "$inner" > "$VOWIFI_RUNDIR/inner_ip.applied"
