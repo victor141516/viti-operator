@@ -177,10 +177,6 @@ fun VitiApp(
     val callSnapshot by voiceRuntime.snapshot.collectAsStateWithLifecycle()
     var destination by rememberSaveable { mutableStateOf(Destination.Messages) }
 
-    LaunchedEffect(ui.voiceProvisioning) {
-        voiceRuntime.start(ui.voiceProvisioning)
-    }
-
     Box(Modifier.fillMaxSize()) {
       NavigationSuiteScaffold(
         navigationSuiteItems = {

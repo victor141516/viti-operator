@@ -189,6 +189,61 @@ scope, the UI remains in **Ending** and offers the same operation again. Do not
 clear application data to remove this state: retry once, inspect Android Telecom
 and Viti diagnostics, and let the actual scope completion free the local slot.
 
+### Android Auto projected calling
+
+The projected calling surface requires all of the following:
+
+- a phone running Android 9 or later with a compatible, current Android Auto
+  host;
+- Android Telecom support on that phone and Car App API 5 or later on the host;
+- Viti microphone permission, a reachable Viti server, successful SIP
+  registration, and no conflicting local call.
+
+Outside a local developer/DHU setup, distribute the build through a Google Play
+**Internal testing** or **Closed testing** track while Android Auto
+communication calling remains a beta/labs category. Do not put a build
+containing the `CALLING` category in Open testing or Production: Google
+currently rejects those tracks. See the official
+[Android Auto calling guide](https://developer.android.com/training/cars/communication/calling),
+[communication-app status](https://developer.android.com/design/ui/cars/guides/app-types/communications),
+and [car app quality checklist](https://developer.android.com/docs/quality-guidelines/car-app-quality)
+before distributing a new build.
+
+The app presents recent calls and synchronized contacts, bounded by the list
+limit reported by the host. Selecting one requests a normal Viti service call.
+Android Auto then replaces the template with its system in-call UI; Viti cannot
+customize or promise every control shown there. Answer, reject, participant
+departure, mute/inactive state, and endpoint changes flow through Core-Telecom.
+Each answer, reject, active, and inactive remote-control callback has an
+application timeout below Android's five-second deadline.
+
+Android Auto may connect to the phone through USB or wirelessly. That transport
+does not by itself identify the audio endpoint. Telecom and the vehicle host
+decide whether audio uses car Bluetooth, USB, speaker, earpiece, or another
+reported endpoint. `BLUETOOTH_CONNECT` is recommended for complete Bluetooth
+route discovery and control on Android 12+, but denying it does not block calls
+that can use USB, speaker, or earpiece. Validate both connection transitions on
+the actual target vehicle or the Desktop Head Unit (DHU); automated model tests
+cannot establish OEM audio routing or accessory-button behavior.
+
+This phone module supports **Android Auto projection only**. It is not packaged
+as an installable Android Automotive OS application and does not claim AAOS
+compatibility. A vehicle with embedded Android Automotive may still expose a
+projected phone call only when its OEM-provided host supports that behavior.
+
+For a release candidate, run:
+
+```sh
+cd android
+./gradlew testDebugUnitTest compileDebugAndroidTestKotlin verifyDebugCarManifest lintDebug assembleRelease
+```
+
+Then perform a DHU or real-vehicle smoke test covering outgoing call, incoming
+answer, incoming reject, one participant leaving, Bluetooth-to-USB and
+USB-to-Bluetooth changes, car-session disconnect/reconnect, and foreground cold
+start. A compiled instrumentation APK is not evidence that those physical paths
+were exercised.
+
 ## Browser audio devices
 
 Open **Connection → Call audio** to select this browser's microphone and, when
@@ -339,6 +394,10 @@ changing the carrier tunnel.
    Viti intentionally follows the system concurrency decision.
 5. If the UI remains in **Ending**, retry the displayed end/reject action and
    inspect `dumpsys telecom` plus Viti diagnostics before restarting the app.
+6. For Android Auto, confirm the phone is Android 9+, the host supports Car App
+   API 5+, and the build came from an eligible Internal or Closed testing track.
+   Sideloading alone does not prove that a production host will list a beta
+   calling application.
 
 ### SMS remains submitted or delivery is unconfirmed
 
@@ -385,6 +444,12 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
   remain vendor/accessory dependent.
 - Android activity recreation preserves a call, but process death does not
   restore the local SIP/WebRTC leg.
+- Android Auto calling is a projected, beta/labs capability requiring Android
+  9+, Car App API 5+, and Google Play Internal or Closed testing. Open testing,
+  Production, and an installable Android Automotive OS client are not supported.
+- Android Auto audio routes and accessory controls depend on the host,
+  vehicle/OEM, connection mode, permissions, and accessory; they require DHU or
+  real-vehicle validation for each supported combination.
 - Carrier Wi-Fi Calling provisioning and policy remain outside the project's
   control.
 - Destination SMS delivery reports depend on carrier/SMSC support and may remain

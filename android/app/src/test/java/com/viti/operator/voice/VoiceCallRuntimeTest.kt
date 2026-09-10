@@ -460,6 +460,89 @@ class VoiceCallRuntimeTest {
     }
 
     @Test
+    fun remoteSurfaceDisconnectLeavesOnlyThisLocalParticipant() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "car-remote-disconnect"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000024", legToken = token))
+        runCurrent()
+        gateway.callbacks.onAnswer()
+        gateway.callbacks.onDisconnect(rejected = false)
+
+        assertTrue(engine.commands.contains("hangup:$token"))
+        assertEquals(0, gateway.disconnectCount)
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+
+        gateway.finish()
+        runCurrent()
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
+    fun remoteSurfaceRejectsTheExactIncomingParticipant() = runTest(UnconfinedTestDispatcher()) {
+        val engine = FakeVoiceEngine()
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "car-remote-reject"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000026", legToken = token))
+        runCurrent()
+        gateway.callbacks.onDisconnect(rejected = true)
+
+        assertTrue(engine.commands.contains("reject:$token"))
+        assertFalse(engine.commands.contains("hangup:$token"))
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        runtime.close()
+    }
+
+    @Test
+    fun telecomAudioTracksBluetoothAndUsbChangesAndRoutesRequestsThroughAndroid() = runTest(UnconfinedTestDispatcher()) {
+        val gateway = FakeGateway()
+        val runtime = runtime(FakeVoiceEngine(), gateway, FakeLegacyAudio())
+        runtime.placeCall("+34600000027")
+        runCurrent()
+        val bluetooth = VoiceAudioEndpoint("bt", "Car Bluetooth", VoiceAudioEndpointType.BLUETOOTH)
+        val usb = VoiceAudioEndpoint("usb", "USB headset", VoiceAudioEndpointType.WIRED_HEADSET)
+
+        gateway.callbacks.onAudioState(PlatformAudioState(current = bluetooth, available = listOf(bluetooth, usb)))
+        assertEquals(bluetooth, runtime.snapshot.value.audio.current)
+        runtime.requestEndpoint(usb.id)
+        runCurrent()
+        assertEquals(listOf("usb"), gateway.endpointRequests)
+        gateway.callbacks.onAudioState(PlatformAudioState(current = usb, available = listOf(usb)))
+
+        assertEquals(usb, runtime.snapshot.value.audio.current)
+        assertEquals(listOf(usb), runtime.snapshot.value.audio.available)
+        runtime.close()
+    }
+
+    @Test
+    fun remoteSurfaceDisconnectTimesOutBeforeThePlatformDeadline() = runTest(UnconfinedTestDispatcher()) {
+        val hangGate = CompletableDeferred<Unit>()
+        val engine = FakeVoiceEngine().apply { this.hangGate = hangGate }
+        val gateway = FakeGateway()
+        val runtime = runtime(engine, gateway, FakeLegacyAudio())
+        val token = "car-disconnect-timeout"
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000025", legToken = token))
+        runCurrent()
+        gateway.callbacks.onAnswer()
+        val result = async { runCatching { gateway.callbacks.onDisconnect(rejected = false) } }
+        advanceTimeBy(4_501)
+        runCurrent()
+
+        assertTrue(result.await().isFailure)
+        assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        gateway.finish()
+        runCurrent()
+        assertTrue(runtime.snapshot.value.legToken.isBlank())
+        runtime.close()
+    }
+
+    @Test
     fun lateDialFailureCannotMutateStateAfterTheLegWasRemoved() = runTest(UnconfinedTestDispatcher()) {
         val gate = CompletableDeferred<Unit>()
         val engine = FakeVoiceEngine().apply {
@@ -551,6 +634,7 @@ class VoiceCallRuntimeTest {
         var callFailure: Throwable? = null
         var callGate: CompletableDeferred<Unit>? = null
         var answerGate: CompletableDeferred<Unit>? = null
+        var hangGate: CompletableDeferred<Unit>? = null
         var answerFailure: Throwable? = null
         var inactiveFailure: Throwable? = null
         var inactiveTrueGate: CompletableDeferred<Unit>? = null
@@ -568,7 +652,10 @@ class VoiceCallRuntimeTest {
             commands += "answer:$legToken"
         }
         override suspend fun reject(legToken: String) { commands += "reject:$legToken" }
-        override suspend fun hangup(legToken: String) { commands += "hangup:$legToken" }
+        override suspend fun hangup(legToken: String) {
+            hangGate?.await()
+            commands += "hangup:$legToken"
+        }
         override suspend fun setMuted(legToken: String, muted: Boolean) { commands += "mute:$legToken:$muted" }
         override suspend fun setTelecomMuted(legToken: String, muted: Boolean) { commands += "telecom-mute:$legToken:$muted" }
         override suspend fun setSystemInactive(legToken: String, inactive: Boolean) {
@@ -590,6 +677,7 @@ class VoiceCallRuntimeTest {
         var disconnectFailure: Throwable? = null
         var setActiveFailure: Throwable? = null
         var scopeActive = false
+        val endpointRequests = mutableListOf<String>()
         lateinit var callbacks: PlatformCallCallbacks
         private var ready: ((PlatformCallControl) -> Unit)? = null
         private val admission = CompletableDeferred<Unit>()
@@ -606,7 +694,9 @@ class VoiceCallRuntimeTest {
                 disconnectFailure?.let { throw it }
                 if (completeOnDisconnect) lifetime.complete(Unit)
             }
-            override suspend fun requestEndpoint(endpointId: String) = Unit
+            override suspend fun requestEndpoint(endpointId: String) {
+                endpointRequests += endpointId
+            }
         }
 
         override suspend fun runCall(

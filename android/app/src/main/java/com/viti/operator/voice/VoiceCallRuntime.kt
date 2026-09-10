@@ -382,7 +382,11 @@ class VoiceCallRuntime(
             }
         }
 
-        override suspend fun onDisconnect(rejected: Boolean) = leave(token, rejected, fromPlatform = true)
+        override suspend fun onDisconnect(rejected: Boolean) {
+            withTimeout(PLATFORM_CALLBACK_TIMEOUT_MS) {
+                leave(token, rejected, fromPlatform = true)
+            }
+        }
 
         override suspend fun onSetActive() {
             val current = requireCurrent(token)

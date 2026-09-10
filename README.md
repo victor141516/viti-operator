@@ -18,6 +18,10 @@ IMS and conference audio.
 - Android service calls integrate with the system Telecom concurrency and audio
   model without replacing the default dialer, with a capability fallback for
   Android 7 devices.
+- Compatible phones can project a bounded recent/contact call directory to
+  Android Auto; active calls use Android Auto's system in-call surface and car
+  audio controls. This beta capability currently has restricted test-only
+  distribution.
 - Browser-local microphone and speaker preferences with safe default fallback
   and automatic restoration when a remembered device reconnects.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.

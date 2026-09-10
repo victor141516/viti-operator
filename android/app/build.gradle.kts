@@ -48,6 +48,26 @@ val generateVoiceAssets by tasks.registering(Copy::class) {
 
 tasks.named("preBuild").configure { dependsOn(generateVoiceAssets) }
 
+val verifyDebugCarManifest by tasks.registering {
+    dependsOn("processDebugManifest")
+    doLast {
+        val manifest = layout.buildDirectory
+            .file("intermediates/merged_manifests/debug/processDebugManifest/AndroidManifest.xml")
+            .get()
+            .asFile
+        check(manifest.isFile) { "Merged debug manifest was not generated" }
+        val contents = manifest.readText()
+        check("com.google.android.gms.car.application" in contents) { "Android Auto application metadata is missing" }
+        check("androidx.car.app.minCarApiLevel" in contents && "android:value=\"5\"" in contents) {
+            "The merged manifest must declare minimum Car API level 5"
+        }
+        check("com.viti.operator.car.VitiCarAppService" in contents) { "The projected CarAppService is missing" }
+        check("androidx.car.app.category.CALLING" in contents) { "The calling category is missing" }
+    }
+}
+
+tasks.named("check").configure { dependsOn(verifyDebugCarManifest) }
+
 kotlin {
     compilerOptions {
         jvmTarget.set(JvmTarget.JVM_17)
@@ -64,6 +84,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.12.3")
     implementation("androidx.core:core-ktx:1.17.0")
     implementation("androidx.core:core-telecom:1.0.1")
+    implementation("androidx.car.app:app:1.7.0")
+    implementation("androidx.car.app:app-projected:1.7.0")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material3:material3-adaptive-navigation-suite")
     implementation("androidx.compose.material:material-icons-extended")
@@ -83,6 +105,7 @@ dependencies {
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
+    androidTestImplementation("androidx.car.app:app-testing:1.7.0")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

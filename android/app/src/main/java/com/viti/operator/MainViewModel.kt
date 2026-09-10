@@ -19,7 +19,6 @@ import com.viti.operator.data.IMSRegistrationState
 import com.viti.operator.data.PhoneRoutingSettings
 import com.viti.operator.data.RecordingSettings
 import com.viti.operator.data.VitiApi
-import com.viti.operator.data.VoiceProvisioning
 import com.viti.operator.data.VoiceUiState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -39,7 +38,6 @@ data class AppUiState(
     val calls: List<Call> = emptyList(),
     val contacts: List<PhoneContact> = emptyList(),
     val contactsAvailable: Boolean = false,
-    val voiceProvisioning: VoiceProvisioning = VoiceProvisioning(),
     val voice: VoiceUiState = VoiceUiState(),
 	val serverIMS: IMSRegistrationState = IMSRegistrationState(),
     val recording: RecordingSettings = RecordingSettings(),
@@ -111,7 +109,7 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
             clientIdentity?.let { api.heartbeat(it) }
             val status = api.status()
             val contacts = if (shouldReloadContacts(contactsCacheSettings, contactsCacheVersion, refreshSettings, status.contactsVersion)) api.contacts() else null
-            RefreshData(status, api.messages(), api.calls(), contacts, api.voice(), api.imsRegistration(), api.recordingSettings(), api.topology())
+            RefreshData(status, api.messages(), api.calls(), contacts, api.imsRegistration(), api.recordingSettings(), api.topology())
         }.onSuccess { data ->
             val currentMessageSource = settings.value.serverUrl.trim().trimEnd('/')
             val newIncomingMessages = incomingMessageTracker.update(currentMessageSource, data.messages)
@@ -124,7 +122,6 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
                 messages = data.messages,
                 calls = data.calls,
                 contacts = data.contacts?.contacts ?: _uiState.value.contacts,
-                voiceProvisioning = data.voice,
 				serverIMS = data.serverIMS,
                 recording = data.recording,
                 topology = data.topology,
@@ -306,7 +303,6 @@ class MainViewModel(private val settingsStore: SettingsStore) : ViewModel() {
         val messages: List<Message>,
         val calls: List<Call>,
         val contacts: ServerContactsSnapshot?,
-        val voice: VoiceProvisioning,
 		val serverIMS: IMSRegistrationState,
         val recording: RecordingSettings,
         val topology: ConnectionTopology,
