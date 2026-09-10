@@ -1,6 +1,12 @@
 export class LiveCallSoakTracker {
-  constructor({ minCallSeconds = 7200, minIkeRenewals = 2, minChildRenewals = 2, postCallSeconds = 120 } = {}) {
-    this.requirements = { minCallSeconds, minIkeRenewals, minChildRenewals, postCallSeconds }
+  constructor({
+    minCallSeconds = 7200,
+    minIkeRenewals = 2,
+    minChildRenewals = 2,
+    postCallSeconds = 120,
+    maxMediaStallSeconds = 15,
+  } = {}) {
+    this.requirements = { minCallSeconds, minIkeRenewals, minChildRenewals, postCallSeconds, maxMediaStallSeconds }
     this.phase = 'waiting'
     this.callStartedAt = null
     this.callEndedAt = null
@@ -10,7 +16,38 @@ export class LiveCallSoakTracker {
     this.childIDs = new Set()
     this.ikeRenewals = 0
     this.childRenewals = 0
+    this.lastMediaRxPackets = null
+    this.lastMediaTxPackets = null
+    this.lastMediaRxProgressAt = null
+    this.lastMediaTxProgressAt = null
+    this.mediaRxProgressSamples = 0
+    this.mediaTxProgressSamples = 0
+    this.maxMediaRxStallSeconds = 0
+    this.maxMediaTxStallSeconds = 0
     this.fatalReason = ''
+  }
+
+  observeMediaDirection(direction, packets, at, reasons) {
+    const count = Number(packets)
+    const lastCountKey = direction === 'rx' ? 'lastMediaRxPackets' : 'lastMediaTxPackets'
+    const lastProgressKey = direction === 'rx' ? 'lastMediaRxProgressAt' : 'lastMediaTxProgressAt'
+    const progressSamplesKey = direction === 'rx' ? 'mediaRxProgressSamples' : 'mediaTxProgressSamples'
+    const maxStallKey = direction === 'rx' ? 'maxMediaRxStallSeconds' : 'maxMediaTxStallSeconds'
+    if (!Number.isFinite(count) || count < 0) {
+      reasons.push(`media_${direction}_unavailable`)
+      return
+    }
+    if (this[lastCountKey] === null || count !== this[lastCountKey]) {
+      if (this[lastCountKey] !== null) this[progressSamplesKey] += 1
+      this[lastCountKey] = count
+      this[lastProgressKey] = at
+      return
+    }
+    const stalledSeconds = Math.max(0, (at - this[lastProgressKey]) / 1000)
+    this[maxStallKey] = Math.max(this[maxStallKey], stalledSeconds)
+    if (stalledSeconds > this.requirements.maxMediaStallSeconds) {
+      reasons.push(`media_${direction}_stalled`)
+    }
   }
 
   observe(sample) {
@@ -52,6 +89,12 @@ export class LiveCallSoakTracker {
     if (!sample.ims) reasons.push('ims_unregistered')
     if (!(sample.ike_ids || []).length) reasons.push('ike_sa_absent')
     if (!(sample.child_ids || []).length) reasons.push('child_sa_absent')
+    if (!Number.isFinite(Number(sample.media_channels)) || Number(sample.media_channels) < 1) {
+      reasons.push('media_channels_absent')
+    } else {
+      this.observeMediaDirection('rx', sample.media_rx_packets, at, reasons)
+      this.observeMediaDirection('tx', sample.media_tx_packets, at, reasons)
+    }
     if (reasons.length) this.unhealthySamples.push({ timestamp: sample.timestamp, reasons })
 
     for (const id of sample.ike_ids || []) {
@@ -86,6 +129,8 @@ export class LiveCallSoakTracker {
       && callDurationSeconds >= this.requirements.minCallSeconds
       && this.ikeRenewals >= this.requirements.minIkeRenewals
       && this.childRenewals >= this.requirements.minChildRenewals
+      && this.mediaRxProgressSamples > 0
+      && this.mediaTxProgressSamples > 0
       && this.unhealthySamples.length === 0
     return {
       accepted,
@@ -97,11 +142,16 @@ export class LiveCallSoakTracker {
       unhealthy_samples: this.unhealthySamples.length,
       observed_ike_renewals: this.ikeRenewals,
       observed_child_renewals: this.childRenewals,
+      media_rx_progress_samples: this.mediaRxProgressSamples,
+      media_tx_progress_samples: this.mediaTxProgressSamples,
+      maximum_observed_media_rx_stall_seconds: this.maxMediaRxStallSeconds,
+      maximum_observed_media_tx_stall_seconds: this.maxMediaTxStallSeconds,
       requirements: {
         minimum_call_seconds: this.requirements.minCallSeconds,
         minimum_ike_renewals: this.requirements.minIkeRenewals,
         minimum_child_renewals: this.requirements.minChildRenewals,
         post_call_seconds: this.requirements.postCallSeconds,
+        maximum_media_stall_seconds: this.requirements.maxMediaStallSeconds,
       },
     }
   }

@@ -21,6 +21,7 @@ const tracker = new LiveCallSoakTracker({
   minIkeRenewals: numberSetting('VITI_MIN_IKE_RENEWALS', '2'),
   minChildRenewals: numberSetting('VITI_MIN_CHILD_RENEWALS', '2'),
   postCallSeconds: numberSetting('VITI_POST_CALL_SECONDS', '120'),
+  maxMediaStallSeconds: numberSetting('VITI_MAX_MEDIA_STALL_SECONDS', '15', 1),
 })
 
 if (process.env.VITI_LIVE_SOAK !== '1') throw new Error('set VITI_LIVE_SOAK=1 to opt in to live observation')
@@ -56,6 +57,7 @@ def present(command):
 
 registrations = run(["asterisk", "-rx", "pjsip show registrations"])
 channels = run(["asterisk", "-rx", "core show channels count"])
+channelstats = run(["asterisk", "-rx", "pjsip show channelstats"])
 sas = run(["swanctl", "--list-sas", "--raw"])
 ike_ids, child_ids = [], []
 for event in sas.split("list-sa event ")[1:]:
@@ -63,10 +65,25 @@ for event in sas.split("list-sa event ")[1:]:
     if ids:
         ike_ids.append(ids[0])
         child_ids.extend(ids[1:])
-active = re.search(r"(?m)^([0-9]+) active channels$", channels)
+active = re.search(r"(?m)^([0-9]+) active channels?$", channels)
 values = lambda name: [int(value) for value in re.findall(name + r"=([0-9]+)", sas)]
+media_channels, media_rx_packets, media_tx_packets = 0, 0, 0
+for line in channelstats.splitlines():
+    fields = line.split()
+    if len(fields) < 12:
+        continue
+    try:
+        stats = fields[-9:]
+        media_rx_packets += int(stats[0])
+        media_tx_packets += int(stats[4])
+        float(stats[3])
+        float(stats[7])
+        float(stats[8])
+    except (ValueError, IndexError):
+        continue
+    media_channels += 1
 print(json.dumps({
-    "snapshot_ok": bool(channels and registrations),
+    "snapshot_ok": bool(channels and registrations and channelstats),
     "charon": present(["pgrep", "-x", "charon"]),
     "python": present(["pgrep", "-f", "[s]wu_ike.py"]),
     "tunnel": present(["ip", "link", "show", "ipsec0"]),
@@ -76,6 +93,9 @@ print(json.dumps({
     "child_ids": child_ids,
     "bytes_in": sum(values("bytes-in")),
     "bytes_out": sum(values("bytes-out")),
+    "media_channels": media_channels,
+    "media_rx_packets": media_rx_packets,
+    "media_tx_packets": media_tx_packets,
 }, separators=(",", ":")))
 `
 

@@ -13,6 +13,9 @@ const sample = (seconds, overrides = {}) => ({
   ims: true,
   ike_ids: [1],
   child_ids: [10],
+  media_channels: 2,
+  media_rx_packets: seconds * 50,
+  media_tx_packets: seconds * 50,
   ...overrides,
 })
 
@@ -41,11 +44,16 @@ test('accepts one call only after the required natural SA transitions and post-c
     unhealthy_samples: 0,
     observed_ike_renewals: 2,
     observed_child_renewals: 2,
+    media_rx_progress_samples: 3,
+    media_tx_progress_samples: 3,
+    maximum_observed_media_rx_stall_seconds: 0,
+    maximum_observed_media_tx_stall_seconds: 0,
     requirements: {
       minimum_call_seconds: 100,
       minimum_ike_renewals: 2,
       minimum_child_renewals: 2,
       post_call_seconds: 10,
+      maximum_media_stall_seconds: 15,
     },
   })
 })
@@ -97,4 +105,36 @@ test('counts each replacement SA once while old and new generations overlap', ()
   assert.equal(summary.observed_ike_renewals, 1)
   assert.equal(summary.observed_child_renewals, 1)
   assert.equal(summary.accepted, true)
+})
+
+test('rejects a call whose RTP packet counters stop advancing', () => {
+  const tracker = new LiveCallSoakTracker({
+    minCallSeconds: 5,
+    minIkeRenewals: 0,
+    minChildRenewals: 0,
+    postCallSeconds: 0,
+    maxMediaStallSeconds: 5,
+  })
+  tracker.observe(sample(0, { active_channels: 0 }))
+  tracker.observe(sample(1, { media_rx_packets: 100, media_tx_packets: 200 }))
+  tracker.observe(sample(4, { media_rx_packets: 100, media_tx_packets: 200 }))
+  tracker.observe(sample(7, { media_rx_packets: 100, media_tx_packets: 200 }))
+  tracker.observe(sample(8, { active_channels: 0 }))
+  tracker.observe(sample(9, { active_channels: 0 }))
+
+  const summary = tracker.summary()
+  assert.equal(summary.accepted, false)
+  assert.equal(summary.maximum_observed_media_rx_stall_seconds, 6)
+  assert.equal(summary.maximum_observed_media_tx_stall_seconds, 6)
+  assert.deepEqual(tracker.unhealthySamples.at(-1).reasons, ['media_rx_stalled', 'media_tx_stalled'])
+})
+
+test('rejects an active call without observable PJSIP media channels', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1, { media_channels: 0 }))
+  tracker.observe(sample(2, { active_channels: 0 }))
+  tracker.observe(sample(3, { active_channels: 0 }))
+
+  assert.equal(tracker.summary().accepted, false)
+  assert.deepEqual(tracker.unhealthySamples[0].reasons, ['media_channels_absent'])
 })
