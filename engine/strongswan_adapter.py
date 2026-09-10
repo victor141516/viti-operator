@@ -29,6 +29,11 @@ BACKEND = "strongswan"
 CONNECTION = "viti-swu"
 CHILD = "ims"
 BACKOFF_NOTIFY = "N((41041))"
+AUTH_PROVIDER_FAILURE_MARKERS = (
+    "Viti AKA broker request failed",
+    "Viti AKA broker returned HTTP",
+    "Viti AKA broker returned invalid",
+)
 
 
 class ViciCommandError(RuntimeError):
@@ -58,6 +63,15 @@ def classify_failure(error, env):
         ))
         return {
             "reason_code": "AUTHENTICATION_FAILED",
+            "reason_policy": "backoff",
+            "backoff": seconds,
+        }
+    if any(marker in evidence for marker in AUTH_PROVIDER_FAILURE_MARKERS):
+        seconds = int(positive_float(
+            env, "SWU_AUTH_PROVIDER_BACKOFF_SECONDS", "60"
+        ))
+        return {
+            "reason_code": "AUTHENTICATION_PROVIDER_UNAVAILABLE",
             "reason_policy": "backoff",
             "backoff": seconds,
         }
@@ -120,6 +134,17 @@ def duration(seconds):
     if seconds == 0:
         return "0s"
     return f"{max(1, round(seconds))}s"
+
+
+def initiate_timeout_ms(env):
+    """Keep VICI alive longer than the synchronous AKA broker request."""
+    broker = positive_float(env, "SWU_HTTP_AKA_TIMEOUT", "40")
+    configured = str(env.get("SWU_IKE_AUTH_TIMEOUT", "")).strip()
+    seconds = (
+        positive_float(env, "SWU_IKE_AUTH_TIMEOUT", configured)
+        if configured else max(45.0, broker + 10.0)
+    )
+    return str(max(1, round(seconds * 1000)))
 
 
 def build_connection(env):
@@ -434,7 +459,9 @@ class StrongSwanAdapter:
 
     def load_and_initiate(self):
         self.request("load_conn", build_connection(self.env))
-        logs = self.request("initiate", {"child": CHILD, "timeout": "30000"})
+        logs = self.request(
+            "initiate", {"child": CHILD, "timeout": initiate_timeout_ms(self.env)}
+        )
         if logs:
             self.log(f"VICI initiation completed with {len(logs)} control records")
 

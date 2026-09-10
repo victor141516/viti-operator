@@ -22,6 +22,8 @@ const (
 )
 
 var openStickMaterialPattern = regexp.MustCompile(`material=([A-Za-z0-9+/=]+)`)
+var openStickProbeSuccessPattern = regexp.MustCompile(`(?m)^PROBE_EXIT port=[^\r\n ]+ code=(?:0|10)\r?$`)
+var openStickProbeFailurePattern = regexp.MustCompile(`(?m)^PROBE_EXIT port=rmnet_sdio0 code=-?[0-9]+\r?$`)
 
 type OpenStickAuthenticator struct {
 	ADB       string
@@ -167,30 +169,47 @@ func (a *OpenStickAuthenticator) AuthenticateAKA(ctx context.Context, rand16, au
 	if _, err := a.run(ctx, "shell", "chmod", "644", openStickChallenge); err != nil {
 		return AKAResult{}, err
 	}
-	if _, err := a.run(ctx, "shell", "touch", openStickResult); err != nil {
-		return AKAResult{}, err
-	}
-	if _, err := a.run(ctx, "shell", "chmod", "666", openStickResult); err != nil {
-		return AKAResult{}, err
-	}
-
 	deadline := time.Now().Add(a.timeout())
+	probeFailed := false
 	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := a.run(ctx, "shell", "rm", "-f", openStickResult); err != nil {
+			return AKAResult{}, err
+		}
+		if _, err := a.run(ctx, "shell", "touch", openStickResult); err != nil {
+			return AKAResult{}, err
+		}
+		if _, err := a.run(ctx, "shell", "chmod", "666", openStickResult); err != nil {
+			return AKAResult{}, err
+		}
 		_, _ = a.run(ctx, "shell", "am", "force-stop", openStickBridgePackage)
 		if _, err := a.run(ctx, "shell", "am", "start", "-n", openStickBridge); err != nil {
 			return AKAResult{}, err
 		}
 		for time.Now().Before(deadline) {
-			output, err := a.run(ctx, "shell", "content", "query", "--uri", "content://lab.codex.simidentity.aka/material")
-			if err == nil {
-				match := openStickMaterialPattern.FindSubmatch(output)
-				if len(match) == 2 {
-					material, decodeErr := base64.StdEncoding.DecodeString(string(match[1]))
-					if decodeErr != nil {
-						return AKAResult{}, errors.New("OpenStick returned invalid Base64 material")
-					}
-					return parseOpenStickMaterial(material)
+			probe, probeErr := a.run(ctx, "shell", "cat", openStickResult)
+			if probeErr == nil && openStickProbeSuccessPattern.Match(probe) {
+				// AkaMaterialProvider deletes its private result after every query,
+				// including an empty one.  Querying while qmi_auth_aka still has
+				// that file open unlinks the inode and loses an otherwise successful
+				// result.  PROBE_EXIT is appended only after waitFor(), so this is the
+				// first point at which the destructive provider read is safe.
+				output, queryErr := a.run(ctx, "shell", "content", "query", "--uri", "content://lab.codex.simidentity.aka/material")
+				if queryErr != nil {
+					return AKAResult{}, fmt.Errorf("OpenStick AKA material read failed: %w", queryErr)
 				}
+				match := openStickMaterialPattern.FindSubmatch(output)
+				if len(match) != 2 {
+					return AKAResult{}, errors.New("OpenStick AKA helper completed without readable material")
+				}
+				material, decodeErr := base64.StdEncoding.DecodeString(string(match[1]))
+				if decodeErr != nil {
+					return AKAResult{}, errors.New("OpenStick returned invalid Base64 material")
+				}
+				return parseOpenStickMaterial(material)
+			}
+			if probeErr == nil && openStickProbeFailurePattern.Match(probe) {
+				probeFailed = true
+				break
 			}
 			select {
 			case <-ctx.Done():
@@ -198,6 +217,9 @@ func (a *OpenStickAuthenticator) AuthenticateAKA(ctx context.Context, rand16, au
 			case <-time.After(a.pollDelay()):
 			}
 		}
+	}
+	if probeFailed {
+		return AKAResult{}, errors.New("OpenStick AKA helper failed on every modem interface")
 	}
 	return AKAResult{}, errors.New("OpenStick AKA response timed out")
 }

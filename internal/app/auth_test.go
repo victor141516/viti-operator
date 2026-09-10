@@ -244,6 +244,49 @@ func TestOpenStickReadinessDoesNotDebounceDefinitiveSIMAbsence(t *testing.T) {
 	}
 }
 
+func TestOpenStickAuthenticationWaitsForHelperExitBeforeDestructiveRead(t *testing.T) {
+	material := append([]byte("AKA1"), 8, 16, 16)
+	material = append(material, bytes.Repeat([]byte{1}, 8)...)
+	material = append(material, bytes.Repeat([]byte{2}, 16)...)
+	material = append(material, bytes.Repeat([]byte{3}, 16)...)
+	encoded := base64.StdEncoding.EncodeToString(material)
+	probeReads := 0
+	providerReads := 0
+	auth := &OpenStickAuthenticator{
+		Timeout:   time.Second,
+		PollDelay: time.Millisecond,
+		runADB: func(_ context.Context, args ...string) ([]byte, error) {
+			command := strings.Join(args, " ")
+			switch command {
+			case "shell cat " + openStickResult:
+				probeReads++
+				if probeReads == 1 {
+					return []byte("PROBE=activity-start\nAKA_RESULT=success\n"), nil
+				}
+				return []byte("PROBE=activity-start\nAKA_RESULT=success\nPROBE_EXIT port=rmnet0 code=0\n"), nil
+			case "shell content query --uri content://lab.codex.simidentity.aka/material":
+				providerReads++
+				if probeReads < 2 {
+					t.Fatal("destructive provider read raced the running helper")
+				}
+				return []byte("Row: 0 material=" + encoded), nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+	result, err := auth.AuthenticateAKA(context.Background(), bytes.Repeat([]byte{4}, 16), bytes.Repeat([]byte{5}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerReads != 1 {
+		t.Fatalf("provider reads = %d, want exactly one", providerReads)
+	}
+	if len(result.RES) != 8 || len(result.CK) != 16 || len(result.IK) != 16 {
+		t.Fatalf("unexpected AKA result lengths: %d/%d/%d", len(result.RES), len(result.CK), len(result.IK))
+	}
+}
+
 type fakeADBResult struct {
 	output string
 	err    error

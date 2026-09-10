@@ -83,6 +83,35 @@ class StrongSwanAdapterTest(unittest.TestCase):
             "backoff": 600,
         })
 
+    def test_local_authentication_provider_failure_is_rate_limited(self):
+        error = strongswan_adapter.ViciCommandError(
+            "initiate",
+            RuntimeError("establishing CHILD_SA failed"),
+            [{"msg": b"Viti AKA broker request failed"}],
+        )
+        self.assertEqual(strongswan_adapter.classify_failure(error, environment()), {
+            "reason_code": "AUTHENTICATION_PROVIDER_UNAVAILABLE",
+            "reason_policy": "backoff",
+            "backoff": 60,
+        })
+
+    def test_vici_auth_timeout_outlives_the_broker(self):
+        self.assertEqual(
+            strongswan_adapter.initiate_timeout_ms(
+                environment(SWU_HTTP_AKA_TIMEOUT="35")
+            ),
+            "45000",
+        )
+        self.assertEqual(
+            strongswan_adapter.initiate_timeout_ms(
+                environment(
+                    SWU_HTTP_AKA_TIMEOUT="35",
+                    SWU_IKE_AUTH_TIMEOUT="52.5",
+                )
+            ),
+            "52500",
+        )
+
     def test_runtime_persists_backoff_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = strongswan_adapter.RuntimeContract({
