@@ -25,6 +25,9 @@ func TestTopologyViewerIsEmbeddedAndSameOriginEmbeddable(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), `id="map-viewport"`) {
 		t.Fatal("embedded topology viewer is missing its interactive viewport")
 	}
+	if count := strings.Count(recorder.Body.String(), `/topology-inspector.bundle.js`); count != 1 {
+		t.Fatalf("topology inspector bundle references = %d, want exactly one", count)
+	}
 	csp := recorder.Header().Get("Content-Security-Policy")
 	if !strings.Contains(csp, "frame-ancestors 'self'") {
 		t.Fatalf("viewer cannot be framed by the web app: %q", csp)
@@ -52,7 +55,7 @@ func TestClientHeartbeatIdentifiesRemoteSIMHolder(t *testing.T) {
 	if len(clients) != 1 || !clients[0].Online || !clients[0].SIMHolder {
 		t.Fatalf("unexpected clients: %#v", clients)
 	}
-	sim := a.topologySIM(RuntimeStatus{}, clients)
+	sim := a.topologySIM(RuntimeStatus{}, clients, time.Now().UTC())
 	if sim.State != "healthy" || sim.HolderClientID != "android-123" {
 		t.Fatalf("unexpected remote SIM topology: %#v", sim)
 	}

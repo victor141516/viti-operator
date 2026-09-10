@@ -34,5 +34,9 @@ fun Context.vitiClientIdentity(): ClientIdentity {
     val hasSIM = telephony?.simState?.let {
         it != TelephonyManager.SIM_STATE_ABSENT && it != TelephonyManager.SIM_STATE_UNKNOWN
     } == true
-    return ClientIdentity("android-$stableId", name, hasSIM)
+    val cellular = CellularTelemetryMonitor.get(this).snapshot()
+    return ClientIdentity("android-$stableId", name, hasSIM, cellular)
 }
+
+internal fun ClientIdentity.withCurrentCellularObservation(): ClientIdentity =
+    copy(cellular = CellularTelemetryMonitor.currentSnapshot() ?: cellular)

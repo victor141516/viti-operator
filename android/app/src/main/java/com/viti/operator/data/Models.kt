@@ -42,12 +42,60 @@ data class ClientIdentity(
     val id: String,
     val name: String,
     val hasSim: Boolean,
+    val cellular: CellularObservation? = null,
+)
+
+data class CellularObservation(
+    val generation: String,
+    val generationStartedAt: String,
+    val sequence: Long,
+    val measuredAt: String,
+    val subscriptionRole: String,
+    val homeNetwork: CellularNetworkDetails,
+    val servingNetwork: CellularNetworkDetails,
+    val service: CellularServiceDetails,
+    val dataAccess: CellularDataAccessDetails,
+    val signal: CellularSignalDetails,
+    val receivedAt: String = "",
+    val stale: Boolean = false,
+)
+
+data class CellularNetworkDetails(
+    val availability: String = "unknown",
+    val operator: String = "",
+    val mcc: String = "",
+    val mnc: String = "",
+    val measuredAt: String = "",
+)
+
+data class CellularServiceDetails(
+    val availability: String = "unknown",
+    val registration: String = "",
+    val roaming: Boolean? = null,
+    val measuredAt: String = "",
+)
+
+data class CellularDataAccessDetails(
+    val availability: String = "unknown",
+    val technology: String = "",
+    val measuredAt: String = "",
+)
+
+data class CellularSignalDetails(
+    val availability: String = "unknown",
+    val level: Int? = null,
+    val dbm: Int? = null,
+    val measuredAt: String = "",
 )
 
 data class TopologyNode(
     val state: String = "idle",
     val label: String = "No data",
     val detail: String = "",
+    val evidence: String = "",
+    val observedAt: String = "",
+    val mcc: String = "",
+    val mnc: String = "",
 )
 
 data class TopologySim(
@@ -57,6 +105,9 @@ data class TopologySim(
     val mode: String = "disabled",
     val holderClientId: String = "",
     val authAgentId: String = "",
+    val selected: Boolean = false,
+    val cellularStatus: String = "unknown",
+    val cellular: CellularObservation? = null,
 )
 
 data class TopologyClient(
@@ -67,6 +118,7 @@ data class TopologyClient(
     val simHolder: Boolean,
     val online: Boolean,
     val lastSeen: String,
+    val cellular: CellularObservation? = null,
 )
 
 data class SIMAuthAssignmentStatus(

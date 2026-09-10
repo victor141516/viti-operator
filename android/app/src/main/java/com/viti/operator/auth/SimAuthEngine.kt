@@ -6,6 +6,7 @@ import android.telephony.TelephonyManager
 import android.util.Base64
 import com.viti.operator.data.AuthChallenge
 import com.viti.operator.data.AuthMaterial
+import com.viti.operator.data.simAuthSubscriptionId
 import java.io.IOException
 
 class SimAuthEngine(context: Context) {
@@ -16,7 +17,7 @@ class SimAuthEngine(context: Context) {
         val autn = Base64.decode(challenge.autn, Base64.NO_WRAP)
         require(rand.size == 16 && autn.size == 16) { "RAND and AUTN must be 16 bytes" }
 
-        val subscriptionId = SubscriptionManager.getDefaultDataSubscriptionId()
+        val subscriptionId = simAuthSubscriptionId()
         if (subscriptionId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) {
             throw IOException("There is no active data subscription")
         }

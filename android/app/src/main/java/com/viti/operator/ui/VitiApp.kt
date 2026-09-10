@@ -1,11 +1,13 @@
 package com.viti.operator.ui
 
+import android.Manifest
 import android.graphics.Color as AndroidColor
 import android.media.MediaPlayer
 import android.view.MotionEvent
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient as AndroidWebViewClient
+import android.content.pm.PackageManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -110,6 +112,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -129,6 +132,7 @@ import com.viti.operator.data.Message
 import com.viti.operator.data.normalizeServerUrl
 import com.viti.operator.data.TopologyClient
 import com.viti.operator.data.RuntimeStatus
+import com.viti.operator.data.CellularTelemetryMonitor
 import com.viti.operator.data.ServerSettings
 import com.viti.operator.data.PhoneContact
 import com.viti.operator.data.VitiApi
@@ -1364,6 +1368,7 @@ private fun ConnectionScreen(
             TopologyOverallChip(topologyOverallState(ui.topology))
         }
         TopologyViewerCard(settings, ui.clientId)
+        CellularDetailsPermissionCard()
         IncomingCallAlertsCard(
             status = callPresentationStatus,
             onRequestNotifications = onRequestCallNotifications,
@@ -1511,6 +1516,60 @@ private fun ConnectionScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun CellularDetailsPermissionCard() {
+    val context = LocalContext.current
+    var granted by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) == PackageManager.PERMISSION_GRANTED,
+        )
+    }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { allowed ->
+        granted = allowed
+        CellularTelemetryMonitor.get(context).refreshRegistration()
+    }
+    ElevatedCard(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(40.dp),
+                    shape = CircleShape,
+                    color = if (granted) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = if (granted) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(Icons.Default.CellTower, contentDescription = null, modifier = Modifier.size(22.dp))
+                    }
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text("Cellular network details", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(
+                        if (granted) "Available to the connection inspector" else "Optional phone permission",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                "Viti can report the home carrier, serving network, service state, data technology, and signal level " +
+                    "for the same default-data subscription used for SIM authentication. This metadata is sent to your Viti server. " +
+                    "Phone number, IMSI, ICCID, SIM slot, and cell location are never included.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (!granted) {
+                FilledTonalButton(
+                    onClick = { launcher.launch(Manifest.permission.READ_PHONE_STATE) },
+                    modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                ) {
+                    Text("Allow network details")
+                }
+            }
+        }
     }
 }
 
