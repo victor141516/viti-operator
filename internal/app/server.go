@@ -55,8 +55,8 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open store: %w", err)
 	}
-	if err := store.CloseStaleCalls(time.Now().UTC().Add(-2 * time.Minute)); err != nil {
-		return nil, fmt.Errorf("reconcile stale calls: %w", err)
+	if err := store.ReconcilePersistedCalls(); err != nil {
+		return nil, fmt.Errorf("reconcile persisted calls: %w", err)
 	}
 	broker := NewAuthBroker()
 	var gateway TelephonyGateway
@@ -304,22 +304,34 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	case "sms_in":
 		a.ingestEngineSMS(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
-	case "tunnel_up", "tunnel_down":
+	case "tunnel_start", "tunnel_up", "tunnel_down":
 		generation := strings.TrimSpace(request.TunnelGeneration)
 		sequence := request.TunnelSequence
 		if generation == "" {
-			generation = "legacy"
 			if request.RecordedAtNS > 0 {
 				sequence = uint64(request.RecordedAtNS)
 			} else {
 				sequence = uint64(now.UnixNano())
+			}
+			// Pre-generation engines can be rolled back to after a modern engine.
+			// Each legacy up event begins a distinct era; its following down event
+			// is correlated to that era rather than a permanently retired token.
+			if request.Event == "tunnel_down" {
+				if checkpoint, ok := a.store.EngineTunnelCheckpoint(request.Instance); ok && strings.HasPrefix(checkpoint.Generation, "legacy:") {
+					generation = checkpoint.Generation
+				}
+			}
+			if generation == "" {
+				generation = fmt.Sprintf("legacy:%d", sequence)
 			}
 		}
 		if !topologyIdentifierPattern.MatchString(generation) || sequence == 0 || request.Instance == "" {
 			writeError(w, http.StatusBadRequest, "tunnel events require instance, generation, and sequence")
 			return
 		}
-		if err := a.setEngineTunnelState(request.Instance, generation, sequence, request.Event == "tunnel_up", request.Args, request.RecordedAtNS); err != nil {
+		ready := request.Event == "tunnel_up"
+		claimsGeneration := request.Event != "tunnel_down"
+		if err := a.setEngineTunnelState(request.Instance, generation, sequence, ready, claimsGeneration, request.Args, request.RecordedAtNS); err != nil {
 			writeError(w, http.StatusInternalServerError, "could not persist tunnel transition")
 			return
 		}

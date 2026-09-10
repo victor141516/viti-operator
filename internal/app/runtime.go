@@ -32,7 +32,7 @@ type EngineTunnelCheckpoint struct {
 	RetiredGenerations []string  `json:"retired_generations,omitempty"`
 }
 
-func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, generation string, sequence uint64, ready bool, at time.Time) (EngineTunnelCheckpoint, bool) {
+func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, generation string, sequence uint64, ready, claimsGeneration bool, at time.Time) (EngineTunnelCheckpoint, bool) {
 	if instance == "" || generation == "" || sequence == 0 || at.IsZero() {
 		return previous, false
 	}
@@ -48,10 +48,10 @@ func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, ge
 			return previous, false
 		}
 	}
-	// A process generation that never established the tunnel cannot prove that
-	// it owns the currently established session. Ignoring its first down event
-	// prevents delayed startup failures from terminating a recovered call.
-	if previous.Generation != "" && !ready {
+	// Only a durable process-start or tunnel-up event can transfer ownership to
+	// a generation that the manager has never observed. A standalone down event
+	// cannot prove that it belongs to the currently established data plane.
+	if previous.Generation != "" && !claimsGeneration {
 		return previous, false
 	}
 	retired := append([]string(nil), previous.RetiredGenerations...)
@@ -180,14 +180,14 @@ func decodeEngineBase64(value string) ([]byte, error) {
 	return nil, errors.New("invalid Base64")
 }
 
-func (a *App) setEngineTunnelState(instance, generation string, sequence uint64, ready bool, args []string, recordedAtNS int64) error {
+func (a *App) setEngineTunnelState(instance, generation string, sequence uint64, ready, claimsGeneration bool, args []string, recordedAtNS int64) error {
 	updatedAt := time.Now().UTC()
 	if recordedAtNS > 0 {
 		updatedAt = time.Unix(0, recordedAtNS).UTC()
 	}
 	detail := strings.TrimSpace(strings.Join(args, " "))
 	a.stateMu.Lock()
-	checkpoint, calls, accepted, err := a.store.ApplyEngineTunnelEvent(instance, generation, sequence, ready, updatedAt)
+	checkpoint, calls, accepted, err := a.store.ApplyEngineTunnelEvent(instance, generation, sequence, ready, claimsGeneration, updatedAt)
 	if err != nil {
 		a.stateMu.Unlock()
 		a.diag.RecordEvent("manager.runtime", "tunnel-state.persist-failed", map[string]any{"instance": instance, "generation": generation, "sequence": sequence, "error": err.Error()})

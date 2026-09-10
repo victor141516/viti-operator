@@ -315,14 +315,13 @@ func (s *Store) SaveCall(call Call) error {
 	return err
 }
 
-// CloseStaleCalls releases the global line after an unclean engine/server
-// restart. Open records are advisory state; they must never block every client
-// forever when their final webhook was missed.
-func (s *Store) CloseStaleCalls(before time.Time) error {
+// ReconcilePersistedCalls removes only records that are structurally invalid.
+// Age alone is not evidence that an established carrier call ended: Asterisk
+// and its media session can remain live while the manager restarts.
+func (s *Store) ReconcilePersistedCalls() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	changed := false
-	now := time.Now().UTC()
 	for id, call := range s.calls {
 		// An outgoing call can never be valid without a destination. Old engine
 		// hooks could manufacture such rows from an unmatched hangup event.
@@ -331,15 +330,6 @@ func (s *Store) CloseStaleCalls(before time.Time) error {
 			delete(s.calls, id)
 			changed = true
 			continue
-		}
-		if call.EndedAt == nil && call.UpdatedAt.Before(before) {
-			previous := call
-			call.State = "interrupted"
-			call.UpdatedAt = now
-			call.EndedAt = &now
-			s.calls[id] = call
-			s.diag.RecordTrace("manager.store", "call.reconcile.interrupted", call.TraceID, map[string]any{"previous": previous, "current": call})
-			changed = true
 		}
 	}
 	if !changed {
@@ -377,11 +367,11 @@ func (s *Store) InterruptOpenCalls(at time.Time) ([]Call, error) {
 // interrupts open call records only for an accepted up-to-down transition.
 // Persisting both effects together makes a retried event idempotent even when
 // the manager loses its HTTP response or restarts.
-func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uint64, ready bool, at time.Time) (EngineTunnelCheckpoint, []Call, bool, error) {
+func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uint64, ready, claimsGeneration bool, at time.Time) (EngineTunnelCheckpoint, []Call, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	previous := s.engineTunnels[instance]
-	next, accepted := advanceEngineTunnelCheckpoint(previous, instance, generation, sequence, ready, at)
+	next, accepted := advanceEngineTunnelCheckpoint(previous, instance, generation, sequence, ready, claimsGeneration, at)
 	if !accepted {
 		return previous, nil, false, nil
 	}
@@ -428,6 +418,14 @@ func (s *Store) LatestEngineTunnelCheckpoint() (EngineTunnelCheckpoint, bool) {
 	}
 	latest.RetiredGenerations = append([]string(nil), latest.RetiredGenerations...)
 	return latest, found
+}
+
+func (s *Store) EngineTunnelCheckpoint(instance string) (EngineTunnelCheckpoint, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	checkpoint, found := s.engineTunnels[instance]
+	checkpoint.RetiredGenerations = append([]string(nil), checkpoint.RetiredGenerations...)
+	return checkpoint, found
 }
 
 func (s *Store) GetCall(id string) (Call, bool) {

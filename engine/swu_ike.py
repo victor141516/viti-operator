@@ -179,16 +179,29 @@ def swu_write_pcscf(addr):
 
 def swu_notify(event, arg=None):
     try:
+        if event in ("tunnel_start", "tunnel_up", "tunnel_down"):
+            # A process transition is the ownership proof for the manager's
+            # tunnel state machine. Commit it synchronously before continuing;
+            # the separate outbox worker performs network delivery and retry.
+            import event_outbox
+            event_outbox.enqueue_event(
+                event,
+                [arg] if arg else [],
+                recorded_at_ns=time.time_ns(),
+                extra={
+                    "tunnel_generation": SWU_TUNNEL_GENERATION,
+                    "tunnel_sequence": next(SWU_TUNNEL_SEQUENCE),
+                },
+            )
+            return True
         cmd = ["python3", SWU_NOTIFY, event]
         if arg:
             cmd.append(arg)
-        env = os.environ.copy()
-        if event in ("tunnel_up", "tunnel_down"):
-            env["VITI_TUNNEL_GENERATION"] = SWU_TUNNEL_GENERATION
-            env["VITI_TUNNEL_SEQUENCE"] = str(next(SWU_TUNNEL_SEQUENCE))
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
-    except Exception:
-        pass
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as error:
+        swu_log("could not persist %s notification: %r" % (event, error))
+        return False
 
 
 def swu_apply_pcscf(addr):
@@ -6416,6 +6429,11 @@ def https_res_ck_ik(server, rand, autn):
 
 
 def main():
+
+    # Claim a new process generation before DNS, SIM access, or IKE can fail.
+    # This is durable evidence that a previously reported userspace tunnel no
+    # longer owns the data plane, even if this attempt never reaches tunnel_up.
+    swu_notify("tunnel_start")
 
     # CP+TS address-family mode (per line, from cfg.cp_mode). The CFG config-request family MUST
     # match the carrier's IMS PDN or the ePDG rejects the PDN after EAP-Success (Telus: no P-CSCF on

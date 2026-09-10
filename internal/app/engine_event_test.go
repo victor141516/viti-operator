@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -209,7 +210,8 @@ func TestTunnelTransitionsAreOrderedIdempotentAndDurableAcrossRestart(t *testing
 	if first.EndedAt == nil {
 		t.Fatal("accepted up-to-down transition did not interrupt the open call")
 	}
-	if err := app.store.SaveCall(Call{ID: "call-two", Direction: DirectionOutgoing, Peer: "+15555550102", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+	oldCallTime := now.Add(-10 * time.Minute)
+	if err := app.store.SaveCall(Call{ID: "call-two", Direction: DirectionOutgoing, Peer: "+15555550102", State: "active", StartedAt: oldCallTime, UpdatedAt: oldCallTime}); err != nil {
 		t.Fatal(err)
 	}
 	postTunnelEvent(t, server.URL, "process-one", 2, false, now.Add(2*time.Second), http.StatusNoContent)
@@ -229,10 +231,56 @@ func TestTunnelTransitionsAreOrderedIdempotentAndDurableAcrossRestart(t *testing
 	}
 	restartedServer := httptest.NewServer(restarted.Handler())
 	defer restartedServer.Close()
+	second, _ = restarted.store.GetCall("call-two")
+	if second.EndedAt != nil || second.State != "active" {
+		t.Fatalf("manager restart closed a long carrier call using age alone: %#v", second)
+	}
 	postTunnelEvent(t, restartedServer.URL, "process-one", 4, false, now.Add(5*time.Second), http.StatusNoContent)
 	second, _ = restarted.store.GetCall("call-two")
 	if second.EndedAt != nil {
 		t.Fatalf("retired transition was revived after manager restart: %#v", second)
+	}
+	postEngineEvent(t, restartedServer.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "tunnel_start", "args": []string{"replacement process"},
+		"recorded_at_ns": now.Add(6 * time.Second).UnixNano(), "tunnel_generation": "process-three", "tunnel_sequence": 1,
+	}, http.StatusNoContent)
+	second, _ = restarted.store.GetCall("call-two")
+	if second.EndedAt == nil || second.State != "interrupted" || restarted.tunnel.Ready {
+		t.Fatalf("durable replacement-process start did not retire the dead data plane: call=%#v tunnel=%#v", second, restarted.tunnel)
+	}
+}
+
+func TestLegacyTunnelEventsCanTakeOwnershipAgainAfterModernEngineRollback(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	now := time.Now().UTC()
+	legacy := func(event string, at time.Time) {
+		postEngineEvent(t, server.URL, "test-token", map[string]any{
+			"instance": "engine-1", "event": event, "recorded_at_ns": at.UnixNano(),
+		}, http.StatusNoContent)
+	}
+	legacy("tunnel_up", now)
+	postTunnelEvent(t, server.URL, "modern", 1, true, now.Add(time.Second), http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "modern", 2, false, now.Add(2*time.Second), http.StatusNoContent)
+	legacy("tunnel_up", now.Add(3*time.Second))
+	checkpoint, ok := app.store.EngineTunnelCheckpoint("engine-1")
+	if !ok || !checkpoint.Ready || !strings.HasPrefix(checkpoint.Generation, "legacy:") {
+		t.Fatalf("legacy rollback did not reclaim tunnel ownership: %#v", checkpoint)
+	}
+	if err := app.store.SaveCall(Call{ID: "legacy-call", Direction: DirectionOutgoing, Peer: "+15555550103", State: "active", StartedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	legacy("tunnel_down", now.Add(4*time.Second))
+	call, _ := app.store.GetCall("legacy-call")
+	if call.EndedAt == nil || call.State != "interrupted" {
+		t.Fatalf("legacy down event was not correlated to its rollback era: %#v", call)
 	}
 }
 
@@ -394,7 +442,7 @@ func TestEngineEventRejectsWrongToken(t *testing.T) {
 	}, http.StatusUnauthorized)
 }
 
-func TestStoreClosesStaleOpenCalls(t *testing.T) {
+func TestStoreReconcilesOnlyStructurallyInvalidCalls(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	store, err := OpenStore(path)
 	if err != nil {
@@ -404,12 +452,18 @@ func TestStoreClosesStaleOpenCalls(t *testing.T) {
 	if err := store.SaveCall(Call{ID: "old", Direction: DirectionIncoming, State: "ringing", StartedAt: old, UpdatedAt: old}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CloseStaleCalls(time.Now().UTC().Add(-2 * time.Minute)); err != nil {
+	if err := store.SaveCall(Call{ID: "invalid", Direction: DirectionOutgoing, State: "ringing", StartedAt: old, UpdatedAt: old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcilePersistedCalls(); err != nil {
 		t.Fatal(err)
 	}
 	call, ok := store.GetCall("old")
-	if !ok || call.State != "interrupted" || call.EndedAt == nil {
-		t.Fatalf("stale call was not reconciled: %#v", call)
+	if !ok || call.State != "ringing" || call.EndedAt != nil {
+		t.Fatalf("valid old call was closed using age alone: %#v", call)
+	}
+	if _, ok := store.GetCall("invalid"); ok {
+		t.Fatal("structurally invalid outgoing call was not removed")
 	}
 }
 

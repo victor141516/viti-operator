@@ -56,7 +56,7 @@ def main():
     manager_token = os.environ.get("VOWIFI_MANAGER_TOKEN") or env.get("VOWIFI_MANAGER_TOKEN", "")
     inst_id = os.environ.get("VOWIFI_ID") or env.get("VOWIFI_ID", "1")
     payload = {"instance": inst_id, "event": event, "args": args}
-    if event in ("tunnel_up", "tunnel_down"):
+    if event in ("tunnel_start", "tunnel_up", "tunnel_down"):
         generation = os.environ.get("VITI_TUNNEL_GENERATION", "")
         sequence = os.environ.get("VITI_TUNNEL_SEQUENCE", "")
         try:
@@ -84,7 +84,7 @@ def main():
             append_json("/logs/events.jsonl", payload)
         except Exception:
             pass
-    if event in ("tunnel_up", "tunnel_down") and payload.get("tunnel_generation"):
+    if event in ("tunnel_start", "tunnel_up", "tunnel_down") and payload.get("tunnel_generation"):
         queued = False
         try:
             import event_outbox
