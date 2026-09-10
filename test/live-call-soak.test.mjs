@@ -3,22 +3,29 @@ import test from 'node:test'
 
 import { LiveCallSoakTracker } from './live-call-soak-core.mjs'
 
-const sample = (seconds, overrides = {}) => ({
-  timestamp: new Date(seconds * 1000).toISOString(),
-  snapshot_ok: true,
-  active_channels: 4,
-  charon: true,
-  python: false,
-  tunnel: true,
-  ims: true,
-  ike_ids: [1],
-  child_ids: [10],
-  media_channels: 2,
-  media_rx_packets: seconds * 50,
-  media_tx_packets: seconds * 50,
-  media_streams: [{ id: 'client', rx_packets: seconds * 50, tx_packets: seconds * 50 }],
-  ...overrides,
-})
+const sample = (seconds, overrides = {}) => {
+  const value = {
+    timestamp: new Date(seconds * 1000).toISOString(),
+    snapshot_ok: true,
+    active_channels: 4,
+    conference_count: 1,
+    conference_parties: 2,
+    charon: true,
+    python: false,
+    tunnel: true,
+    ims: true,
+    ike_ids: [1],
+    child_ids: [10],
+    media_channels: 2,
+    media_rx_packets: seconds * 50,
+    media_tx_packets: seconds * 50,
+    media_streams: [{ id: 'client', rx_packets: seconds * 50, tx_packets: seconds * 50 }],
+    ...overrides,
+  }
+  if (!('conference_count' in overrides) && Number(value.active_channels) === 0) value.conference_count = 0
+  if (!('conference_parties' in overrides) && Number(value.active_channels) === 0) value.conference_parties = 0
+  return value
+}
 
 test('accepts one call only after the required natural SA transitions and post-call window', () => {
   const tracker = new LiveCallSoakTracker({
@@ -40,6 +47,7 @@ test('accepts one call only after the required natural SA transitions and post-c
     phase: 'complete',
     fatal_reason: null,
     call_detected: true,
+    answered_call_detected: true,
     call_duration_seconds: 110,
     active_samples: 4,
     unhealthy_samples: 0,
@@ -175,4 +183,18 @@ test('rejects a media stream disappearing while the call remains active', () => 
 
   assert.equal(tracker.summary().accepted, false)
   assert.deepEqual(tracker.unhealthySamples[0].reasons, ['media_stream_removed'])
+})
+
+test('does not count ringing or early media as answered call duration', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 5, minIkeRenewals: 0, minChildRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1, { conference_count: 0, conference_parties: 0 }))
+  tracker.observe(sample(20, { conference_count: 0, conference_parties: 0 }))
+  tracker.observe(sample(21, { active_channels: 0 }))
+  tracker.finish('maximum observation time reached')
+
+  const summary = tracker.summary()
+  assert.equal(summary.accepted, false)
+  assert.equal(summary.call_detected, false)
+  assert.equal(summary.answered_call_detected, false)
+  assert.equal(summary.call_duration_seconds, 0)
 })

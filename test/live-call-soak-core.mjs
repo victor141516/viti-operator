@@ -86,8 +86,12 @@ export class LiveCallSoakTracker {
     }
 
     const active = Number(sample.active_channels) > 0
+    const answered = Number(sample.conference_count) === 1 && Number(sample.conference_parties) >= 2
     if (this.phase === 'waiting') {
-      if (!active) return
+      // Outbound ringing and 183 early media already create PJSIP channels and
+      // RTP counters.  Only the post-answer ConfBridge proves that this is an
+      // established call whose duration can satisfy the renewal soak.
+      if (!answered) return
       this.phase = 'active'
       this.callStartedAt = at
       for (const id of sample.ike_ids || []) this.ikeIDs.add(String(id))
@@ -158,6 +162,7 @@ export class LiveCallSoakTracker {
       phase: this.phase,
       fatal_reason: this.fatalReason || null,
       call_detected: this.callStartedAt !== null,
+      answered_call_detected: this.callStartedAt !== null,
       call_duration_seconds: callDurationSeconds,
       active_samples: this.activeSamples,
       unhealthy_samples: this.unhealthySamples.length,

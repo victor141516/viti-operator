@@ -58,6 +58,7 @@ def present(command):
 registrations = run(["asterisk", "-rx", "pjsip show registrations"])
 channels = run(["asterisk", "-rx", "core show channels count"])
 channelstats = run(["asterisk", "-rx", "pjsip show channelstats"])
+conferences = run(["asterisk", "-rx", "confbridge list"])
 sas = run(["swanctl", "--list-sas", "--raw"])
 ike_ids, child_ids = [], []
 for event in sas.split("list-sa event ")[1:]:
@@ -66,6 +67,7 @@ for event in sas.split("list-sa event ")[1:]:
         ike_ids.append(ids[0])
         child_ids.extend(ids[1:])
 active = re.search(r"(?m)^([0-9]+) active channels?$", channels)
+conference_parties = [int(value) for value in re.findall(r"(?m)^\S+\s+([0-9]+)\s+", conferences)]
 values = lambda name: [int(value) for value in re.findall(name + r"=([0-9]+)", sas)]
 media_streams, media_rx_packets, media_tx_packets = [], 0, 0
 for line in channelstats.splitlines():
@@ -91,12 +93,14 @@ for line in channelstats.splitlines():
     })
 media_streams.sort(key=lambda stream: stream["id"])
 print(json.dumps({
-    "snapshot_ok": bool(channels and registrations and channelstats),
+    "snapshot_ok": bool(channels and registrations and channelstats and conferences),
     "charon": present(["pgrep", "-x", "charon"]),
     "python": present(["pgrep", "-f", "[s]wu_ike.py"]),
     "tunnel": present(["ip", "link", "show", "ipsec0"]),
     "ims": bool(re.search(r"(?m)^\s*volte_ims/.*\sRegistered\s", registrations)),
     "active_channels": int(active.group(1)) if active else 0,
+    "conference_count": len(conference_parties),
+    "conference_parties": max(conference_parties, default=0),
     "ike_ids": ike_ids,
     "child_ids": child_ids,
     "bytes_in": sum(values("bytes-in")),
