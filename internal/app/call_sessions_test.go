@@ -327,6 +327,23 @@ func TestDelayedCollisionAbortCannotTombstoneValidPredecessor(t *testing.T) {
 	}
 }
 
+func TestConnectionGenerationCannotBeReusedFromPredecessor(t *testing.T) {
+	r := newCallSessionRegistry()
+	call := sessionTestCall()
+	now := time.Now().UTC()
+	r.joined(call, "phone-a", "phone-a", "leg-x", "PJSIP/x-original", now)
+	r.joined(call, "phone-a", "phone-a", "leg-y", "PJSIP/y", now.Add(time.Second))
+
+	reused := r.joined(call, "phone-a", "phone-a", "leg-x", "PJSIP/x-reused", now.Add(2*time.Second))
+	if reused.admitted {
+		t.Fatalf("predecessor connection generation was reused: %+v", reused)
+	}
+	operation, err := r.beginLeave(call, "phone-a", "leg-y", "leave-current-y")
+	if err != nil || operation.matchedConnectionID != "leg-y" || operation.channel != "PJSIP/y" {
+		t.Fatalf("reused predecessor displaced the current generation: operation=%+v err=%v", operation, err)
+	}
+}
+
 func TestDelayedAbortCannotRemoveANewerAdmittedGeneration(t *testing.T) {
 	r := newCallSessionRegistry()
 	call := sessionTestCall()

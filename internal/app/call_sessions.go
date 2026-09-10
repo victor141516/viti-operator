@@ -93,6 +93,15 @@ func participantClaimKey(traceID, participantID string) string {
 	return traceID + "\x00" + participantID
 }
 
+func participantGeneration(participant *callParticipant, connectionID string) *callParticipant {
+	for generation := participant; generation != nil; generation = generation.predecessor {
+		if generation.connectionID == connectionID {
+			return generation
+		}
+	}
+	return nil
+}
+
 // joined decides admission under the registry lock and returns every channel
 // whose exact Asterisk leg must be removed before that decision is complete.
 // Events from an older connection generation are harmless because left() also
@@ -146,11 +155,14 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		}
 		return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true}
 	}
-	if found && previous.connected && previous.connectionID == connectionID && previous.channel != channel {
-		// A connection generation identifies exactly one Asterisk channel.
-		// Reusing it for a second channel would make future leave operations
-		// ambiguous, so retain the first channel and reject the duplicate.
-		return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
+	if found {
+		existingGeneration := participantGeneration(&previous, connectionID)
+		if existingGeneration != nil && (existingGeneration != &previous || existingGeneration.admissionChannel != channel) {
+			// A connection generation identifies exactly one Asterisk channel and
+			// may only be idempotently replayed while it remains current. Reusing a
+			// predecessor would resurrect a stale leg and make abort/leave ambiguous.
+			return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session)}
+		}
 	}
 	if found && previous.connected && previous.connectionID != connectionID && previous.channel != "" {
 		session.pendingDrops[previous.channel] = struct{}{}
@@ -197,10 +209,7 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 	removed := false
 	participant, found := session.participants[logicalKey]
 	if found {
-		generation := &participant
-		for generation != nil && generation.connectionID != connectionID {
-			generation = generation.predecessor
-		}
+		generation := participantGeneration(&participant, connectionID)
 		if generation != nil && generation.admissionChannel != channel {
 			// The manager rejected a second channel that tried to reuse an
 			// already admitted connection generation. Even after that valid
