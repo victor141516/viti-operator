@@ -101,23 +101,11 @@ func (a *OpenStickAuthenticator) checkSIMReadyNow(ctx context.Context) error {
 	if _, err = a.run(ctx, "shell", "test", "-x", "/data/local/tmp/qmi_auth_aka"); err != nil {
 		return fmt.Errorf("OpenStick SIM bridge helper check failed: %w", err)
 	}
-	output, err = a.run(ctx, "shell", "content", "query", "--uri", "content://lab.codex.simidentity.aka/material")
-	if err != nil {
-		return fmt.Errorf("OpenStick SIM bridge provider check failed: %w", err)
-	}
-	if !openStickProviderAvailable(string(output)) {
-		return errors.New("OpenStick SIM bridge provider is unavailable")
-	}
 	return nil
 }
 
 func isTransientReadinessError(err error) bool {
 	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
-}
-
-func openStickProviderAvailable(value string) bool {
-	value = strings.ToLower(strings.TrimSpace(value))
-	return value != "" && !strings.HasPrefix(value, "error:") && !strings.Contains(value, "unknown uri") && !strings.Contains(value, "failed to find provider")
 }
 
 func openStickSIMReady(value string) bool {

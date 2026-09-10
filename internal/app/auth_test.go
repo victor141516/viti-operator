@@ -190,11 +190,11 @@ func TestOpenStickReadinessRejectsConnectedStickWithoutReadySIM(t *testing.T) {
 	}
 }
 
-func TestOpenStickReadinessRejectsMissingBridgeProvider(t *testing.T) {
+func TestOpenStickReadinessRejectsMissingBridgeHelper(t *testing.T) {
 	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{
-		"shell content query --uri content://lab.codex.simidentity.aka/material": {err: errors.New("provider missing")},
+		"shell test -x /data/local/tmp/qmi_auth_aka": {err: errors.New("helper missing")},
 	})}
-	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "provider") {
+	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "helper") {
 		t.Fatalf("missing bridge readiness error = %v", err)
 	}
 }
@@ -298,7 +298,6 @@ func fakeOpenStickReadiness(overrides map[string]fakeADBResult) func(context.Con
 		"shell getprop gsm.sim.state":                {output: "READY"},
 		"shell pm path lab.codex.simidentity":        {output: "package:/data/app/lab.codex.simidentity-1.apk"},
 		"shell test -x /data/local/tmp/qmi_auth_aka": {},
-		"shell content query --uri content://lab.codex.simidentity.aka/material": {output: "No result found."},
 	}
 	for command, result := range overrides {
 		defaults[command] = result
