@@ -63,7 +63,15 @@ def load_transitions():
         event = json.loads(path.read_text(encoding="utf-8"))
         if event.get("event") in {"tunnel_start", "tunnel_up", "tunnel_down"}:
             events.append(event)
-    return sorted(events, key=lambda event: event["tunnel_sequence"])
+    events.sort(key=lambda event: event["recorded_at_ns"])
+    starts = [event for event in events if event["event"] == "tunnel_start"]
+    if not starts:
+        return events
+    latest_generation = starts[-1]["tunnel_generation"]
+    return sorted(
+        (event for event in events if event["tunnel_generation"] == latest_generation),
+        key=lambda event: event["tunnel_sequence"],
+    )
 
 
 def echo(sock_type, payload):
@@ -131,11 +139,22 @@ def probe_lifecycle():
     print(f"LAB_LIFECYCLE_OK={EXPECTED_BACKEND}")
 
 
+def probe_failed_attach():
+    observation = wait_for_down()
+    assert observation.backend == EXPECTED_BACKEND
+    transitions = load_transitions()
+    validate_transition_sequence(transitions)
+    assert [event["event"] for event in transitions] == ["tunnel_start", "tunnel_down"]
+    print(f"LAB_FAILED_ATTACH_OK={EXPECTED_BACKEND}")
+
+
 def main():
     if MODE == "connected":
         probe_connected()
     elif MODE == "lifecycle":
         probe_lifecycle()
+    elif MODE == "failed_attach":
+        probe_failed_attach()
     else:
         raise ValueError(f"unknown LAB_PROBE_MODE: {MODE}")
 

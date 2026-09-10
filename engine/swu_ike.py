@@ -5862,10 +5862,13 @@ def http_res_ck_ik(rand, autn):
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['Authorization'] = 'Bearer ' + token
+    timeout = float(os.environ.get('SWU_HTTP_AKA_TIMEOUT', '40'))
+    if timeout <= 0:
+        raise RuntimeError('SWU_HTTP_AKA_TIMEOUT must be positive')
     try:
         response = requests.post(url, headers=headers,
                                  json={'rand': raw_b64(rand), 'autn': raw_b64(autn)},
-                                 timeout=40)
+                                 timeout=timeout)
     except Exception as error:
         raise RuntimeError('Viti Operator AKA request failed') from error
     if response.status_code != 200:

@@ -26,3 +26,9 @@ public status/events/network namespace, send UDP and TCP through the tunnel,
 stop the backend, and inspect its durable terminal state. The Python baseline
 is stored in `baselines/python.json`. Its duplicate `tunnel_down` is a recorded
 legacy expected failure, not behavior that the strongSwan backend may copy.
+
+The default `all` scenario also drives the AKA broker through HTTP 503,
+response timeout and AUTS synchronization-failure modes. It verifies failure
+state externally and proves that a new backend generation attaches after the
+provider returns. Use `--scenario attach` or `--scenario auth-faults` to run a
+bounded subset.

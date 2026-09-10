@@ -18,7 +18,11 @@
     "outer_route_isolation",
     "udp_bidirectional",
     "tcp_bidirectional",
-    "terminal_down_status"
+    "terminal_down_status",
+    "authentication_agent_unavailable",
+    "authentication_agent_timeout",
+    "authentication_provider_recovery",
+    "auts_synchronization_response"
   ],
   "lifecycle": [
     "tunnel_start",

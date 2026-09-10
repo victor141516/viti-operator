@@ -40,6 +40,7 @@ services:
       SWU_MNC: "001"
       SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
       SWU_HTTP_AKA_TOKEN: lab-token
+      SWU_HTTP_AKA_TIMEOUT: "1"
       SWU_CP_MODE: v6
       SWU_TS_MODE: auto
       SWU_TUN_MTU: "1400"
@@ -77,6 +78,20 @@ services:
       LAB_EXPECTED_BACKEND: python
       LAB_EXPECT_LEGACY_DUPLICATE_DOWN: "1"
       LAB_PROBE_MODE: lifecycle
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - python-runtime:/run/vowifi:ro
+
+  python-failure-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/python-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: python
+      LAB_PROBE_MODE: failed_attach
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
     volumes:

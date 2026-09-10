@@ -1,5 +1,6 @@
 import importlib.util
 import itertools
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,28 @@ class InnerAddressRefreshTest(unittest.TestCase):
         with mock.patch.object(self.module, "swu_notify", return_value=False):
             with self.assertRaisesRegex(RuntimeError, "durably claim"):
                 self.module.main()
+
+    def test_http_aka_timeout_is_configurable(self):
+        with mock.patch.dict(os.environ, {
+            "SWU_HTTP_AKA_URL": "http://aka.test/authenticate",
+            "SWU_HTTP_AKA_TIMEOUT": "1.25",
+        }), mock.patch.object(
+            self.module.requests, "post", side_effect=TimeoutError("fixture timeout")
+        ) as post:
+            with self.assertRaisesRegex(RuntimeError, "AKA request failed"):
+                self.module.http_res_ck_ik("00" * 16, "11" * 16)
+
+        self.assertEqual(post.call_args.kwargs["timeout"], 1.25)
+
+    def test_http_aka_rejects_nonpositive_timeout(self):
+        with mock.patch.dict(os.environ, {
+            "SWU_HTTP_AKA_URL": "http://aka.test/authenticate",
+            "SWU_HTTP_AKA_TIMEOUT": "0",
+        }), mock.patch.object(self.module.requests, "post") as post:
+            with self.assertRaisesRegex(RuntimeError, "must be positive"):
+                self.module.http_res_ck_ik("00" * 16, "11" * 16)
+
+        post.assert_not_called()
 
     def ike_timer_subject(self):
         subject = self.module.swu.__new__(self.module.swu)
