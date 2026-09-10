@@ -23,6 +23,7 @@ function createHarness() {
           answer: (...args) => { calls.push(['answer', ...args]); return true },
           reject: (...args) => { calls.push(['reject', ...args]); return true },
           hangup: (...args) => { calls.push(['hangup', ...args]); return true },
+		  reconnect: (...args) => { calls.push(['reconnect', ...args]); return args[1] },
           mute: (...args) => { calls.push(['mute', ...args]); return args[0] },
           setTelecomMuted: (...args) => { calls.push(['telecom-muted', ...args]); return true },
           setSystemInactive: (...args) => { calls.push(['inactive', ...args]); return true },
@@ -71,4 +72,14 @@ test('disabling provisioning stops the previous engine without creating a blank 
   assert.equal(calls.filter(([kind]) => kind === 'start').length, 1)
   assert.equal(calls.at(-1)[0], 'event')
   assert.equal(calls.at(-1)[1].type, 'disconnected')
+})
+
+test('Android reconnect keeps the logical leg and carrier trace identity', () => {
+	const { context, calls } = createHarness()
+	context.vitiVoiceStart(JSON.stringify({ enabled: true, websocket_url: 'wss://example.invalid' }), '{}')
+	const ack = JSON.parse(context.vitiVoiceCommand(JSON.stringify({
+		action: 'reconnect', leg_token: 'logical-leg-42', args: { trace_id: 'carrier-trace-7' },
+	})))
+	assert.equal(ack.ok, true)
+	assert.deepEqual(calls.find(([kind]) => kind === 'reconnect'), ['reconnect', 'carrier-trace-7', 'logical-leg-42'])
 })

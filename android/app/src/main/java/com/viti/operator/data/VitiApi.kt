@@ -121,6 +121,22 @@ class VitiApi(private val settings: ServerSettings) {
         .optJSONArray("calls")
         .mapObjects(::callFromJson)
 
+	suspend fun isCarrierCallActive(traceId: String): Boolean =
+		calls().any { it.traceId == traceId && it.endedAt.isBlank() && it.state == "active" }
+
+	suspend fun leaveCallParticipant(traceId: String, identity: ClientIdentity, connectionId: String, operationId: String) {
+		rawRequest(
+			path = "/api/v1/calls/participants/leave",
+			method = "POST",
+			body = JSONObject()
+				.put("trace_id", traceId)
+				.put("client_id", identity.id)
+				.put("connection_id", connectionId)
+				.put("operation_id", operationId),
+			acceptedStatuses = setOf(200),
+		)
+	}
+
     suspend fun contacts(query: String = ""): ServerContactsSnapshot {
         val suffix = if (query.isBlank()) "" else "?q=${java.net.URLEncoder.encode(query, Charsets.UTF_8.name())}"
         val body = request("/api/v1/contacts$suffix")
@@ -377,6 +393,7 @@ class VitiApi(private val settings: ServerSettings) {
 
     private fun callFromJson(body: JSONObject) = Call(
         id = body.optString("id"),
+		traceId = body.optString("trace_id"),
         direction = body.optString("direction"),
         peer = body.optString("peer"),
         state = body.optString("state"),

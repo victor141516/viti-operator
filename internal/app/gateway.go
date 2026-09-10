@@ -20,6 +20,14 @@ type TelephonyGateway interface {
 	HangupCall(context.Context, string) error
 }
 
+// ConferenceCallController performs generation-scoped call control. It is
+// intentionally separate from TelephonyGateway so non-interactive providers do
+// not pretend they can address an Asterisk conference or one concrete leg.
+type ConferenceCallController interface {
+	DropConferenceLeg(context.Context, string) error
+	EndConference(context.Context, string) error
+}
+
 type IMSRegistrationController interface {
 	SetIMSRegistration(context.Context, bool) error
 }

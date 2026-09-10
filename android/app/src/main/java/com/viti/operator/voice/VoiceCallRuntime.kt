@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
@@ -45,6 +46,7 @@ class VoiceCallRuntime(
     private val voiceClient: VoiceEngineControl,
     private val telecomGateway: PlatformCallGateway?,
     private val legacyAudio: LegacyAudioControl,
+	private val callSessionControl: VoiceCallSessionControl = NoOpVoiceCallSessionControl,
     private val onSnapshot: (VoiceCallSnapshot) -> Unit,
     private val onDiagnostic: (String, Map<String, Any?>) -> Unit = { _, _ -> },
 ) {
@@ -70,6 +72,11 @@ class VoiceCallRuntime(
         var terminalRejected: Boolean = false,
         var legacyFocusGeneration: Long = 0,
         var audio: PlatformAudioState = PlatformAudioState(),
+		var traceId: String = "",
+		var connectionId: String = "",
+		var wasActive: Boolean = false,
+		var desiredMuted: Boolean = false,
+		var recoveryJob: Job? = null,
     )
 
     private var leg: Leg? = null
@@ -87,7 +94,7 @@ class VoiceCallRuntime(
         }
     }
 
-    fun placeCall(number: String, displayName: String = number) {
+    fun placeCall(number: String, displayName: String = number, traceId: String = "") {
         val peer = number.trim()
         if (peer.isEmpty()) return
         if (leg != null) {
@@ -104,6 +111,7 @@ class VoiceCallRuntime(
             peer = peer,
             displayName = displayName.ifBlank { peer },
             phase = VoiceCallPhase.SETUP,
+			traceId = traceId.trim(),
         )
         leg = created
         voice = VoiceUiState(state = "calling", peer = peer, detail = "Preparing the call with Android…")
@@ -184,6 +192,7 @@ class VoiceCallRuntime(
     fun setMuted(muted: Boolean) {
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
+		current.desiredMuted = muted
         scope.launch {
             runCommand(current.token, "mute") { voiceClient.setMuted(current.token, muted) }
         }
@@ -277,6 +286,7 @@ class VoiceCallRuntime(
             "calling" -> updateLegPhase(event, VoiceCallPhase.DIALING, "Calling ${event.peer.ifBlank { leg?.peer.orEmpty() }}…")
             "ringing" -> updateLegPhase(event, VoiceCallPhase.RINGING, "Ringing…")
             "active" -> activateFromSip(event)
+			"interrupted" -> beginMediaRecovery(event)
             "media" -> updateVoice(event, if ("sent=true" in event.cause && "received=true" in event.cause) "Call in progress · two-way audio" else "Call in progress")
             "quality" -> {
                 val quality = event.quality
@@ -286,6 +296,7 @@ class VoiceCallRuntime(
                 }
             }
             "mute-changed" -> {
+				leg?.desiredMuted = event.cause == "muted=true"
                 voice = voice.copy(microphoneMuted = event.cause == "muted=true")
                 publish()
             }
@@ -301,6 +312,7 @@ class VoiceCallRuntime(
     fun close() {
         val current = leg
         current?.platformJob?.cancel()
+		current?.recoveryJob?.cancel()
         legacyAudio.close()
         voiceClient.destroy()
     }
@@ -324,6 +336,8 @@ class VoiceCallRuntime(
             displayName = event.peer.ifBlank { "Private number" },
             phase = VoiceCallPhase.RINGING,
             sipStarted = true,
+			traceId = event.traceId,
+			connectionId = event.connectionId,
         )
         leg = created
         voice = VoiceUiState(state = "incoming", peer = event.peer, detail = "Incoming call from ${event.peer}")
@@ -479,7 +493,8 @@ class VoiceCallRuntime(
         val current = leg?.takeIf { it.token == token } ?: return
         if (current.sipStarted) return
         try {
-            voiceClient.call(token, current.peer, UUID.randomUUID().toString())
+			if (current.traceId.isBlank()) current.traceId = UUID.randomUUID().toString()
+			voiceClient.call(token, current.peer, current.traceId)
             if (leg !== current || current.phase == VoiceCallPhase.ENDING) {
                 runCatching { voiceClient.hangup(token) }
                 return
@@ -546,6 +561,9 @@ class VoiceCallRuntime(
         } catch (error: Throwable) {
             failure = error
         }
+		if (!rejected && current.wasActive && current.traceId.isNotBlank() && current.connectionId.isNotBlank()) {
+			submitExplicitLeave(current.traceId, current.connectionId, UUID.randomUUID().toString())
+		}
         if (!fromPlatform) {
             try {
                 if (telecomGateway == null) {
@@ -619,6 +637,12 @@ class VoiceCallRuntime(
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
         current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
+		current.traceId = event.traceId.ifBlank { current.traceId }
+		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		current.wasActive = true
+		current.sipStarted = true
+		current.recoveryJob?.cancel()
+		current.recoveryJob = null
         if (telecomGateway == null && !current.platformInactive) legacyAudio.setActive(true)
         voice = voice.copy(state = "active", peer = event.peer.ifBlank { current.peer }, detail = "Call in progress")
         publish()
@@ -652,9 +676,58 @@ class VoiceCallRuntime(
     private fun updateVoice(event: VoiceEngineEvent, detail: String) {
         val current = leg ?: return
         if (current.phase == VoiceCallPhase.ENDING) return
-        voice = voice.copy(state = event.type, peer = event.peer.ifBlank { current.peer }, detail = detail)
+		current.traceId = event.traceId.ifBlank { current.traceId }
+		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		voice = voice.copy(state = event.type, peer = event.peer.ifBlank { current.peer }, detail = detail)
         publish()
     }
+
+	private fun beginMediaRecovery(event: VoiceEngineEvent) {
+		val current = leg ?: return
+		if (!current.wasActive || current.phase == VoiceCallPhase.ENDING || current.action == LegAction.LEAVING) return
+		current.traceId = event.traceId.ifBlank { current.traceId }
+		current.connectionId = event.connectionId.ifBlank { current.connectionId }
+		current.sipStarted = false
+		current.phase = VoiceCallPhase.RECONNECTING
+		voice = voice.copy(state = "reconnecting", peer = current.peer, detail = "Reconnecting call media…", quality = null)
+		publish()
+		if (current.recoveryJob?.isActive == true) return
+		current.recoveryJob = scope.launch {
+			while (leg === current && current.phase == VoiceCallPhase.RECONNECTING) {
+				val carrierResult = runCatching { callSessionControl.isCarrierCallActive(current.traceId) }
+				if (carrierResult.isFailure) {
+					onDiagnostic("telecom.recovery-status-failed", mapOf("trace_id" to current.traceId, "error" to carrierResult.exceptionOrNull().toString()))
+					delay(RECOVERY_RETRY_MS)
+					continue
+				}
+				if (!carrierResult.getOrThrow()) {
+					markTerminal(current, "The carrier call ended while this device was disconnected", failed = false)
+					if (telecomGateway == null) clearLeg(current.token, current.terminalDetail.orEmpty())
+					else runCatching { disconnectPlatformAndAwait(current) }
+					return@launch
+				}
+				val started = runCatching { voiceClient.reconnect(current.token, current.traceId) }
+				if (started.isSuccess) {
+					current.sipStarted = true
+					onDiagnostic("telecom.recovery-started", mapOf("trace_id" to current.traceId, "leg_token" to current.token))
+					return@launch
+				}
+				onDiagnostic("telecom.recovery-retry", mapOf("trace_id" to current.traceId, "error" to started.exceptionOrNull().toString()))
+				delay(RECOVERY_RETRY_MS)
+			}
+		}
+	}
+
+	private fun submitExplicitLeave(traceId: String, connectionId: String, operationId: String) {
+		scope.launch {
+			while (true) {
+				val result = runCatching { callSessionControl.leave(traceId, connectionId, operationId) }
+				if (result.isSuccess) return@launch
+				onDiagnostic("telecom.explicit-leave-retry", mapOf("trace_id" to traceId, "connection_id" to connectionId, "operation_id" to operationId, "error" to result.exceptionOrNull().toString()))
+				delay(RECOVERY_RETRY_MS)
+			}
+		}
+	}
 
     private fun finishFromSip(event: VoiceEngineEvent) {
         val current = leg ?: return
@@ -758,6 +831,7 @@ class VoiceCallRuntime(
         check(telecomGateway == null || platformScopeFinished) {
             "Cannot forget a call before its Android Telecom scope has ended"
         }
+		current.recoveryJob?.cancel()
         leg = null
         if (telecomGateway == null) legacyAudio.end()
         voice = VoiceUiState(state = "registered", detail = detail)
@@ -796,6 +870,7 @@ class VoiceCallRuntime(
 
     private companion object {
         const val PLATFORM_CALLBACK_TIMEOUT_MS = 4_500L
+		const val RECOVERY_RETRY_MS = 1_500L
         val NON_TERMINAL_CALL_EVENTS = setOf("calling", "ringing", "active", "media", "quality", "mute-changed", "dtmf", "dtmf-failed")
     }
 }

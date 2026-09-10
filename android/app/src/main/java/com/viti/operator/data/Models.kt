@@ -178,6 +178,7 @@ data class SMSPartStatus(
 
 data class Call(
     val id: String,
+	val traceId: String = "",
     val direction: String,
     val peer: String,
     val state: String,
@@ -228,7 +229,7 @@ data class VoiceUiState(
     val registered: Boolean get() = state == "registered"
     val incoming: Boolean get() = state == "incoming"
     val ending: Boolean get() = state == "ending"
-    val inCall: Boolean get() = state in setOf("calling", "ringing", "active", "media")
+	val inCall: Boolean get() = state in setOf("calling", "ringing", "active", "media", "reconnecting")
 }
 
 data class VoiceCallQuality(

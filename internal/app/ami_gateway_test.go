@@ -16,7 +16,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	requests := make(chan map[string][]string, 16)
+	requests := make(chan map[string][]string, 32)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -53,10 +53,18 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err := gateway.SetIMSRegistration(ctx, true); err != nil {
 		t.Fatal(err)
 	}
+	if err := gateway.DropConferenceLeg(ctx, "PJSIP/webrtc-0000002a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.EndConference(ctx, "asterisk-call-42"); err != nil {
+		t.Fatal(err)
+	}
 	var sawMessage bool
 	var sawUnregister bool
 	var sawRegister bool
-	for len(requests) > 0 {
+	var sawDirectedHangup bool
+	var sawConferenceEnd bool
+	for range 18 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -71,12 +79,41 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 				sawRegister = true
 			}
 		}
+		if first(request, "Action") == "Hangup" {
+			sawDirectedHangup = first(request, "Channel") == "PJSIP/webrtc-0000002a"
+		}
+		if first(request, "Action") == "ConfbridgeKick" {
+			sawConferenceEnd = first(request, "Conference") == "asterisk-call-42" && first(request, "Channel") == "all"
+		}
 	}
 	if !sawMessage {
 		t.Fatal("fake AMI did not receive MessageSend")
 	}
 	if !sawUnregister || !sawRegister {
 		t.Fatalf("IMS commands missing: unregister=%t register=%t", sawUnregister, sawRegister)
+	}
+	if !sawDirectedHangup || !sawConferenceEnd {
+		t.Fatalf("conference controls missing: directed=%t end=%t", sawDirectedHangup, sawConferenceEnd)
+	}
+}
+
+func TestAMITargetAlreadyGoneOnlyAcceptsMissingResources(t *testing.T) {
+	for _, message := range []string{
+		"No such channel",
+		"Channel not found",
+		"No such conference",
+		"Conference not found",
+		"Conference does not exist",
+		"No active conferences.",
+	} {
+		if !amiTargetAlreadyGone(message) {
+			t.Fatalf("missing-resource response %q was not idempotent", message)
+		}
+	}
+	for _, message := range []string{"Permission denied", "Invalid action", "Authentication failed", ""} {
+		if amiTargetAlreadyGone(message) {
+			t.Fatalf("material AMI failure %q was hidden", message)
+		}
 	}
 }
 

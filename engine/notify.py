@@ -69,7 +69,7 @@ def main():
     # Call hooks pass Asterisk's Linkedid first. It is stable for every channel
     # and branch in the same call and lets the manager update exactly one row,
     # regardless of call duration or delayed/out-of-order delivery.
-    if event in ("call_in", "call_out", "call_active", "call_result", "recording_track") and args:
+    if event in ("call_in", "call_out", "call_active", "call_result", "recording_track", "participant_joined", "participant_left") and args:
         payload["call_id"] = args[0]
         if len(args) > 1:
             payload["trace_id"] = args[1]
@@ -103,15 +103,20 @@ def main():
                     pass
         if queued:
             return
-    if event in ("call_in", "call_out", "call_active", "call_result") and payload.get("call_id"):
+    if event in ("call_in", "call_out", "call_active", "call_result", "participant_joined", "participant_left") and payload.get("call_id"):
         queued = False
         try:
             import event_outbox
-            event_outbox.enqueue_event(event, payload["args"], recorded_at_ns=payload["recorded_at_ns"], extra={
+            queued_path = event_outbox.enqueue_event(event, payload["args"], recorded_at_ns=payload["recorded_at_ns"], extra={
                 "call_id": payload["call_id"],
                 "trace_id": payload.get("trace_id", ""),
             })
             queued = True
+            # Opening events are a prerequisite for participant identity and
+            # call-state requests. Try them synchronously after the durable
+            # write; a failed delivery safely remains in the outbox.
+            if event in ("call_in", "call_out", "participant_joined"):
+                event_outbox.deliver_file(queued_path)
         except Exception as error:
             if diagnostics_enabled:
                 try:

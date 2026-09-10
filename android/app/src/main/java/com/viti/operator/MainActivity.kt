@@ -230,7 +230,16 @@ class MainActivity : ComponentActivity() {
     private fun placeCall(number: String) = withMicrophonePermission {
         val internalTarget = number.trim().takeIf(::isInternalCallTarget)
         if (internalTarget != null) {
-            voiceService?.runtime?.placeCall(internalTarget)
+            val traceId = if (internalTarget == "*44") {
+                viewModel.uiState.value.calls.firstOrNull {
+                    it.endedAt.isBlank() && it.state == "active" && it.peer != "*43"
+                }?.traceId.orEmpty()
+            } else ""
+            if (internalTarget == "*44" && traceId.isBlank()) {
+                viewModel.showNotice("The active carrier call has no recovery identity")
+                return@withMicrophonePermission
+            }
+            voiceService?.runtime?.placeCall(internalTarget, traceId = traceId)
             return@withMicrophonePermission
         }
         if (outgoingCallPreparation?.isActive == true) {

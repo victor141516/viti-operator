@@ -110,6 +110,17 @@ class VoiceCallService : Service() {
             voiceClient = client,
             telecomGateway = telecom,
             legacyAudio = legacy,
+			callSessionControl = object : VoiceCallSessionControl {
+				override suspend fun isCarrierCallActive(traceId: String): Boolean {
+					val settings = settingsStore.settings.first()
+					return VitiApi(settings).isCarrierCallActive(traceId)
+				}
+
+				override suspend fun leave(traceId: String, connectionId: String, operationId: String) {
+					val settings = settingsStore.settings.first()
+					VitiApi(settings).leaveCallParticipant(traceId, identity, connectionId, operationId)
+				}
+			},
             onSnapshot = ::onSnapshot,
             onDiagnostic = { kind, data ->
                 recordDiagnostic(
@@ -161,13 +172,36 @@ class VoiceCallService : Service() {
             val key = "${event.traceId}:${event.participantId}"
             if (claimedParticipants.add(key)) {
                 serviceScope.launch {
-                    val settings = settingsStore.settings.first()
-                    runCatching {
-                        VitiApi(settings).claimRecordingParticipant(
-                            event.traceId,
-                            event.participantId,
-                            vitiClientIdentity(),
-                        )
+                    var completed = false
+                    try {
+                        while (runtime.snapshot.value.legToken == event.legToken && runtime.snapshot.value.phase != VoiceCallPhase.ENDING) {
+                            val settings = settingsStore.settings.first()
+                            val result = runCatching {
+                                VitiApi(settings).claimRecordingParticipant(
+                                    event.traceId,
+                                    event.participantId,
+                                    vitiClientIdentity(),
+                                )
+                            }
+                            if (result.isSuccess) {
+                                completed = true
+                                return@launch
+                            }
+                            recordDiagnostic(
+                                JSONObject()
+                                    .put("at_ms", System.currentTimeMillis())
+                                    .put("source", "android-call-service")
+                                    .put("kind", "telecom.participant-claim-retry")
+                                    .put("data", JSONObject()
+                                        .put("trace_id", event.traceId)
+                                        .put("participant_id", event.participantId)
+                                        .put("error", result.exceptionOrNull().toString()))
+                                    .toString(),
+                            )
+                            kotlinx.coroutines.delay(1_500)
+                        }
+                    } finally {
+                        if (!completed) claimedParticipants.remove(key)
                     }
                 }
             }
@@ -176,6 +210,7 @@ class VoiceCallService : Service() {
 
     private fun onSnapshot(snapshot: VoiceCallSnapshot) {
         if (snapshot.legToken.isBlank()) {
+			claimedParticipants.clear()
             ringer.stop()
             invalidateCallActions("")
             showIdleForegroundNotification()

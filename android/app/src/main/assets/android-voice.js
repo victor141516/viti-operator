@@ -28,6 +28,7 @@
         case 'answer': result = voice.answer(token); break
         case 'reject': result = voice.reject(token); break
         case 'hangup': result = voice.hangup(token); break
+		case 'reconnect': result = voice.reconnect(String(args.trace_id || ''), token); break
         case 'mute': result = voice.mute(Boolean(args.muted), token); break
         case 'telecom-muted': result = voice.setTelecomMuted(Boolean(args.muted), token); break
         case 'inactive': result = voice.setSystemInactive(Boolean(args.inactive), token); break

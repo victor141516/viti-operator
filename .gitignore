@@ -8,6 +8,7 @@ deploy/engine-logs/
 deploy/*.pid
 android/local.properties
 android/.gradle/
+android/.kotlin/
 android/**/build/
 web-src/node_modules/
 *.exe

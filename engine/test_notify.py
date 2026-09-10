@@ -74,7 +74,8 @@ class NotifyTest(unittest.TestCase):
                         "notify.py", event, "linked-42", "trace-99", *event_args,
                     ]), \
                     mock.patch.object(notify, "load_env", return_value={"VOWIFI_ID": "engine-one"}), \
-                    mock.patch.object(event_outbox, "enqueue_event") as enqueue:
+                    mock.patch.object(event_outbox, "enqueue_event", return_value=Path("queued.json")) as enqueue, \
+                    mock.patch.object(event_outbox, "deliver_file") as deliver:
                 notify.main()
 
             enqueue.assert_called_once()
@@ -82,6 +83,40 @@ class NotifyTest(unittest.TestCase):
             self.assertEqual(args, (event, event_args))
             self.assertEqual(kwargs["extra"], {"call_id": "linked-42", "trace_id": "trace-99"})
             self.assertGreater(kwargs["recorded_at_ns"], 0)
+            if event in ("call_in", "call_out"):
+                deliver.assert_called_once_with(Path("queued.json"))
+            else:
+                deliver.assert_not_called()
+
+    def test_client_disconnect_does_not_end_carrier_and_reports_connection_generation(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        client_context = template[template.index("[viti-client-conference]"):template.index("[viti-carrier-conference]")]
+
+        self.assertIn("notify.py participant_joined", client_context)
+        self.assertIn("notify.py participant_left", client_context)
+        self.assertIn("${VITI_CONNECTION_ID}", client_context)
+        self.assertNotIn("ConfKick", client_context)
+        self.assertIn("explicit, idempotent manager operation", client_context)
+
+    def test_participant_event_keeps_call_and_trace_identity(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch.object(sys, "argv", [
+                    "notify.py", "participant_joined", "linked-42", "trace-99",
+                    "web-a", "web-a", "leg-a", "PJSIP/web-0001",
+                ]), \
+                mock.patch.object(notify, "load_env", return_value={"VOWIFI_ID": "engine-one", "MANAGER_URL": "http://manager"}), \
+                mock.patch.object(event_outbox, "enqueue_event", return_value=Path("queued.json")) as enqueue, \
+                mock.patch.object(event_outbox, "deliver_file") as deliver:
+            notify.main()
+
+        args, kwargs = enqueue.call_args
+        self.assertEqual(args, ("participant_joined", ["web-a", "web-a", "leg-a", "PJSIP/web-0001"]))
+        self.assertEqual(kwargs["extra"], {"call_id": "linked-42", "trace_id": "trace-99"})
+        deliver.assert_called_once_with(Path("queued.json"))
 
 
 if __name__ == "__main__":
