@@ -37,13 +37,14 @@ type callSession struct {
 }
 
 type callParticipant struct {
-	clientID      string
-	participantID string
-	connectionID  string
-	channel       string
-	connected     bool
-	updatedAt     time.Time
-	predecessor   *callParticipant
+	clientID         string
+	participantID    string
+	connectionID     string
+	channel          string
+	admissionChannel string
+	connected        bool
+	updatedAt        time.Time
+	predecessor      *callParticipant
 }
 
 type callParticipantDeparture struct {
@@ -144,13 +145,15 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 	}
 	replacement := callParticipant{
 		clientID: clientID, participantID: participantID, connectionID: connectionID,
-		channel: channel, connected: true, updatedAt: at,
+		channel: channel, admissionChannel: channel, connected: true, updatedAt: at,
 	}
 	if found && previous.connectionID != connectionID {
+		// Keep the whole chain until a participant_left proves that a
+		// generation entered ConfBridge. Several admission responses may be
+		// lost before their durable aborts arrive, possibly out of order.
 		predecessor := previous
 		predecessor.connected = false
 		predecessor.channel = ""
-		predecessor.predecessor = nil
 		replacement.predecessor = &predecessor
 	}
 	session.participants[logicalKey] = replacement
@@ -178,20 +181,30 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 	}
 	delete(session.pendingDrops, channel)
 	logicalKey := logicalParticipantKey(clientID, participantID)
+	departure := session.departed[logicalKey]
 	removed := false
 	if participant, found := session.participants[logicalKey]; found && participant.connectionID == connectionID {
-		if participant.channel != channel {
+		if participant.admissionChannel != channel {
 			// The manager rejected a second channel that tried to reuse an
 			// already admitted connection generation. Its abort must not revoke
 			// the valid channel or fence the shared connection identifier.
 			return false
 		}
 		if !at.Before(participant.updatedAt) {
-			if participant.predecessor != nil {
-				restored := *participant.predecessor
+			// An abort for an older ambiguous admission may already have arrived
+			// while a newer generation was current. Skip every such tombstoned
+			// generation and restore the last still-valid logical owner.
+			predecessor := participant.predecessor
+			for predecessor != nil {
+				if _, aborted := departure.abortedConnectionIDs[predecessor.connectionID]; !aborted {
+					break
+				}
+				predecessor = predecessor.predecessor
+			}
+			if predecessor != nil {
+				restored := *predecessor
 				restored.connected = false
 				restored.channel = ""
-				restored.predecessor = nil
 				session.participants[logicalKey] = restored
 			} else {
 				delete(session.participants, logicalKey)
@@ -199,7 +212,6 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 			removed = true
 		}
 	}
-	departure := session.departed[logicalKey]
 	if departure.connectionIDs == nil {
 		departure.connectionIDs = make(map[string]struct{})
 	}
@@ -259,6 +271,9 @@ func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, co
 	}
 	participant.connected = false
 	participant.channel = ""
+	participant.admissionChannel = ""
+	// participant_left is only emitted for an admitted channel, so the
+	// ambiguous-admission rollback history is no longer needed.
 	participant.predecessor = nil
 	participant.updatedAt = at
 	session.participants[logicalKey] = participant

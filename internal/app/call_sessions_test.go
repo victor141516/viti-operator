@@ -207,6 +207,52 @@ func TestAbortedReconnectRestoresPreviousLogicalMembership(t *testing.T) {
 	}
 }
 
+func TestSuccessiveAmbiguousReconnectsRestoreLastConfirmedGeneration(t *testing.T) {
+	for _, abortOrder := range []struct {
+		name        string
+		connections []string
+	}{
+		{name: "oldest abort first", connections: []string{"leg-ambiguous-b", "leg-ambiguous-c"}},
+		{name: "newest abort first", connections: []string{"leg-ambiguous-c", "leg-ambiguous-b"}},
+	} {
+		t.Run(abortOrder.name, func(t *testing.T) {
+			r := newCallSessionRegistry()
+			call := sessionTestCall()
+			now := time.Now().UTC()
+			r.joined(call, "phone-b", "phone-b", "leg-confirmed-a", "PJSIP/a", now)
+			r.left(call, "phone-b", "phone-b", "leg-confirmed-a", now.Add(time.Second))
+			r.joined(call, "phone-b", "phone-b", "leg-ambiguous-b", "PJSIP/b", now.Add(2*time.Second))
+			r.joined(call, "phone-b", "phone-b", "leg-ambiguous-c", "PJSIP/c", now.Add(3*time.Second))
+
+			channels := map[string]string{
+				"leg-ambiguous-b": "PJSIP/b",
+				"leg-ambiguous-c": "PJSIP/c",
+			}
+			for index, connectionID := range abortOrder.connections {
+				r.abortJoin(
+					call,
+					"phone-b",
+					"phone-b",
+					connectionID,
+					channels[connectionID],
+					now.Add(time.Duration(4+index)*time.Second),
+				)
+			}
+
+			operation, err := r.beginLeaveWithPrevious(
+				call,
+				"phone-b",
+				"leg-pending-d",
+				"leg-confirmed-a",
+				"leave-after-ambiguous-chain",
+			)
+			if err != nil || operation.matchedConnectionID != "leg-confirmed-a" || !operation.endCarrier {
+				t.Fatalf("last confirmed membership was not restored: operation=%+v err=%v", operation, err)
+			}
+		})
+	}
+}
+
 func TestAbortBeforeExplicitHangupStillHonorsLastParticipantIntent(t *testing.T) {
 	r := newCallSessionRegistry()
 	call := sessionTestCall()
