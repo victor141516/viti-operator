@@ -152,6 +152,39 @@ keeps private VoIP signaling ready. During a call it declares `phoneCall` as
 well. This lifetime is distinct from the remote-SIM authentication foreground
 service.
 
+#### Android Auto projection
+
+`VitiCarAppService` adds the projected Android Auto `CALLING` category without
+changing the application's Telecom role. Its templated screen contains only a
+driving-safe directory built from recent calls and synchronized contacts; it
+does not expose a free-form dialer, messaging surface, navigation product, or
+custom in-call dashboard. The screen asks the current host for
+`CONTENT_LIMIT_TYPE_LIST` and never emits more rows than that host permits. The
+use of the modern `Header` model makes Car App API 5 the declared minimum.
+
+The car session is a volatile adapter. It binds to `VoiceCallService` and
+observes the same immutable leg snapshot as Compose, while Core-Telecom remains
+the source of truth for admission, native concurrency, audio endpoints, mute,
+answer, reject, and disconnect callbacks. Once a call exists, Android Auto owns
+the system in-call presentation. Destroying or recreating a car session only
+unbinds this adapter; it never stops the foreground call service or leaves a
+conference participant.
+
+A successful bind alone is not treated as proof that the process can survive
+the car session. If Android rejects the foreground-service start and no already
+started service exists, dialing remains disabled and the car screen directs the
+user to open Viti on the phone when safe. SIP provisioning is owned and retried
+by `VoiceCallService`, not by an Activity or car session. Repeated identical
+responses are idempotent, a settings change cancels its obsolete request, and a
+changed response is deferred while a leg is active.
+
+Microphone permission is required to place or answer a call. Nearby-device
+permission is not a general call gate: without it, supported USB, speaker, or
+earpiece routes can still work, while Bluetooth discovery and control may be
+degraded. Actual route availability and accessory buttons are reported by the
+Android Auto host, Telecom, the vehicle/OEM, and the connected accessory; Viti
+does not infer them from physical attachment alone.
+
 The connection topology is also rendered from one shared server-owned web view.
 Native Compose owns navigation, settings, notifications, and accessibility;
 the embedded topology surface owns pan, pinch-to-zoom, hit testing, and detail
@@ -497,6 +530,7 @@ protected after testing.
 | Shared JsSIP voice layer | Web and Android follow the same SIP/WebRTC behavior | Android voice depends on a controlled WebView |
 | Self-managed Android Telecom | Native concurrency, endpoints and headset actions without becoming the default dialer | API 24-25 and devices without Telecom use a vendor-dependent legacy audio path |
 | Process-owned Android call service | Activity recreation does not destroy a call | Android process death still loses the local SIP leg |
+| Projected Android Auto calling | A bounded contact/recent directory starts Viti calls and the system supplies the in-call UI | Beta/labs distribution and real audio/control behavior depend on Google Play, the host, vehicle/OEM, and accessory |
 | Server-owned history | Every client sees one consistent timeline | Server storage must be backed up |
 | Lossless per-participant WAV recording | Selected sides can be remixed without transcoding or losing evidence | Recording storage grows with call duration and participant count |
 | Dynamic SIM agent | The SIM can remain in a phone or move to USB without restart | Only one agent may own AKA at a time |
