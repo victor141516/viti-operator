@@ -135,7 +135,7 @@ class StrongSwanAdapterTest(unittest.TestCase):
         identity = "0001010123456789@nai.epc.mnc001.mcc001.3gppnetwork.org"
         self.assertEqual(connection["local"]["id"], identity)
         self.assertEqual(connection["local"]["eap_id"], identity)
-        self.assertEqual(connection["remote"]["id"], "ims")
+        self.assertEqual(connection["remote"]["id"], "%any")
         self.assertEqual(connection["local_addrs"], ["192.0.2.10"])
         self.assertEqual(connection["remote_addrs"], ["198.51.100.20"])
         self.assertEqual(connection["vips"], ["::"])
@@ -150,13 +150,18 @@ class StrongSwanAdapterTest(unittest.TestCase):
         ])
 
     def test_fqdn_responder_identity_matches_3gpp_format(self):
-        connection = strongswan_adapter.build_connection(
-            environment(SWU_IDR_MODE="fqdn")
-        )[strongswan_adapter.CONNECTION]
         self.assertEqual(
-            connection["remote"]["id"],
+            strongswan_adapter.responder_identity(
+                environment(SWU_IDR_MODE="fqdn")
+            ),
             "ims.apn.epc.mnc001.mcc001.pub.3gppnetwork.org",
         )
+
+    def test_responder_request_identity_rejects_config_injection(self):
+        with self.assertRaisesRegex(ValueError, "invalid characters"):
+            strongswan_adapter.responder_identity(
+                environment(SWU_APN="ims\n  load = malicious")
+            )
 
     def test_established_sa_requires_both_ike_and_child_state(self):
         message = {
@@ -207,6 +212,8 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 adapter.start_charon()
             finally:
                 strongswan_adapter.subprocess.Popen = original_popen
+            generated = Path(directory, "strongswan.conf").read_text(encoding="utf-8")
+            self.assertIn("request_idr = ims", generated)
             generated_path = Path(directory) / "strongswan.conf"
             generated = generated_path.read_text(encoding="utf-8")
             self.assertIn("keep_alive = 1s", generated)

@@ -12,6 +12,7 @@ import itertools
 import json
 import os
 from pathlib import Path
+import re
 import selectors
 import signal
 import socket
@@ -122,11 +123,15 @@ def permanent_nai(env):
 
 def responder_identity(env):
     apn = str(env.get("SWU_APN", "ims")).strip() or "ims"
-    if str(env.get("SWU_IDR_MODE", "apn")).strip().lower() != "fqdn":
-        return apn
-    mcc = required(env, "SWU_MCC").zfill(3)
-    mnc = required(env, "SWU_MNC").zfill(3)
-    return f"{apn}.apn.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
+    if str(env.get("SWU_IDR_MODE", "apn")).strip().lower() == "fqdn":
+        mcc = required(env, "SWU_MCC").zfill(3)
+        mnc = required(env, "SWU_MNC").zfill(3)
+        value = f"{apn}.apn.epc.mnc{mnc}.mcc{mcc}.pub.3gppnetwork.org"
+    else:
+        value = apn
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,253}", value):
+        raise ValueError("SWu responder request identity contains invalid characters")
+    return value
 
 
 def duration(seconds):
@@ -187,7 +192,11 @@ def build_connection(env):
         ])),
         ("remote", OrderedDict([
             ("auth", "eap"),
-            ("id", responder_identity(env)),
+            # The IDr request transports the APN per 3GPP TS 33.402, but some
+            # ePDGs authenticate with a different responder identity (Digi
+            # uses 0.0.0.0).  request_idr below decouples the wire request from
+            # this authentication constraint.
+            ("id", "%any"),
         ])),
         ("children", OrderedDict([
             (CHILD, OrderedDict([
@@ -442,7 +451,10 @@ class StrongSwanAdapter:
             self.env, "SWU_NATT_KEEPALIVE", "20", allow_zero=True
         )
         generated = base.replace(
-            marker, f"{marker}\n  keep_alive = {duration(keep_alive)}", 1
+            marker,
+            f"{marker}\n  keep_alive = {duration(keep_alive)}"
+            f"\n  request_idr = {responder_identity(self.env)}",
+            1,
         )
         config_path = self.runtime.rundir / "strongswan.conf"
         temporary = config_path.with_suffix(".conf.tmp")
