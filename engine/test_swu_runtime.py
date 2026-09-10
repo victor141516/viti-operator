@@ -89,6 +89,11 @@ class InnerAddressRefreshTest(unittest.TestCase):
         self.assertEqual(second.kwargs["extra"]["tunnel_sequence"], 2)
         self.assertGreater(first.kwargs["recorded_at_ns"], 0)
 
+    def test_process_does_not_start_without_a_durable_generation_claim(self):
+        with mock.patch.object(self.module, "swu_notify", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "durably claim"):
+                self.module.main()
+
 
 if __name__ == "__main__":
     unittest.main()

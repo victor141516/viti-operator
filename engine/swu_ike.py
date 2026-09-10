@@ -6433,7 +6433,8 @@ def main():
     # Claim a new process generation before DNS, SIM access, or IKE can fail.
     # This is durable evidence that a previously reported userspace tunnel no
     # longer owns the data plane, even if this attempt never reaches tunnel_up.
-    swu_notify("tunnel_start")
+    if not swu_notify("tunnel_start"):
+        raise RuntimeError("could not durably claim the tunnel process generation")
 
     # CP+TS address-family mode (per line, from cfg.cp_mode). The CFG config-request family MUST
     # match the carrier's IMS PDN or the ePDG rejects the PDN after EAP-Success (Telus: no P-CSCF on
