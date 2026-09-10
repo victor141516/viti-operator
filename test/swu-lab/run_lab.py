@@ -14,6 +14,10 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILE = ROOT / "test" / "swu-lab" / "compose.yml"
 COMMON_SERVICES = ("epdg", "aka-broker", "nat-gateway")
+# Fixed overrides select the artifact under test and must survive per-scenario
+# network/timer overrides.  Keeping them separate prevents a scenario reset
+# from silently falling back to a different image.
+COMPOSE_FIXED_OVERRIDES = {}
 COMPOSE_OVERRIDES = {}
 BACKEND_SERVICES = {
     "python": (
@@ -42,7 +46,7 @@ def compose(*args, capture=False):
         check=True,
         text=True,
         capture_output=capture,
-        env={**os.environ, **COMPOSE_OVERRIDES},
+        env=compose_environment(),
     )
 
 
@@ -56,8 +60,12 @@ def compose_popen(*args):
     return subprocess.Popen(
         command,
         cwd=ROOT,
-        env={**os.environ, **COMPOSE_OVERRIDES},
+        env=compose_environment(),
     )
+
+
+def compose_environment():
+    return {**os.environ, **COMPOSE_FIXED_OVERRIDES, **COMPOSE_OVERRIDES}
 
 
 def broker_request(path, payload=None):
@@ -427,9 +435,13 @@ def run_colliding_rekeys(backend, connected_probe, kind):
         LAB_SWU_IKE_REKEY_MINUTES=0,
     )
     before_sa = epdg_sa_state()
+    # Fault-injection tools belong to the lab probe, not the production image
+    # under test.  The probe joins the backend's network namespace, so the
+    # qdisc remains attached to the same eth0 after this short-lived helper
+    # exits without requiring tc to be packaged in the engine.
     compose(
-        "exec", "-T", backend, "tc", "qdisc", "replace", "dev", "eth0",
-        "root", "netem", "delay", "600ms",
+        "run", "--rm", "--entrypoint", "tc", connected_probe,
+        "qdisc", "replace", "dev", "eth0", "root", "netem", "delay", "600ms",
     )
     responder = compose_popen(
         "exec", "-T", "epdg", "sh", "-c",
@@ -553,7 +565,7 @@ def main():
     if args.backend_image:
         if args.backend != "strongswan":
             parser.error("--backend-image is only supported with --backend strongswan")
-        COMPOSE_OVERRIDES["LAB_STRONGSWAN_BACKEND_IMAGE"] = args.backend_image
+        COMPOSE_FIXED_OVERRIDES["LAB_STRONGSWAN_BACKEND_IMAGE"] = args.backend_image
     reset_lab()
     try:
         if not args.no_build:
@@ -598,6 +610,7 @@ def main():
     finally:
         if not args.keep:
             reset_lab()
+        COMPOSE_FIXED_OVERRIDES.clear()
         COMPOSE_OVERRIDES.clear()
 
 
