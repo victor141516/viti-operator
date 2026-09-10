@@ -1163,7 +1163,7 @@ private fun DialerSheet(
     val dialRows = if (ui.voice.inCall) listOf("123", "456", "789", "*0#") else listOf("123", "456", "789", "+0⌫")
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(
-            Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).padding(horizontal = 24.dp),
+            Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -1206,8 +1206,10 @@ private fun DialerSheet(
             Spacer(Modifier.height(12.dp))
             if (ui.voice.inCall) {
                 AudioRouteButton(callSnapshot, onSelectAudioEndpoint)
-                Spacer(Modifier.height(12.dp))
-                CallQualityCard(ui.voice.quality, callSnapshot.legToken)
+                if (ui.voice.quality != null) {
+                    Spacer(Modifier.height(12.dp))
+                    CallQualityCard(ui.voice.quality, callSnapshot.legToken)
+                }
                 Spacer(Modifier.height(12.dp))
             }
             when {
