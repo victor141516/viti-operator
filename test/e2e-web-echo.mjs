@@ -10,7 +10,7 @@ const cdpBase = `http://127.0.0.1:${cdpPort}`;
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
-async function waitFor(label, probe, timeoutMilliseconds = 30000) {
+async function waitFor(label, probe, timeoutMilliseconds = 30000, diagnose = null) {
   const deadline = Date.now() + timeoutMilliseconds;
   let lastValue;
   while (Date.now() < deadline) {
@@ -18,7 +18,15 @@ async function waitFor(label, probe, timeoutMilliseconds = 30000) {
     if (lastValue) return lastValue;
     await delay(250);
   }
-  throw new Error(`${label} timed out`);
+  let detail = "";
+  if (diagnose) {
+    try {
+      detail = `: ${JSON.stringify(await diagnose())}`;
+    } catch {
+      detail = ": diagnostic snapshot unavailable";
+    }
+  }
+  throw new Error(`${label} timed out${detail}`);
 }
 
 await waitFor("Chrome DevTools", async () => {
@@ -97,6 +105,16 @@ try {
     });
   }
   registered = await waitFor("WebRTC registration", () => evaluate("state.voiceRegistered === true"), 30000);
+  await waitFor(
+    "call controls",
+    () => evaluate(`
+      state.voiceRegistered === true &&
+      state.status?.ready === true &&
+      state.globalCall === false &&
+      document.querySelector('.call-button')?.disabled === false
+    `),
+    30000,
+  );
   initialFinalizedLocalCalls = await evaluate(`${callsFetch}.then(value =>
     value.calls.filter(call => call.peer === ${JSON.stringify(testNumber)} && Boolean(call.ended_at)).length)`);
   await evaluate(`(() => {
@@ -106,7 +124,22 @@ try {
     document.querySelector('#call-form').requestSubmit();
     return true;
   })()`);
-  active = await waitFor("local echo call", () => evaluate("state.localCall === true"), 15000);
+  active = await waitFor(
+    "local echo call",
+    () => evaluate("state.localCall === true"),
+    15000,
+    () => evaluate(`({
+      lineReady: state.status?.ready === true,
+      voiceRegistered: state.voiceRegistered,
+      localCall: state.localCall,
+      incomingCall: state.incomingCall,
+      globalCall: state.globalCall,
+      dialPreparing: state.dialPreparing,
+      callStatus: document.querySelector('#call-status')?.textContent || '',
+      callButtonDisabled: document.querySelector('.call-button')?.disabled,
+      destination: document.querySelector('#call-to')?.value || ''
+    })`),
+  );
   bidirectional = await waitFor(
     "bidirectional WebRTC media",
     () => evaluate("document.querySelector('#call-status').textContent.includes('two-way audio')"),

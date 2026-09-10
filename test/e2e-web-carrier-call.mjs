@@ -80,6 +80,12 @@ try {
     ));
   }
   registered = await waitFor("WebRTC registration", () => evaluate("state.voiceRegistered === true"), 35000);
+  await waitFor("call controls", () => evaluate(`
+    state.voiceRegistered === true &&
+    state.status?.ready === true &&
+    state.globalCall === false &&
+    document.querySelector('.call-button')?.disabled === false
+  `), 30000);
   initialFinalized = await evaluate(`${callsFetch}.then(value => value.calls.filter(call =>
     call.peer === ${JSON.stringify(destination)} && Boolean(call.ended_at)).length)`);
   await evaluate(`(() => {
