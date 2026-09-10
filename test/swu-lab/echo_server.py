@@ -26,22 +26,34 @@ def main():
 
     print(f"LAB_ECHO_READY=[{ADDRESS}]:{PORT}", flush=True)
     while True:
-        for key, _ in selector.select():
+        for key, mask in selector.select():
             sock = key.fileobj
             if key.data == "listener":
                 conn, _ = sock.accept()
                 conn.setblocking(False)
-                selector.register(conn, selectors.EVENT_READ, "tcp")
+                selector.register(conn, selectors.EVENT_READ, bytearray())
             elif key.data == "udp":
                 data, peer = sock.recvfrom(65535)
                 sock.sendto(data, peer)
             else:
-                data = sock.recv(65535)
-                if data:
-                    sock.sendall(data)
-                else:
-                    selector.unregister(sock)
-                    sock.close()
+                pending = key.data
+                if mask & selectors.EVENT_READ:
+                    data = sock.recv(65535)
+                    if not data:
+                        selector.unregister(sock)
+                        sock.close()
+                        continue
+                    pending.extend(data)
+                if mask & selectors.EVENT_WRITE and pending:
+                    try:
+                        sent = sock.send(pending)
+                    except BlockingIOError:
+                        sent = 0
+                    del pending[:sent]
+                events = selectors.EVENT_READ
+                if pending:
+                    events |= selectors.EVENT_WRITE
+                selector.modify(sock, events, pending)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ BACKEND_SERVICES = {
 
 
 def compose(*args, capture=False):
-    command = ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
+    command = compose_command(*args)
     print("+", " ".join(command), flush=True)
     return subprocess.run(
         command,
@@ -42,6 +42,20 @@ def compose(*args, capture=False):
         check=True,
         text=True,
         capture_output=capture,
+        env={**os.environ, **COMPOSE_OVERRIDES},
+    )
+
+
+def compose_command(*args):
+    return ["docker", "compose", "-f", str(COMPOSE_FILE), *args]
+
+
+def compose_popen(*args):
+    command = compose_command(*args)
+    print("+", " ".join(command), flush=True)
+    return subprocess.Popen(
+        command,
+        cwd=ROOT,
         env={**os.environ, **COMPOSE_OVERRIDES},
     )
 
@@ -404,41 +418,35 @@ def run_auth_source_loss(backend, connected_probe, lifecycle_probe):
 
 
 def run_colliding_rekeys(backend, connected_probe, kind):
-    timers = {
-        "child": {
-            "LAB_SWU_CHILD_REKEY_MINUTES": 0.1,
-            "LAB_SWU_IKE_REKEY_MINUTES": 0,
-        },
-        "ike": {
-            "LAB_SWU_CHILD_REKEY_MINUTES": 0,
-            "LAB_SWU_IKE_REKEY_MINUTES": 0.1,
-        },
-    }[kind]
     start_protocol_lab(
         backend,
         connected_probe,
         LAB_SWU_LIVENESS_PERIOD=0,
         LAB_SWU_REKEY_TIMEOUT=3,
-        **timers,
+        LAB_SWU_CHILD_REKEY_MINUTES=0,
+        LAB_SWU_IKE_REKEY_MINUTES=0,
     )
     before_sa = epdg_sa_state()
     compose(
         "exec", "-T", backend, "tc", "qdisc", "replace", "dev", "eth0",
         "root", "netem", "delay", "600ms",
     )
-    needle = {
-        "child": "initiating proactive PFS rekey",
-        "ike": "initiating make-before-break rekey",
-    }[kind]
-    wait_for_log(backend, needle, timeout=12)
-    responder_result = None
+    responder = compose_popen(
+        "exec", "-T", "epdg", "sh", "-c",
+        "sleep 0.15; exec swanctl --rekey "
+        f"--{kind} {'ims' if kind == 'child' else 'viti-lab'}",
+    )
     try:
-        compose(
-            "exec", "-T", "epdg", "swanctl", "--rekey", f"--{kind}",
-            "ims" if kind == "child" else "viti-lab",
-        )
-    except subprocess.CalledProcessError as error:
-        responder_result = error.returncode
+        request_control(backend, f"rekey-{kind}")
+        responder_result = responder.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        responder.kill()
+        responder.wait()
+        raise AssertionError(f"responder-side colliding {kind} rekey timed out")
+    except Exception:
+        responder.terminate()
+        responder.wait(timeout=5)
+        raise
     time.sleep(2)
 
     status, _ = backend_container_state(backend)
@@ -461,7 +469,7 @@ def run_colliding_rekeys(backend, connected_probe, kind):
         else:
             print(f"LAB_XFAIL=python:colliding_{kind}_rekey_transport")
     else:
-        if responder_result is not None:
+        if responder_result != 0:
             raise AssertionError(
                 f"responder-side colliding {kind} rekey failed with {responder_result}"
             )
