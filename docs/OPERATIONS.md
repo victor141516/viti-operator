@@ -158,6 +158,22 @@ Bluetooth route discovery or control is required. The application declares
 `MANAGE_OWN_CALLS`, foreground-service `specialUse`/`phoneCall`, audio-settings,
 and microphone permissions; it does not declare or request the dialer role.
 
+Open **Connection → Incoming call alerts** to inspect three separate Android
+capabilities:
+
+- global notification access;
+- the current importance of the **Incoming calls** notification channel;
+- the full-screen call-alert grant exposed by Android 14 and later.
+
+Use the actions on that card to open the corresponding Android settings. A
+high-priority call channel and notification access are needed for a prominent
+visible alert. The full-screen grant makes the call eligible for lock-screen
+presentation; it does not force Android or the device manufacturer to launch
+the Activity in every foreground or unlocked state. When full-screen use is
+not permitted, Android normally presents the same call as an expanded heads-up
+notification. The service-owned ringtone is independent of notification sound
+and continues only while the local leg is ringing.
+
 The quiet **Call service** notification means the process-owned SIP service is
 ready in the background. An active call uses the high-priority **Incoming
 calls** channel and exposes answer/reject/end actions supported by that Android
@@ -183,6 +199,12 @@ Activity recreation does not end a call. Force-stopping the application or an
 Android process kill does: the local SIP leg is memory-only and is not restored
 after process creation. Confirm server-side call state before starting another
 call; stale history is reconciled by the manager/engine recovery flow.
+
+The incoming-call Activity also survives ordinary configuration recreation. A
+microphone permission or queued Answer operation is restored only for the same
+leg token and is executed only after rebinding to the existing service and
+confirming that the leg is still incoming and ringing. Recreating the Activity
+does not itself answer, reject, recreate, or prolong a call.
 
 When an end or reject reaches the service but Android does not close its Telecom
 scope, the UI remains in **Ending** and offers the same operation again. Do not
@@ -399,6 +421,19 @@ changing the carrier tunnel.
    Sideloading alone does not prove that a production host will list a beta
    calling application.
 
+### Android incoming call is audible but not visible
+
+1. Open **Connection → Incoming call alerts** and grant global notifications.
+2. Open the **Incoming calls** channel and restore high-priority alerts if the
+   card reports that the channel is blocked or reduced.
+3. On Android 14+, grant full-screen call alerts if lock-screen presentation is
+   desired. Without it, use the Android heads-up notification to answer or
+   decline.
+4. Disable battery restrictions for Viti Operator if the foreground call
+   service is being killed by the device vendor.
+5. Test on the intended locked and unlocked device. A compiled instrumentation
+   test cannot prove an OEM's full-screen or heads-up policy.
+
 ### SMS remains submitted or delivery is unconfirmed
 
 Carrier acceptance and destination delivery are different states. RP-ACK only
@@ -443,7 +478,12 @@ Recordings are retained indefinitely; diagnostic artifacts are separate.
   when the device exposes it; the API 24-25 fallback and headset button mapping
   remain vendor/accessory dependent.
 - Android activity recreation preserves a call, but process death does not
-  restore the local SIP/WebRTC leg.
+  restore the local SIP/WebRTC leg. Saved incoming-alert state is token-scoped
+  and never recreates the call.
+- Full-screen incoming-call presentation depends on notification access, the
+  user-controlled call channel, Android 14's full-screen grant where present,
+  current device state, and OEM policy. The supported fallback is Android's
+  CallStyle heads-up notification.
 - Android Auto calling is a projected, beta/labs capability requiring Android
   9+, Car App API 5+, and Google Play Internal or Closed testing. Open testing,
   Production, and an installable Android Automotive OS client are not supported.

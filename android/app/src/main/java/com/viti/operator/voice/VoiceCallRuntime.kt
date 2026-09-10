@@ -48,6 +48,8 @@ class VoiceCallRuntime(
     private val onSnapshot: (VoiceCallSnapshot) -> Unit,
     private val onDiagnostic: (String, Map<String, Any?>) -> Unit = { _, _ -> },
 ) {
+    private enum class LegAction { NONE, ANSWERING, LEAVING }
+
     private data class Leg(
         val token: String,
         val direction: VoiceCallDirection,
@@ -62,6 +64,7 @@ class VoiceCallRuntime(
         var platformInactive: Boolean = false,
         var platformDisconnecting: Boolean = false,
         var pendingAnswer: Boolean = false,
+        var action: LegAction = LegAction.NONE,
         var terminalDetail: String? = null,
         var terminalFailed: Boolean = false,
         var terminalRejected: Boolean = false,
@@ -124,12 +127,19 @@ class VoiceCallRuntime(
             publish()
             return
         }
+        if (!claimAction(current, LegAction.ANSWERING, "answer")) return
         if (telecomGateway != null && current.control == null) {
             current.pendingAnswer = true
             publish()
             return
         }
-        scope.launch { runUserAction("answer", current.token) { answer(current.token, fromPlatform = false) } }
+        scope.launch {
+            try {
+                runUserAction("answer", current.token) { performAnswer(current, fromPlatform = false) }
+            } finally {
+                releaseAction(current, LegAction.ANSWERING)
+            }
+        }
     }
 
     fun reject(expectedToken: String? = null) {
@@ -138,9 +148,19 @@ class VoiceCallRuntime(
             onDiagnostic("telecom.stale-action", mapOf("action" to "reject", "leg_token" to expectedToken))
             return
         }
+        if (current.direction != VoiceCallDirection.INCOMING) return
+        if (current.phase != VoiceCallPhase.RINGING && !(current.phase == VoiceCallPhase.ENDING && current.terminalRejected)) {
+            onDiagnostic("telecom.stale-action", mapOf("action" to "reject", "leg_token" to current.token))
+            return
+        }
+        if (!claimAction(current, LegAction.LEAVING, "reject")) return
         scope.launch {
-            runUserAction("reject", current.token) {
-                leave(current.token, rejected = current.direction == VoiceCallDirection.INCOMING, fromPlatform = false)
+            try {
+                runUserAction("reject", current.token) {
+                    performLeave(current, rejected = true, fromPlatform = false)
+                }
+            } finally {
+                releaseAction(current, LegAction.LEAVING)
             }
         }
     }
@@ -151,7 +171,14 @@ class VoiceCallRuntime(
             onDiagnostic("telecom.stale-action", mapOf("action" to "hangup", "leg_token" to expectedToken))
             return
         }
-        scope.launch { runUserAction("hangup", current.token) { leave(current.token, rejected = false, fromPlatform = false) } }
+        if (!claimAction(current, LegAction.LEAVING, "hangup")) return
+        scope.launch {
+            try {
+                runUserAction("hangup", current.token) { performLeave(current, rejected = false, fromPlatform = false) }
+            } finally {
+                releaseAction(current, LegAction.LEAVING)
+            }
+        }
     }
 
     fun setMuted(muted: Boolean) {
@@ -331,7 +358,13 @@ class VoiceCallRuntime(
                     if (live.direction == VoiceCallDirection.OUTGOING) {
                         scope.launch { dialSip(live.token) }
                     } else if (live.pendingAnswer) {
-                        scope.launch { answer(live.token, fromPlatform = false) }
+                        scope.launch {
+                            try {
+                                runUserAction("answer", live.token) { performAnswer(live, fromPlatform = false) }
+                            } finally {
+                                releaseAction(live, LegAction.ANSWERING)
+                            }
+                        }
                     }
                 }
                 val live = leg?.takeIf { it.token == current.token }
@@ -373,18 +406,27 @@ class VoiceCallRuntime(
                 schedulePlatformCleanup(token, rejected = true, detail = error.message.orEmpty())
                 throw error
             } else {
+                if (!claimAction(current, LegAction.ANSWERING, "platform-answer")) return
                 try {
-                    withTimeout(PLATFORM_CALLBACK_TIMEOUT_MS) { answer(token, fromPlatform = true) }
+                    withTimeout(PLATFORM_CALLBACK_TIMEOUT_MS) { performAnswer(current, fromPlatform = true) }
                 } catch (error: Throwable) {
                     schedulePlatformCleanup(token, rejected = false, detail = error.message ?: "Could not answer the call")
                     throw error
+                } finally {
+                    releaseAction(current, LegAction.ANSWERING)
                 }
             }
         }
 
         override suspend fun onDisconnect(rejected: Boolean) {
-            withTimeout(PLATFORM_CALLBACK_TIMEOUT_MS) {
-                leave(token, rejected, fromPlatform = true)
+            val current = leg?.takeIf { it.token == token } ?: return
+            if (!claimAction(current, LegAction.LEAVING, if (rejected) "platform-reject" else "platform-disconnect")) return
+            try {
+                withTimeout(PLATFORM_CALLBACK_TIMEOUT_MS) {
+                    performLeave(current, rejected, fromPlatform = true)
+                }
+            } finally {
+                releaseAction(current, LegAction.LEAVING)
             }
         }
 
@@ -445,16 +487,23 @@ class VoiceCallRuntime(
         }
     }
 
-    private suspend fun answer(token: String, fromPlatform: Boolean) {
-        val current = requireCurrent(token)
+    private suspend fun performAnswer(current: Leg, fromPlatform: Boolean) {
+        val token = current.token
+        if (leg !== current || current.action != LegAction.ANSWERING || current.phase == VoiceCallPhase.ENDING) return
         if (!voiceClient.hasMicrophonePermission()) throw IllegalStateException("Microphone access is required to answer")
         try {
             // Accept the service leg before claiming success to Telecom. If
             // Telecom then rejects the transition, roll the service leg back.
             voiceClient.answer(token)
-            if (leg !== current || current.phase == VoiceCallPhase.ENDING) return
+            if (leg !== current || current.phase == VoiceCallPhase.ENDING || current.action != LegAction.ANSWERING) {
+                runCatching { voiceClient.hangup(token) }
+                return
+            }
             if (!fromPlatform) current.control?.answer()
-            if (leg !== current || current.phase == VoiceCallPhase.ENDING) return
+            if (leg !== current || current.phase == VoiceCallPhase.ENDING || current.action != LegAction.ANSWERING) {
+                runCatching { voiceClient.hangup(token) }
+                return
+            }
             current.pendingAnswer = false
             current.platformActive = !current.platformInactive
             current.phase = if (current.platformInactive) VoiceCallPhase.INACTIVE else VoiceCallPhase.ACTIVE
@@ -475,8 +524,9 @@ class VoiceCallRuntime(
         }
     }
 
-    private suspend fun leave(token: String, rejected: Boolean, fromPlatform: Boolean) {
-        val current = requireCurrent(token)
+    private suspend fun performLeave(current: Leg, rejected: Boolean, fromPlatform: Boolean) {
+        val token = current.token
+        if (leg !== current || current.action != LegAction.LEAVING) return
         markTerminal(
             current,
             if (rejected) "Call rejected" else "You left the call",
@@ -524,6 +574,38 @@ class VoiceCallRuntime(
                 publishNotice(error.message ?: "The call action failed")
             }
         }
+    }
+
+    private fun claimAction(current: Leg, requested: LegAction, source: String): Boolean {
+        if (leg !== current) return false
+        // A local request to leave is allowed to supersede an answer that is
+        // still suspended in SIP or Telecom. The answer path observes the
+        // changed action after every suspension and rolls back a late accept.
+        if (requested == LegAction.LEAVING && current.action == LegAction.ANSWERING) {
+            onDiagnostic(
+                "telecom.action-superseded",
+                mapOf("action" to source, "leg_token" to current.token, "superseded" to "answering"),
+            )
+            current.action = LegAction.LEAVING
+            return true
+        }
+        if (current.action != LegAction.NONE) {
+            onDiagnostic(
+                "telecom.duplicate-action",
+                mapOf(
+                    "action" to source,
+                    "leg_token" to current.token,
+                    "in_flight" to current.action.name.lowercase(),
+                ),
+            )
+            return false
+        }
+        current.action = requested
+        return true
+    }
+
+    private fun releaseAction(current: Leg, expected: LegAction) {
+        if (leg === current && current.action == expected) current.action = LegAction.NONE
     }
 
     private fun activateFromSip(event: VoiceEngineEvent) {

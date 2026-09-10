@@ -17,6 +17,7 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import com.viti.operator.IncomingCallRinger
+import com.viti.operator.IncomingCallActivity
 import com.viti.operator.MainActivity
 import com.viti.operator.R
 import com.viti.operator.data.SettingsStore
@@ -214,20 +215,12 @@ class VoiceCallService : Service() {
         val hangup = serviceAction(ACTION_HANGUP, token, HANGUP_REQUEST)
         val endCall = if (shouldRejectFromNotification(snapshot)) reject else hangup
         val answer = if (snapshot.microphonePermissionRequired) {
-            PendingIntent.getActivity(
-                this,
-                ANSWER_REQUEST,
-                Intent(this, MainActivity::class.java)
-                    .setAction(MainActivity.ACTION_ANSWER_CALL)
-                    .setData(Uri.parse(callActionData(MainActivity.ACTION_ANSWER_CALL, token)))
-                    .putExtra(EXTRA_LEG_TOKEN, token)
-                    .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
-                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-            ).also(callActionIntents::add)
+            incomingCallScreen(token, peer, requestAnswer = true)
         } else {
             serviceAction(ACTION_ANSWER, token, ANSWER_REQUEST)
         }
         val incoming = snapshot.direction == VoiceCallDirection.INCOMING && snapshot.phase == VoiceCallPhase.RINGING
+        val incomingScreen = if (incoming) incomingCallScreen(token, peer) else null
         return NotificationCompat.Builder(this, CALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(if (incoming) "Incoming service call" else peer)
@@ -241,9 +234,34 @@ class VoiceCallService : Service() {
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setSilent(true)
             .setOngoing(true)
-            .setContentIntent(openApp)
+            .setContentIntent(incomingScreen ?: openApp)
+            .apply {
+                // Always attach the sanctioned call FSI. Android decides whether
+                // to launch it or show its persistent/expanded heads-up fallback.
+                if (incomingScreen != null) setFullScreenIntent(incomingScreen, true)
+            }
             .build()
     }
+
+    private fun incomingCallScreen(
+        token: String,
+        peer: String,
+        requestAnswer: Boolean = false,
+    ) = PendingIntent.getActivity(
+        this,
+        if (requestAnswer) ANSWER_REQUEST else INCOMING_SCREEN_REQUEST,
+        Intent(this, IncomingCallActivity::class.java)
+            .setAction(if (requestAnswer) IncomingCallActivity.ACTION_ANSWER_CALL else ACTION_OPEN_INCOMING)
+            .setData(Uri.parse(callActionData(if (requestAnswer) IncomingCallActivity.ACTION_ANSWER_CALL else ACTION_OPEN_INCOMING, token)))
+            .putExtra(EXTRA_LEG_TOKEN, token)
+            .putExtra(EXTRA_CALLER_NAME, peer)
+            .addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP,
+            ),
+        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    ).also(callActionIntents::add)
 
     private fun serviceAction(action: String, token: String, requestCode: Int) = PendingIntent.getService(
         this,
@@ -332,7 +350,9 @@ class VoiceCallService : Service() {
         const val ACTION_ANSWER = "com.viti.operator.voice.action.ANSWER"
         const val ACTION_REJECT = "com.viti.operator.voice.action.REJECT"
         const val ACTION_HANGUP = "com.viti.operator.voice.action.HANGUP"
+        const val ACTION_OPEN_INCOMING = "com.viti.operator.voice.action.OPEN_INCOMING"
         const val EXTRA_LEG_TOKEN = "com.viti.operator.voice.extra.LEG_TOKEN"
+        const val EXTRA_CALLER_NAME = "com.viti.operator.voice.extra.CALLER_NAME"
         const val CALL_CHANNEL_ID = "incoming_calls_v2"
         private const val SERVICE_CHANNEL_ID = "call_service_v1"
         private const val CALL_NOTIFICATION_ID = 4402
@@ -340,6 +360,7 @@ class VoiceCallService : Service() {
         private const val ANSWER_REQUEST = 4403
         private const val REJECT_REQUEST = 4404
         private const val HANGUP_REQUEST = 4405
+        private const val INCOMING_SCREEN_REQUEST = 4406
         private const val TAG = "VitiVoiceService"
     }
 }

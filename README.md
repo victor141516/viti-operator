@@ -18,6 +18,9 @@ IMS and conference audio.
 - Android service calls integrate with the system Telecom concurrency and audio
   model without replacing the default dialer, with a capability fallback for
   Android 7 devices.
+- Native incoming-call controls use Android CallStyle notifications, an
+  eligible lock-screen surface, and the Android-managed heads-up fallback,
+  with stale actions constrained to the exact current service leg.
 - Compatible phones can project a bounded recent/contact call directory to
   Android Auto; active calls use Android Auto's system in-call surface and car
   audio controls. This beta capability currently has restricted test-only

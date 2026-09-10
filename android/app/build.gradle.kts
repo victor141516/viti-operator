@@ -63,6 +63,23 @@ val verifyDebugCarManifest by tasks.registering {
         }
         check("com.viti.operator.car.VitiCarAppService" in contents) { "The projected CarAppService is missing" }
         check("androidx.car.app.category.CALLING" in contents) { "The calling category is missing" }
+        check("android.permission.USE_FULL_SCREEN_INTENT" in contents) {
+            "Incoming service calls must declare the full-screen intent capability"
+        }
+        check("com.viti.operator.IncomingCallActivity" in contents) {
+            "The private incoming-call presentation activity is missing"
+        }
+        val incomingActivity = contents.substringAfter("android:name=\"com.viti.operator.IncomingCallActivity\"")
+            .substringBefore("/>")
+        check("android:exported=\"false\"" in incomingActivity) {
+            "IncomingCallActivity must remain private to explicit app PendingIntents"
+        }
+        check("android:launchMode=\"singleTask\"" in incomingActivity) {
+            "IncomingCallActivity must reuse one task across duplicate call notifications"
+        }
+        check("android:showWhenLocked=\"true\"" in incomingActivity && "android:turnScreenOn=\"true\"" in incomingActivity) {
+            "IncomingCallActivity must be eligible for lock-screen call presentation"
+        }
     }
 }
 

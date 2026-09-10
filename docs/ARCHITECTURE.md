@@ -152,6 +152,43 @@ keeps private VoIP signaling ready. During a call it declares `phoneCall` as
 well. This lifetime is distinct from the remote-SIM authentication foreground
 service.
 
+#### Incoming-call presentation
+
+`VoiceCallService` and `VoiceCallRuntime` remain the only source of truth for
+an Android call. An incoming `CallStyle` notification and the private
+`IncomingCallActivity` are projections of the current immutable leg snapshot;
+neither can create or restore a call. The Activity binds only to an already
+running service, without `BIND_AUTO_CREATE`, and closes unless the supplied leg
+token still identifies an incoming leg in `RINGING` state.
+
+The Activity is a single-task lock-screen surface with Answer and Decline
+controls. Each notification PendingIntent contains the opaque leg token and is
+invalidated when the current token changes. Activity recreation may preserve a
+pending microphone-permission or answer intent in Android saved-instance state,
+but only for that exact token. It rebinds and revalidates the service snapshot
+before consuming the intent. A replacement call starts with clean presentation
+state, so a delayed permission result or stale notification cannot answer it.
+
+Answer, reject, and hang-up operations are serialized per leg across Compose,
+notification, Telecom, and accessory surfaces. Duplicate operations are
+ignored. A leave operation may supersede an answer suspended in SIP or Telecom;
+if that answer is accepted late, the runtime rolls it back instead of exposing
+the old leg as active.
+
+For every still-ringing incoming leg the notification carries Android's
+sanctioned full-screen intent. Android decides whether policy and current
+device state permit the lock-screen Activity or require the expanded heads-up
+fallback. Android 14 and later expose the separate full-screen-intent grant;
+global notification access and the actual `Incoming calls` channel importance
+are independent capabilities. The Connection screen reports these observed
+values without promising a particular OEM presentation. The Viti ringtone is
+owned separately by the service and stops when that local leg leaves `RINGING`.
+
+The manager and conference remain authoritative across devices. All eligible
+clients ring until the backend selects an answer or ends their fork. Losing
+ringing legs receive their normal terminal event and cannot answer afterward;
+clients may subsequently use the existing Join path for the active conference.
+
 #### Android Auto projection
 
 `VitiCarAppService` adds the projected Android Auto `CALLING` category without
@@ -485,7 +522,8 @@ a webhook retry cannot create a second conversation row.
 - Client histories are recovered from disk, not reconstructed from transient
   browser or Android state.
 - Android activity recreation reattaches to the process-owned call service and
-  does not recreate the SIP leg.
+  does not recreate the SIP leg. Pending incoming-call permission state is
+  restored only for the same immutable leg token.
 - Android process death does not restore a local call. The server and engine
   remain authoritative for carrier/conference cleanup and history recovery.
 - Telecom disconnect failures keep the exact leg in a retryable `ENDING` state;
@@ -530,6 +568,7 @@ protected after testing.
 | Shared JsSIP voice layer | Web and Android follow the same SIP/WebRTC behavior | Android voice depends on a controlled WebView |
 | Self-managed Android Telecom | Native concurrency, endpoints and headset actions without becoming the default dialer | API 24-25 and devices without Telecom use a vendor-dependent legacy audio path |
 | Process-owned Android call service | Activity recreation does not destroy a call | Android process death still loses the local SIP leg |
+| Token-validated incoming-call projection | Lock-screen and heads-up actions cannot revive or mutate a stale leg | Final full-screen behavior remains Android/OEM policy |
 | Projected Android Auto calling | A bounded contact/recent directory starts Viti calls and the system supplies the in-call UI | Beta/labs distribution and real audio/control behavior depend on Google Play, the host, vehicle/OEM, and accessory |
 | Server-owned history | Every client sees one consistent timeline | Server storage must be backed up |
 | Lossless per-participant WAV recording | Selected sides can be remixed without transcoding or losing evidence | Recording storage grows with call duration and participant count |
