@@ -115,6 +115,12 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment()}
+	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
+		a.tunnel = engineTunnelState{
+			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
+			Instance: checkpoint.Instance, Generation: checkpoint.Generation, Sequence: checkpoint.Sequence,
+		}
+	}
 	if !strings.EqualFold(strings.TrimSpace(cfg.SIMAuth.Type), "disabled") {
 		a.adaptiveAuth = &AdaptiveAuthenticator{
 			Broker: broker, Fallback: fallbackAuthenticator, FallbackMode: fallbackMode,

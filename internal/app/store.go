@@ -415,6 +415,21 @@ func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uin
 	return next, changedCalls, true, nil
 }
 
+func (s *Store) LatestEngineTunnelCheckpoint() (EngineTunnelCheckpoint, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	var latest EngineTunnelCheckpoint
+	found := false
+	for _, checkpoint := range s.engineTunnels {
+		if !found || checkpoint.UpdatedAt.After(latest.UpdatedAt) {
+			latest = checkpoint
+			found = true
+		}
+	}
+	latest.RetiredGenerations = append([]string(nil), latest.RetiredGenerations...)
+	return latest, found
+}
+
 func (s *Store) GetCall(id string) (Call, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

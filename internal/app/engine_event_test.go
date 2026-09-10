@@ -224,6 +224,9 @@ func TestTunnelTransitionsAreOrderedIdempotentAndDurableAcrossRestart(t *testing
 	server.Close()
 
 	restarted := newApp()
+	if !restarted.tunnel.Seen || !restarted.tunnel.Ready || restarted.tunnel.Generation != "process-two" || restarted.tunnel.Sequence != 1 {
+		t.Fatalf("manager restart did not restore the durable tunnel checkpoint: %#v", restarted.tunnel)
+	}
 	restartedServer := httptest.NewServer(restarted.Handler())
 	defer restartedServer.Close()
 	postTunnelEvent(t, restartedServer.URL, "process-one", 4, false, now.Add(5*time.Second), http.StatusNoContent)
