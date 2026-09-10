@@ -7,6 +7,7 @@ const apiKey = process.env.VITI_TEST_API_KEY || "";
 const destination = process.env.VITI_TEST_DESTINATION || "";
 const barrier = process.env.VITI_BARRIER_PATH || "";
 const requireRinging = process.env.VITI_REQUIRE_RINGING === "1";
+const expectRemoteHangup = process.env.VITI_EXPECT_REMOTE_HANGUP === "1";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 const repoRoot = new URL("..", import.meta.url).pathname.replace(/^\/(.:)/, "$1").replace(/\//g, "\\");
 const composeRoot = process.env.VITI_COMPOSE_ROOT || repoRoot;
@@ -79,6 +80,7 @@ let ringing = false;
 let active = false;
 let bidirectional = false;
 let dtmfForwarded = false;
+let remoteHungup = false;
 let historyFinalized = false;
 let initialFinalized = 0;
 let asteriskLogStart = 0;
@@ -144,14 +146,24 @@ try {
   const newAsteriskLog = asteriskLog(`tail -n +${asteriskLogStart + 1} /var/log/asterisk/full`);
   dtmfForwarded = /Got\s+RTP RFC2833[^\n]*event\s+00000005[^\n]*end\s+1/.test(newAsteriskLog)
     && /Sent RTP DTMF packet to/.test(newAsteriskLog);
-  await delay(1500);
+  if (expectRemoteHangup) {
+    remoteHungup = await waitFor(
+      "remote carrier hangup",
+      () => evaluate("state.localCall === false"),
+      90000,
+    );
+  } else {
+    await delay(1500);
+  }
 } finally {
   if (rtpDebugEnabled) {
     try { asterisk("rtp set debug off"); } catch {}
   }
   try {
-    await evaluate("document.querySelector('#hangup-call').click(); true");
-    await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
+    if (!remoteHungup) {
+      await evaluate("document.querySelector('#hangup-call').click(); true");
+      await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
+    }
     historyFinalized = await waitFor("finalized carrier history", () => evaluate(`${callsFetch}.then(value =>
       value.calls.filter(call => call.peer === ${JSON.stringify(destination)} && Boolean(call.ended_at)).length > ${initialFinalized})`), 35000);
   } catch {
@@ -167,9 +179,10 @@ const result = {
   active: Boolean(active),
   bidirectional: Boolean(bidirectional),
   dtmf_forwarded: Boolean(dtmfForwarded),
+  remote_hangup: expectRemoteHangup ? Boolean(remoteHungup) : null,
   history_finalized: Boolean(historyFinalized),
 };
 console.log(JSON.stringify(result));
 const required = result.registered && result.progressed && result.active
   && result.bidirectional && result.dtmf_forwarded && result.history_finalized;
-if (!required || (requireRinging && !result.ringing)) process.exitCode = 1;
+if (!required || (requireRinging && !result.ringing) || (expectRemoteHangup && !result.remote_hangup)) process.exitCode = 1;
