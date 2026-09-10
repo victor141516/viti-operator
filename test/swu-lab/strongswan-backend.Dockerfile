@@ -33,6 +33,7 @@ RUN cd /usr/src/strongswan && \
 
 COPY engine/strongswan/strongswan.conf /etc/strongswan.conf
 COPY engine/strongswan_adapter.py /usr/local/bin/strongswan_adapter.py
+COPY engine/tunnel_backend.py /usr/local/bin/tunnel_backend.py
 COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
 COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
 COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py

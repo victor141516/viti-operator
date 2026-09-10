@@ -144,9 +144,18 @@ services:
       - python-runtime:/run/vowifi:ro
 
   strongswan-backend:
+    image: ${LAB_STRONGSWAN_BACKEND_IMAGE:-viti-swu-lab-strongswan-backend}
     build:
       context: ../..
       dockerfile: test/swu-lab/strongswan-backend.Dockerfile
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        if [ -n "$${LAB_NAT_GATEWAY:-}" ]; then
+          ip route replace "$${SWU_EPDG}/32" via "$${LAB_NAT_GATEWAY}"
+        fi
+        exec python3 /usr/local/bin/tunnel_backend.py
     depends_on:
       epdg:
         condition: service_started
@@ -184,6 +193,7 @@ services:
         ipv4_address: 172.30.39.20
 
   strongswan-probe:
+    image: viti-swu-lab-strongswan-probe
     build:
       context: ../..
       dockerfile: test/swu-lab/strongswan-backend.Dockerfile

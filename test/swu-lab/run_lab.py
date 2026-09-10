@@ -527,6 +527,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--backend", choices=sorted(BACKEND_SERVICES), required=True)
     parser.add_argument(
+        "--backend-image",
+        help=(
+            "use an already-built production image for the strongSwan backend; "
+            "the lab still builds its independent ePDG, broker, and probes"
+        ),
+    )
+    parser.add_argument(
         "--scenario",
         choices=("all", "attach", "auth-faults", "protocol", "resilience"),
         default="all",
@@ -543,10 +550,28 @@ def main():
         terminated_probe,
     ) = BACKEND_SERVICES[args.backend]
     services = (*COMMON_SERVICES, *BACKEND_SERVICES[args.backend])
+    if args.backend_image:
+        if args.backend != "strongswan":
+            parser.error("--backend-image is only supported with --backend strongswan")
+        COMPOSE_OVERRIDES["LAB_STRONGSWAN_BACKEND_IMAGE"] = args.backend_image
     reset_lab()
     try:
         if not args.no_build:
-            compose("build", *services)
+            build_services = tuple(
+                service for service in services
+                if not args.backend_image or service != backend
+            )
+            compose("build", *build_services)
+        if args.backend_image:
+            inspected = subprocess.run(
+                ["docker", "image", "inspect", args.backend_image],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if inspected.returncode != 0:
+                parser.error(f"backend image does not exist locally: {args.backend_image}")
+            print(f"LAB_PACKAGED_BACKEND_IMAGE={args.backend_image}", flush=True)
         if args.scenario in ("all", "attach"):
             run_attach(backend, connected_probe, lifecycle_probe)
         if args.scenario in ("all", "auth-faults"):
