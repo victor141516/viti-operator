@@ -25,6 +25,9 @@ func TestTopologyViewerIsEmbeddedAndSameOriginEmbeddable(t *testing.T) {
 	if !strings.Contains(recorder.Body.String(), `id="map-viewport"`) {
 		t.Fatal("embedded topology viewer is missing its interactive viewport")
 	}
+	if count := strings.Count(recorder.Body.String(), `/topology-inspector.bundle.js`); count != 1 {
+		t.Fatalf("topology inspector bundle references = %d, want exactly one", count)
+	}
 	csp := recorder.Header().Get("Content-Security-Policy")
 	if !strings.Contains(csp, "frame-ancestors 'self'") {
 		t.Fatalf("viewer cannot be framed by the web app: %q", csp)
@@ -48,13 +51,29 @@ func TestClientHeartbeatIdentifiesRemoteSIMHolder(t *testing.T) {
 		t.Fatalf("heartbeat status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
 	claimSIMForTest(t, a, "android-123", "pixel-agent", true)
-	clients := a.topologyClients(time.Now().UTC())
+	selection, clients := a.topologyClientSnapshot(time.Now().UTC())
 	if len(clients) != 1 || !clients[0].Online || !clients[0].SIMHolder {
 		t.Fatalf("unexpected clients: %#v", clients)
 	}
-	sim := a.topologySIM(RuntimeStatus{}, clients)
+	sim := a.topologySIM(RuntimeStatus{}, clients, selection)
 	if sim.State != "healthy" || sim.HolderClientID != "android-123" {
 		t.Fatalf("unexpected remote SIM topology: %#v", sim)
+	}
+}
+
+func TestTopologySIMUsesTheSameAtomicSelectionAsItsClientSnapshot(t *testing.T) {
+	now := time.Now().UTC()
+	selection := SIMAuthSelection{Mode: "remote", ClientID: "android-one", ClientName: "One", AgentID: "agent-one"}
+	clients := topologyClientsFromPresence([]clientPresence{{
+		ID: "android-one", Kind: "android", Name: "One", AuthAgentID: "agent-one", HasSIM: true,
+		LastSeen: now, AuthLastSeen: now,
+	}}, selection, now)
+	a := newSIMSelectionTestApp(t, nil, "disabled")
+	a.simAuthAssignment = SIMAuthAssignment{ClientID: "android-two", AgentID: "agent-two", UpdatedAt: now}
+
+	sim := a.topologySIM(RuntimeStatus{}, clients, selection)
+	if !sim.Selected || sim.HolderClientID != "android-one" || sim.AuthAgentID != "agent-one" {
+		t.Fatalf("SIM node diverged from its client snapshot: %#v", sim)
 	}
 }
 

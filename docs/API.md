@@ -44,6 +44,21 @@ This is the presentation-neutral source used by both clients. Offline web
 clients remain visible for 10 minutes and offline Android clients for 24 hours;
 the visibility filter does not delete their persistent identity records.
 
+The response identifies the selected authentication source independently from
+the server's ePDG tunnel and IMS registration. A remote Android SIM and its
+matching client node are derived from one atomic presence snapshot. An Android
+client may include volatile `cellular` details. `cellular_status` distinguishes
+`observed`, `stale`, `not_observed`, and `unknown`; each nested field also has
+an `availability` value of `available`, `unknown`, `permission_denied`,
+`unsupported`, or server-derived `stale`. A current report can contain an
+expired nested measurement. Expired values retain only their measurement time,
+not the old operator, registration, technology, or signal value.
+
+The carrier node exposes MCC/MNC only when they can be parsed from the configured
+IMS realm. Cellular serving-network evidence reported by Android is separate
+from ePDG/IMS runtime evidence and does not prove that server traffic uses the
+phone's cellular radio.
+
 ### `POST /api/v1/clients/heartbeat`
 
 Registers presence and device metadata:
@@ -62,6 +77,33 @@ Registers presence and device metadata:
 Android uses `kind: "android"` and supplies an authentication agent ID when it
 can serve SIM challenges. `auth_active` refreshes the active agent lease. A
 valid heartbeat returns `204 No Content`.
+
+Android may also send a complete optional `cellular` snapshot for the same
+default-data subscription used by the SIM authentication engine:
+
+```json
+{
+  "generation": "process-uuid",
+  "generation_started_at": "2026-09-10T12:00:00Z",
+  "sequence": 7,
+  "measured_at": "2026-09-10T12:00:03Z",
+  "subscription_role": "default_data",
+  "home_network": {"availability":"available","operator":"O2","mcc":"214","mnc":"07","measured_at":"2026-09-10T12:00:03Z"},
+  "serving_network": {"availability":"unknown"},
+  "service": {"availability":"available","registration":"in_service","roaming":false,"measured_at":"2026-09-10T12:00:02Z"},
+  "data_access": {"availability":"available","technology":"LTE","measured_at":"2026-09-10T12:00:02Z"},
+  "signal": {"availability":"available","level":3,"dbm":-91,"measured_at":"2026-09-10T12:00:02Z"}
+}
+```
+
+`has_sim` must agree with `subscription_role`: `true` means `default_data` and
+`false` means `none`. Snapshots are ordered by `(generation, sequence)`. The
+server accepts a newly received process generation, retires the previous one,
+and rejects later deliveries from retired generations without comparing client
+wall clocks. Omitting `cellular` preserves the last compatible observation for
+older clients; changing the same client ID between Android and web clears it.
+Cellular observations and retired-generation ordering are memory-only and are
+discarded on manager restart.
 
 ## Authentication-agent assignment
 

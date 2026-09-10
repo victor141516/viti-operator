@@ -21,16 +21,19 @@ class VitiApi(private val settings: ServerSettings) {
     }
 
     suspend fun heartbeat(identity: ClientIdentity, authActive: Boolean = false) {
+        val currentIdentity = identity.withCurrentCellularObservation()
+        val payload = JSONObject()
+            .put("id", currentIdentity.id)
+            .put("kind", "android")
+            .put("name", currentIdentity.name)
+            .put("auth_agent_id", currentIdentity.id)
+            .put("has_sim", currentIdentity.hasSim)
+            .put("auth_active", authActive)
+        currentIdentity.cellular?.let { payload.put("cellular", it.toJson()) }
         rawRequest(
             path = "/api/v1/clients/heartbeat",
             method = "POST",
-            body = JSONObject()
-                .put("id", identity.id)
-                .put("kind", "android")
-                .put("name", identity.name)
-                .put("auth_agent_id", identity.id)
-                .put("has_sim", identity.hasSim)
-                .put("auth_active", authActive),
+            body = payload,
             acceptedStatuses = setOf(204),
         )
     }
@@ -67,6 +70,9 @@ class VitiApi(private val settings: ServerSettings) {
                     mode = sim?.optString("mode").orEmpty().ifBlank { "disabled" },
                     holderClientId = sim?.optString("holder_client_id").orEmpty(),
                     authAgentId = sim?.optString("auth_agent_id").orEmpty(),
+                    selected = sim?.optBoolean("selected") == true,
+                    cellularStatus = sim?.optString("cellular_status").orEmpty().ifBlank { "unknown" },
+                    cellular = cellularFromJson(sim?.optJSONObject("cellular")),
                 )
             },
             epdg = topologyNodeFromJson(body.optJSONObject("epdg"), "ePDG tunnel"),
@@ -81,6 +87,7 @@ class VitiApi(private val settings: ServerSettings) {
                     simHolder = client.optBoolean("sim_holder"),
                     online = client.optBoolean("online"),
                     lastSeen = client.optString("last_seen"),
+                    cellular = cellularFromJson(client.optJSONObject("cellular")),
                 )
             },
         )
@@ -378,7 +385,98 @@ class VitiApi(private val settings: ServerSettings) {
         state = body?.optString("state").orEmpty().ifBlank { "idle" },
         label = body?.optString("label").orEmpty().ifBlank { fallbackLabel },
         detail = body?.optString("detail").orEmpty(),
+        evidence = body?.optString("evidence").orEmpty(),
+        observedAt = body?.optString("observed_at").orEmpty(),
+        mcc = body?.optString("mcc").orEmpty(),
+        mnc = body?.optString("mnc").orEmpty(),
     )
+
+    private fun cellularFromJson(body: JSONObject?): CellularObservation? = body?.let {
+        CellularObservation(
+            generation = it.optString("generation"),
+            generationStartedAt = it.optString("generation_started_at"),
+            sequence = it.optLong("sequence"),
+            measuredAt = it.optString("measured_at"),
+            subscriptionRole = it.optString("subscription_role"),
+            homeNetwork = cellularNetworkFromJson(it.optJSONObject("home_network")),
+            servingNetwork = cellularNetworkFromJson(it.optJSONObject("serving_network")),
+            service = it.optJSONObject("service").let { service ->
+                CellularServiceDetails(
+                    availability = service?.optString("availability").orEmpty().ifBlank { "unknown" },
+                    registration = service?.optString("registration").orEmpty(),
+                    roaming = service?.takeIf { value -> value.has("roaming") }?.optBoolean("roaming"),
+                    measuredAt = service?.optString("measured_at").orEmpty(),
+                )
+            },
+            dataAccess = it.optJSONObject("data_access").let { access ->
+                CellularDataAccessDetails(
+                    availability = access?.optString("availability").orEmpty().ifBlank { "unknown" },
+                    technology = access?.optString("technology").orEmpty(),
+                    measuredAt = access?.optString("measured_at").orEmpty(),
+                )
+            },
+            signal = it.optJSONObject("signal").let { signal ->
+                CellularSignalDetails(
+                    availability = signal?.optString("availability").orEmpty().ifBlank { "unknown" },
+                    level = signal?.takeIf { value -> value.has("level") }?.optInt("level"),
+                    dbm = signal?.takeIf { value -> value.has("dbm") }?.optInt("dbm"),
+                    measuredAt = signal?.optString("measured_at").orEmpty(),
+                )
+            },
+            receivedAt = it.optString("received_at"),
+            stale = it.optBoolean("stale"),
+        )
+    }
+
+    private fun cellularNetworkFromJson(body: JSONObject?): CellularNetworkDetails = CellularNetworkDetails(
+        availability = body?.optString("availability").orEmpty().ifBlank { "unknown" },
+        operator = body?.optString("operator").orEmpty(),
+        mcc = body?.optString("mcc").orEmpty(),
+        mnc = body?.optString("mnc").orEmpty(),
+        measuredAt = body?.optString("measured_at").orEmpty(),
+    )
+
+    private fun CellularObservation.toJson(): JSONObject = JSONObject()
+        .put("generation", generation)
+        .put("generation_started_at", generationStartedAt)
+        .put("sequence", sequence)
+        .put("measured_at", measuredAt)
+        .put("subscription_role", subscriptionRole)
+        .put("home_network", homeNetwork.toJson())
+        .put("serving_network", servingNetwork.toJson())
+        .put("service", service.toJson())
+        .put("data_access", dataAccess.toJson())
+        .put("signal", signal.toJson())
+
+    private fun CellularNetworkDetails.toJson(): JSONObject = JSONObject()
+        .put("availability", availability)
+        .putIfNotBlank("operator", operator)
+        .putIfNotBlank("mcc", mcc)
+        .putIfNotBlank("mnc", mnc)
+        .putIfNotBlank("measured_at", measuredAt)
+
+    private fun CellularServiceDetails.toJson(): JSONObject = JSONObject()
+        .put("availability", availability)
+        .putIfNotBlank("registration", registration)
+        .apply { roaming?.let { put("roaming", it) } }
+        .putIfNotBlank("measured_at", measuredAt)
+
+    private fun CellularDataAccessDetails.toJson(): JSONObject = JSONObject()
+        .put("availability", availability)
+        .putIfNotBlank("technology", technology)
+        .putIfNotBlank("measured_at", measuredAt)
+
+    private fun CellularSignalDetails.toJson(): JSONObject = JSONObject()
+        .put("availability", availability)
+        .apply {
+            level?.let { put("level", it) }
+            dbm?.let { put("dbm", it) }
+        }
+        .putIfNotBlank("measured_at", measuredAt)
+
+    private fun JSONObject.putIfNotBlank(name: String, value: String): JSONObject = apply {
+        if (value.isNotBlank()) put(name, value)
+    }
 
     private fun <T> JSONArray?.mapObjects(transform: (JSONObject) -> T): List<T> {
         if (this == null) return emptyList()

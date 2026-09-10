@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"regexp"
 	"sort"
@@ -19,13 +20,15 @@ var topologyIdentifierPattern = regexp.MustCompile(`^[a-zA-Z0-9._:-]+$`)
 var mobileRealmPattern = regexp.MustCompile(`(?i)mnc([0-9]{3})\.mcc([0-9]{3})`)
 
 type clientPresence struct {
-	ID           string
-	Kind         string
-	Name         string
-	AuthAgentID  string
-	HasSIM       bool
-	LastSeen     time.Time
-	AuthLastSeen time.Time
+	ID                         string
+	Kind                       string
+	Name                       string
+	AuthAgentID                string
+	HasSIM                     bool
+	LastSeen                   time.Time
+	AuthLastSeen               time.Time
+	Cellular                   *CellularObservation
+	RetiredCellularGenerations []string
 }
 
 type KnownClient struct {
@@ -38,27 +41,35 @@ type KnownClient struct {
 }
 
 type TopologyClient struct {
-	ID          string    `json:"id"`
-	Kind        string    `json:"kind"`
-	Name        string    `json:"name"`
-	AuthAgentID string    `json:"auth_agent_id,omitempty"`
-	HasSIM      bool      `json:"has_sim"`
-	SIMHolder   bool      `json:"sim_holder"`
-	Online      bool      `json:"online"`
-	LastSeen    time.Time `json:"last_seen"`
+	ID          string               `json:"id"`
+	Kind        string               `json:"kind"`
+	Name        string               `json:"name"`
+	AuthAgentID string               `json:"auth_agent_id,omitempty"`
+	HasSIM      bool                 `json:"has_sim"`
+	SIMHolder   bool                 `json:"sim_holder"`
+	Online      bool                 `json:"online"`
+	LastSeen    time.Time            `json:"last_seen"`
+	Cellular    *CellularObservation `json:"cellular,omitempty"`
 }
 
 type TopologyNode struct {
-	State  string `json:"state"`
-	Label  string `json:"label"`
-	Detail string `json:"detail,omitempty"`
+	State      string     `json:"state"`
+	Label      string     `json:"label"`
+	Detail     string     `json:"detail,omitempty"`
+	Evidence   string     `json:"evidence,omitempty"`
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+	MCC        string     `json:"mcc,omitempty"`
+	MNC        string     `json:"mnc,omitempty"`
 }
 
 type TopologySIM struct {
 	TopologyNode
-	Mode           string `json:"mode"`
-	HolderClientID string `json:"holder_client_id,omitempty"`
-	AuthAgentID    string `json:"auth_agent_id,omitempty"`
+	Mode           string               `json:"mode"`
+	HolderClientID string               `json:"holder_client_id,omitempty"`
+	AuthAgentID    string               `json:"auth_agent_id,omitempty"`
+	Selected       bool                 `json:"selected"`
+	CellularStatus string               `json:"cellular_status"`
+	Cellular       *CellularObservation `json:"cellular,omitempty"`
 }
 
 type TopologyResponse struct {
@@ -84,12 +95,13 @@ type SIMAuthAssignmentState struct {
 
 func (a *App) clientHeartbeat(w http.ResponseWriter, r *http.Request) {
 	var request struct {
-		ID          string `json:"id"`
-		Kind        string `json:"kind"`
-		Name        string `json:"name"`
-		AuthAgentID string `json:"auth_agent_id"`
-		HasSIM      bool   `json:"has_sim"`
-		AuthActive  bool   `json:"auth_active"`
+		ID          string          `json:"id"`
+		Kind        string          `json:"kind"`
+		Name        string          `json:"name"`
+		AuthAgentID string          `json:"auth_agent_id"`
+		HasSIM      bool            `json:"has_sim"`
+		AuthActive  bool            `json:"auth_active"`
+		Cellular    json.RawMessage `json:"cellular"`
 	}
 	if err := readJSON(r, &request, 8<<10); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -113,17 +125,38 @@ func (a *App) clientHeartbeat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := time.Now().UTC()
+	cellular, cellularPresent, err := decodeCellularHeartbeat(request.Cellular, now)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if cellularPresent && request.Kind != "android" {
+		writeError(w, http.StatusBadRequest, "only Android clients can report cellular observations")
+		return
+	}
+	if cellularPresent && (cellular.SubscriptionRole == "default_data") != request.HasSIM {
+		writeError(w, http.StatusBadRequest, "cellular subscription_role must agree with has_sim")
+		return
+	}
 	a.stateMu.Lock()
 	previous := a.clients[request.ID]
+	if previous.Kind != "" && previous.Kind != request.Kind {
+		previous.Cellular = nil
+		previous.RetiredCellularGenerations = nil
+	}
 	authLastSeen := previous.AuthLastSeen
 	if request.AuthActive {
 		authLastSeen = now
 	} else if !request.HasSIM {
 		authLastSeen = time.Time{}
 	}
+	if cellularPresent {
+		applyCellularObservation(&previous, cellular)
+	}
 	a.clients[request.ID] = clientPresence{
 		ID: request.ID, Kind: request.Kind, Name: request.Name,
 		AuthAgentID: request.AuthAgentID, HasSIM: request.HasSIM, LastSeen: now, AuthLastSeen: authLastSeen,
+		Cellular: previous.Cellular, RetiredCellularGenerations: previous.RetiredCellularGenerations,
 	}
 	a.stateMu.Unlock()
 	if a.store != nil {
@@ -198,30 +231,44 @@ func (a *App) setSIMAuthAssignment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) effectiveSIMAuthSelection(now time.Time) SIMAuthSelection {
+	fallbackMode, fallbackAvailable := a.simAuthFallback()
 	a.stateMu.RLock()
 	assignment := a.simAuthAssignment
 	client, known := a.clients[assignment.ClientID]
 	a.stateMu.RUnlock()
+	return effectiveSIMAuthSelectionFrom(assignment, client, known, now, fallbackMode, fallbackAvailable)
+}
+
+func (a *App) simAuthFallback() (string, bool) {
+	if a.adaptiveAuth != nil && a.adaptiveAuth.Fallback != nil {
+		return a.adaptiveAuth.FallbackMode, true
+	}
+	return "disabled", false
+}
+
+func effectiveSIMAuthSelectionFrom(assignment SIMAuthAssignment, client clientPresence, known bool, now time.Time, fallbackMode string, fallbackAvailable bool) SIMAuthSelection {
 	if known && assignment.ClientID != "" && assignment.AgentID != "" && client.Kind == "android" && client.HasSIM &&
 		client.AuthAgentID == assignment.AgentID && !client.AuthLastSeen.IsZero() && now.Sub(client.AuthLastSeen) <= clientOnlineWindow {
 		return SIMAuthSelection{Mode: "remote", ClientID: client.ID, ClientName: client.Name, AgentID: assignment.AgentID}
 	}
-	if a.adaptiveAuth != nil && a.adaptiveAuth.Fallback != nil {
-		return SIMAuthSelection{Mode: a.adaptiveAuth.FallbackMode}
+	if fallbackAvailable {
+		return SIMAuthSelection{Mode: fallbackMode}
 	}
 	return SIMAuthSelection{Mode: "disabled"}
 }
 
 func (a *App) currentSIMAuthAssignmentState(now time.Time) SIMAuthAssignmentState {
-	selection := a.effectiveSIMAuthSelection(now)
+	fallbackMode, fallbackAvailable := a.simAuthFallback()
 	a.stateMu.RLock()
 	assignment := a.simAuthAssignment
+	client, known := a.clients[assignment.ClientID]
 	a.stateMu.RUnlock()
+	selection := effectiveSIMAuthSelectionFrom(assignment, client, known, now, fallbackMode, fallbackAvailable)
 	return SIMAuthAssignmentState{
 		Mode: selection.Mode, ClientID: selection.ClientID, ClientName: selection.ClientName,
 		AgentID: selection.AgentID, ClaimedClientID: assignment.ClientID, ClaimedAgentID: assignment.AgentID,
 		UpdatedAt:         assignment.UpdatedAt,
-		FallbackAvailable: a.adaptiveAuth != nil && a.adaptiveAuth.Fallback != nil,
+		FallbackAvailable: fallbackAvailable,
 	}
 }
 
@@ -230,18 +277,36 @@ func (a *App) topology(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	status, _ := a.runtimeStatus(ctx)
 	now := time.Now().UTC()
-	clients := a.topologyClients(now)
+	selection, clients := a.topologyClientSnapshot(now)
 	registrationEnabled := a.store.IMSRegistrationEnabled()
 
 	response := TopologyResponse{
 		GeneratedAt: now,
-		Server:      TopologyNode{State: "healthy", Label: "Viti server", Detail: "API available"},
+		Server:      TopologyNode{State: "healthy", Label: "Viti server", Detail: "API available", Evidence: "Manager API", ObservedAt: observedTime(now)},
 		EPDG:        topologyRuntimeNode("ePDG tunnel", status.TunnelReady, true, status.Detail),
 		IMS:         topologyRuntimeNode("IMS registration", status.IMSReady, registrationEnabled, status.Detail),
 		Clients:     clients,
 	}
-	response.SIM = a.topologySIM(status, clients)
-	response.Operator = TopologyNode{State: response.IMS.State, Label: operatorLabel(a.cfg.Telephony.AMI.Realm)}
+	response.SIM = a.topologySIM(status, clients, selection)
+	response.IMS.Evidence, response.IMS.ObservedAt = runtimeEvidence(status.Provider), observedTime(status.UpdatedAt)
+	a.stateMu.RLock()
+	tunnel := a.tunnel
+	a.stateMu.RUnlock()
+	if tunnel.Seen {
+		response.EPDG.Evidence, response.EPDG.ObservedAt = "Engine tunnel event", observedTime(tunnel.UpdatedAt)
+	} else {
+		response.EPDG.Evidence, response.EPDG.ObservedAt = "Telephony runtime", observedTime(status.UpdatedAt)
+	}
+	mcc, mnc := mobileNetworkCodes(a.cfg.Telephony.AMI.Realm)
+	operatorEvidence := "Carrier identity is not available; registration from " + runtimeEvidence(status.Provider)
+	if mcc != "" && mnc != "" {
+		operatorEvidence = "Carrier identity from configured IMS realm; registration from " + runtimeEvidence(status.Provider)
+	}
+	response.Operator = TopologyNode{
+		State: response.IMS.State, Label: operatorLabel(a.cfg.Telephony.AMI.Realm),
+		Evidence:   operatorEvidence,
+		ObservedAt: observedTime(status.UpdatedAt), MCC: mcc, MNC: mnc,
+	}
 	switch response.Operator.State {
 	case "healthy":
 		response.Operator.Detail = "Line registered"
@@ -254,11 +319,27 @@ func (a *App) topology(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) topologyClients(now time.Time) []TopologyClient {
-	selection := a.effectiveSIMAuthSelection(now)
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
-	result := make([]TopologyClient, 0, len(a.clients))
+	_, clients := a.topologyClientSnapshot(now)
+	return clients
+}
+
+func (a *App) topologyClientSnapshot(now time.Time) (SIMAuthSelection, []TopologyClient) {
+	fallbackMode, fallbackAvailable := a.simAuthFallback()
+	a.stateMu.RLock()
+	assignment := a.simAuthAssignment
+	selectedClient, selectedKnown := a.clients[assignment.ClientID]
+	selection := effectiveSIMAuthSelectionFrom(assignment, selectedClient, selectedKnown, now, fallbackMode, fallbackAvailable)
+	presences := make([]clientPresence, 0, len(a.clients))
 	for _, client := range a.clients {
+		presences = append(presences, client)
+	}
+	a.stateMu.RUnlock()
+	return selection, topologyClientsFromPresence(presences, selection, now)
+}
+
+func topologyClientsFromPresence(presences []clientPresence, selection SIMAuthSelection, now time.Time) []TopologyClient {
+	result := make([]TopologyClient, 0, len(presences))
+	for _, client := range presences {
 		age := now.Sub(client.LastSeen)
 		if client.LastSeen.IsZero() || age > topologyRetention(client.Kind) {
 			continue
@@ -268,6 +349,7 @@ func (a *App) topologyClients(now time.Time) []TopologyClient {
 			AuthAgentID: client.AuthAgentID, HasSIM: client.HasSIM,
 			SIMHolder: selection.Mode == "remote" && client.ID == selection.ClientID,
 			Online:    age <= clientOnlineWindow, LastSeen: client.LastSeen,
+			Cellular: cellularSnapshot(client.Cellular, now, age > clientOnlineWindow),
 		})
 	}
 	sort.Slice(result, func(i, j int) bool {
@@ -289,8 +371,7 @@ func topologyRetention(kind string) time.Duration {
 	return webTopologyRetention
 }
 
-func (a *App) topologySIM(status RuntimeStatus, clients []TopologyClient) TopologySIM {
-	selection := a.effectiveSIMAuthSelection(time.Now().UTC())
+func (a *App) topologySIM(status RuntimeStatus, clients []TopologyClient, selection SIMAuthSelection) TopologySIM {
 	mode := selection.Mode
 	switch mode {
 	case "openstick":
@@ -299,22 +380,28 @@ func (a *App) topologySIM(status RuntimeStatus, clients []TopologyClient) Topolo
 		if status.SIMReady {
 			state, detail = "healthy", "SIM accessible over USB"
 		}
-		return TopologySIM{TopologyNode: TopologyNode{State: state, Label: "SIM · 4G modem", Detail: detail}, Mode: mode}
+		return TopologySIM{
+			TopologyNode: TopologyNode{State: state, Label: "SIM · 4G modem", Detail: detail, Evidence: "OpenStick ADB readiness", ObservedAt: observedTime(status.UpdatedAt)},
+			Mode:         mode, Selected: true, CellularStatus: "not_observed",
+		}
 	case "remote":
 		for _, client := range clients {
 			if client.SIMHolder {
 				return TopologySIM{
-					TopologyNode: TopologyNode{State: "healthy", Label: "SIM · " + client.Name, Detail: "AKA authentication over Tailscale"},
-					Mode:         mode, HolderClientID: client.ID, AuthAgentID: selection.AgentID,
+					TopologyNode: TopologyNode{State: "healthy", Label: "SIM · " + client.Name, Detail: "AKA authentication over Tailscale", Evidence: "Active Android agent lease", ObservedAt: observedTime(client.LastSeen)},
+					Mode:         mode, HolderClientID: client.ID, AuthAgentID: selection.AgentID, Selected: true,
+					CellularStatus: cellularStatus(client.Cellular), Cellular: client.Cellular,
 				}
 			}
 		}
 	case "command":
-		return TopologySIM{TopologyNode: topologyRuntimeNode("SIM · external adapter", status.SIMReady, true, ""), Mode: mode}
+		node := topologyRuntimeNode("SIM · external adapter", status.SIMReady, true, "")
+		node.Evidence, node.ObservedAt = "External authentication adapter", observedTime(status.UpdatedAt)
+		return TopologySIM{TopologyNode: node, Mode: mode, Selected: true, CellularStatus: "not_observed"}
 	default:
-		return TopologySIM{TopologyNode: TopologyNode{State: "failed", Label: "No authentication source", Detail: "Connect the modem or enable a phone SIM"}, Mode: "disabled"}
+		return TopologySIM{TopologyNode: TopologyNode{State: "failed", Label: "No authentication source", Detail: "Connect the modem or enable a phone SIM"}, Mode: "disabled", CellularStatus: "unknown"}
 	}
-	return TopologySIM{TopologyNode: TopologyNode{State: "failed", Label: "No authentication source", Detail: "Connect the modem or enable a phone SIM"}, Mode: "disabled"}
+	return TopologySIM{TopologyNode: TopologyNode{State: "failed", Label: "No authentication source", Detail: "Connect the modem or enable a phone SIM"}, Mode: "disabled", CellularStatus: "unknown"}
 }
 
 func topologyRuntimeNode(label string, ready, enabled bool, detail string) TopologyNode {
@@ -347,9 +434,25 @@ func conciseTopologyDetail(detail string) string {
 }
 
 func operatorLabel(realm string) string {
-	match := mobileRealmPattern.FindStringSubmatch(strings.TrimSpace(realm))
-	if len(match) == 3 {
-		return "Carrier · MCC " + match[2] + " / MNC " + match[1]
+	mcc, mnc := mobileNetworkCodes(realm)
+	if mcc != "" && mnc != "" {
+		return "Carrier · MCC " + mcc + " / MNC " + mnc
 	}
 	return "Mobile carrier"
+}
+
+func mobileNetworkCodes(realm string) (string, string) {
+	match := mobileRealmPattern.FindStringSubmatch(strings.TrimSpace(realm))
+	if len(match) == 3 {
+		return match[2], match[1]
+	}
+	return "", ""
+}
+
+func observedTime(value time.Time) *time.Time {
+	if value.IsZero() {
+		return nil
+	}
+	copy := value
+	return &copy
 }
