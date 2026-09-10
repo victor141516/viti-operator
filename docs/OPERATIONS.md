@@ -139,6 +139,27 @@ Use the Connection screen for SIM, ePDG, IMS, carrier, and client presence.
 Process health can be green while line health is red; that is expected when the
 SIM is absent.
 
+Tap or hover a SIM, phone, carrier, ePDG, or IMS node to inspect its evidence
+and observation time. Map labels stay intentionally short. For a selected remote
+Android SIM, the detail panel can show home/serving networks, service state,
+connected radio technology, and signal only when Android supplied those values.
+`Not reported`, `Phone permission not granted`, `Not supported`, `Measurement
+expired`, and an offline/stale report are different states. A current report
+does not make an older nested radio measurement current.
+
+On Android, grant **Phone** permission from the Connection screen if protected
+service and data-access details are desired. Denying it does not prevent every
+device from reporting public operator or signal information, and it does not by
+itself disable remote AKA. The app observes only the default-data subscription
+used for AKA and deliberately does not upload subscriber identifiers, phone
+numbers, SIM slots, cell identity, or location.
+
+Carrier identity parsed from the configured IMS realm and Android's serving
+network are separate evidence. Likewise, a green phone cellular-service row
+does not establish that the server ePDG tunnel or IMS registration is healthy;
+use those dedicated nodes for the actual server carrier path. OpenStick exposes
+SIM/APDU readiness only, not modem radio coverage.
+
 The Android remote authentication service must remain allowed to run in the
 background. On vendor Android builds, disable battery optimization for Viti
 Operator if the agent stops polling while the screen is off.

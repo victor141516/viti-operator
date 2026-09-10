@@ -28,7 +28,9 @@ IMS and conference audio.
 - Browser-local microphone and speaker preferences with safe default fallback
   and automatic restoration when a remembered device reconnects.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
-- Shared connection topology with live device presence.
+- Shared connection topology with live device presence, selected SIM-auth source,
+  and evidence-backed Android carrier, registration, access-technology, and
+  signal details when the OS exposes them.
 - Optional lossless call recordings with independently selectable microphone tracks,
   a seekable timeline, participant-presence indicators, 1x/1.5x/2x playback and
   selected-track WAV downloads.

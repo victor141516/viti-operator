@@ -317,6 +317,38 @@ normalized model is rendered by both the web application and Android. Last-seen
 timestamps are checkpointed at most once per minute per unchanged client to
 avoid rewriting the complete state file on every heartbeat.
 
+Android heartbeats can carry an optional privacy-bounded cellular observation
+for the exact default-data subscription used by remote AKA. The observation may
+contain home and serving operator names/MCC/MNC, Android service registration,
+roaming, connected data technology, and Android's normalized signal level/dBm.
+It never contains a phone number, IMSI, ICCID, SIM slot, cell identity, or
+location. `READ_PHONE_STATE` gates protected service and access details; absent
+permission, unsupported APIs, unknown values, and stale measurements remain
+distinct instead of being inferred as healthy.
+
+The Android process owns one subscription-bound telephony listener. API 31 and
+later use `TelephonyCallback`; API 24–30 use `PhoneStateListener`. Subscription
+or permission changes increment a binding revision, clear samples from the old
+binding, and ignore late callbacks carrying the retired revision. Snapshot
+capture and sequence allocation are serialized, so concurrent UI and remote
+agent heartbeats cannot publish an older capture with a newer sequence.
+
+The manager validates complete snapshots before changing presence. Sequence is
+monotonic within one random process generation; the first newly received
+generation retires the preceding generation, and delayed requests from retired
+generations are rejected without trusting the phone's wall clock. These samples
+and generation tombstones are intentionally volatile. Manager restart removes
+them, while persisted client identity and authentication assignment remain.
+Compatible clients that omit the new field do not erase a recent sample; reuse
+of an ID by a different client kind does.
+
+Report freshness uses server receipt time. Available nested measurements also
+expire independently after five minutes using their age relative to the report
+plus elapsed server time. The topology then removes the expired value, retains
+its last measurement timestamp, and marks that field `stale`. The authentication
+selection, SIM-holder flags, and SIM node are produced from one atomic copy of
+assignment and presence state.
+
 ## SIM authentication arbitration
 
 Authentication mode is dynamic:
@@ -332,6 +364,12 @@ Authentication mode is dynamic:
 The same selected provider handles challenges originating from both the SWu
 EAP-AKA exchange and IMS SIP AKA. Role changes are persisted and published to
 all clients. A phone that loses ownership stops its remote agent automatically.
+
+Cellular observations describe only the selected phone subscription. They do
+not participate in authentication arbitration and do not imply that the
+server's carrier path uses that phone radio. The ePDG and IMS nodes continue to
+come from the server telephony runtime. An OpenStick fallback is reported as an
+APDU/SIM reader because the manager does not observe its cellular radio.
 
 ### Remote Android AKA flow
 
