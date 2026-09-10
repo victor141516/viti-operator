@@ -9,10 +9,11 @@ The test subscriber and Milenage material in this directory are public,
 non-production fixtures. Never add a real IMSI, K, OP, OPc or captured carrier
 challenge here.
 
-The initial milestone covers deterministic attach, lifecycle events, inner
-address and P-CSCF assignment, route isolation, and real bidirectional UDP and
-TCP transport. Fault injection and rekey scenarios are added to the same
-Compose topology rather than special-cased in either backend.
+The laboratory covers deterministic attach, lifecycle events, inner address
+and P-CSCF assignment, route isolation, bidirectional transport (including
+IPv6 fragmentation and a large TCP stream), authentication faults, NAT-T,
+keepalive/DPD, rekeys and an operator-initiated deletion. Every scenario uses
+the same Compose topology rather than special-casing either backend.
 
 Run the external suite from the repository root:
 
@@ -30,5 +31,13 @@ legacy expected failure, not behavior that the strongSwan backend may copy.
 The default `all` scenario also drives the AKA broker through HTTP 503,
 response timeout and AUTS synchronization-failure modes. It verifies failure
 state externally and proves that a new backend generation attaches after the
-provider returns. Use `--scenario attach` or `--scenario auth-faults` to run a
-bounded subset.
+provider returns. The protocol scenarios capture an RFC 3948 NAT-T keepalive,
+observe a DPD INFORMATIONAL round trip, verify client-initiated CHILD and IKE
+rekeys by their changed SPIs, exercise responder-initiated rekeys, and require
+an exact lifecycle after an operator DELETE. Use `--scenario attach`,
+`--scenario auth-faults`, or `--scenario protocol` to run a bounded subset.
+
+The legacy Python backend rejects responder-initiated CHILD and IKE rekeys and
+emits a duplicate `tunnel_down` during a clean local stop. These are explicit
+expected failures in `baselines/python.json`; they remain mandatory passes for
+the strongSwan backend.

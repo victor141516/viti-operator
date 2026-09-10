@@ -83,7 +83,17 @@ def echo(sock_type, payload):
         else:
             sock.connect((EXPECTED_PCSCF, ECHO_PORT))
             sock.sendall(payload)
-            received = sock.recv(len(payload) + 1)
+            chunks = []
+            remaining = len(payload)
+            while remaining:
+                chunk = sock.recv(remaining)
+                if not chunk:
+                    raise AssertionError(
+                        f"TCP echo closed with {remaining} byte(s) still missing"
+                    )
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            received = b"".join(chunks)
     if received != payload:
         raise AssertionError(f"echo mismatch: {received!r} != {payload!r}")
 
@@ -115,6 +125,8 @@ def probe_connected():
 
     echo(socket.SOCK_DGRAM, b"viti-swu-lab-udp")
     echo(socket.SOCK_STREAM, b"viti-swu-lab-tcp")
+    echo(socket.SOCK_DGRAM, bytes(range(256)) * 16)
+    echo(socket.SOCK_STREAM, bytes(range(256)) * 512)
     print(f"LAB_BACKEND_OK={EXPECTED_BACKEND}")
 
 
@@ -148,6 +160,17 @@ def probe_failed_attach():
     print(f"LAB_FAILED_ATTACH_OK={EXPECTED_BACKEND}")
 
 
+def probe_terminated():
+    observation = wait_for_down()
+    assert observation.backend == EXPECTED_BACKEND
+    transitions = load_transitions()
+    validate_transition_sequence(transitions)
+    assert [event["event"] for event in transitions] == [
+        "tunnel_start", "tunnel_up", "tunnel_down"
+    ]
+    print(f"LAB_OPERATOR_DELETE_OK={EXPECTED_BACKEND}")
+
+
 def main():
     if MODE == "connected":
         probe_connected()
@@ -155,6 +178,8 @@ def main():
         probe_lifecycle()
     elif MODE == "failed_attach":
         probe_failed_attach()
+    elif MODE == "terminated":
+        probe_terminated()
     else:
         raise ValueError(f"unknown LAB_PROBE_MODE: {MODE}")
 

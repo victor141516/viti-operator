@@ -45,6 +45,12 @@ services:
       SWU_TS_MODE: auto
       SWU_TUN_MTU: "1400"
       SWU_IKE_RETRANS_TIMEOUTS: 1,2,4
+      SWU_LIVENESS_PERIOD: "${LAB_SWU_LIVENESS_PERIOD:-20}"
+      SWU_LIVENESS_RETRIES: "${LAB_SWU_LIVENESS_RETRIES:-4}"
+      SWU_NATT_KEEPALIVE: "${LAB_SWU_NATT_KEEPALIVE:-20}"
+      SWU_CHILD_REKEY_MINUTES: "${LAB_SWU_CHILD_REKEY_MINUTES:-30}"
+      SWU_IKE_REKEY_MINUTES: "${LAB_SWU_IKE_REKEY_MINUTES:-45}"
+      SWU_REKEY_TIMEOUT: "${LAB_SWU_REKEY_TIMEOUT:-10}"
       SWU_REDACT_SECRETS: "1"
       VOWIFI_RUNDIR: /run/vowifi
       VITI_EVENT_OUTBOX_DIR: /run/vowifi/event-outbox
@@ -92,6 +98,20 @@ services:
     environment:
       LAB_EXPECTED_BACKEND: python
       LAB_PROBE_MODE: failed_attach
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - python-runtime:/run/vowifi:ro
+
+  python-terminated-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/python-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: python
+      LAB_PROBE_MODE: terminated
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
     volumes:

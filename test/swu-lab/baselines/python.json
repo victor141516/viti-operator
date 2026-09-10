@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "backend": "python",
-  "scenario": "deterministic_attach_transport_clean_stop",
+  "scenario": "deterministic_swu_black_box",
   "fixture": {
     "imsi": "001010123456789",
     "inner_ip": "2001:db8:39:100::1",
@@ -18,11 +18,20 @@
     "outer_route_isolation",
     "udp_bidirectional",
     "tcp_bidirectional",
+    "ipv6_fragmented_udp_bidirectional",
+    "large_tcp_bidirectional",
     "terminal_down_status",
     "authentication_agent_unavailable",
     "authentication_agent_timeout",
     "authentication_provider_recovery",
-    "auts_synchronization_response"
+    "auts_synchronization_response",
+    "nat_t_udp_encapsulation",
+    "rfc3948_nat_t_keepalive",
+    "dpd_informational_round_trip",
+    "client_child_sa_rekey",
+    "client_ike_sa_rekey",
+    "operator_delete",
+    "operator_delete_exact_lifecycle"
   ],
   "lifecycle": [
     "tunnel_start",
@@ -38,6 +47,16 @@
         "tunnel_up",
         "tunnel_down"
       ],
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "responder_child_sa_rekey",
+      "contract_requirement": "complete a responder-initiated CHILD SA rekey without losing transport",
+      "strongswan_must_pass": true
+    },
+    {
+      "id": "responder_ike_sa_rekey",
+      "contract_requirement": "complete a responder-initiated IKE SA rekey without losing transport",
       "strongswan_must_pass": true
     }
   ],
