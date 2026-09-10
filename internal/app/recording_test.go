@@ -141,10 +141,52 @@ func TestRecordingTrackTimingUsesCallOffsetAndActualWAVDuration(t *testing.T) {
 	application := &App{cfg: Config{Recordings: RecordingsConfig{Directory: directory}}}
 	track := application.recordingTrackTiming(
 		Call{StartedAt: start},
-		RecordingTrack{File: filepath.Join(callID, "late.wav"), CreatedAt: start.Add(5 * time.Second)},
+		RecordingTrack{Role: "client", File: filepath.Join(callID, "late.wav"), CreatedAt: start.Add(5 * time.Second)},
 	)
 	if track.OffsetMS != 5_000 || track.DurationMS != 500 {
 		t.Fatalf("timing = offset %dms, duration %dms; want 5000ms and 500ms", track.OffsetMS, track.DurationMS)
+	}
+}
+
+func TestFinalizedClientRecordingKeepsParticipantJoinOffset(t *testing.T) {
+	start := time.Now().UTC()
+	end := start.Add(10 * time.Second)
+	application := &App{}
+	track := application.recordingTrackTiming(
+		Call{StartedAt: start, EndedAt: &end},
+		RecordingTrack{
+			Role:       "client",
+			CreatedAt:  start.Add(5 * time.Second),
+			DurationMS: 2_000,
+		},
+	)
+	if track.OffsetMS != 5_000 || track.DurationMS != 2_000 {
+		t.Fatalf("timing = offset %dms, duration %dms; want 5000ms and 2000ms", track.OffsetMS, track.DurationMS)
+	}
+}
+
+func TestFinalizedRemoteRecordingAlignsToCallEnd(t *testing.T) {
+	directory := t.TempDir()
+	callID := "call-remote-timing"
+	if err := os.Mkdir(filepath.Join(directory, callID), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, callID, "remote.wav"), writePCM16WAV(8_000, 1, make([]int16, 4_000)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC()
+	end := start.Add(10 * time.Second)
+	application := &App{cfg: Config{Recordings: RecordingsConfig{Directory: directory}}}
+	track := application.recordingTrackTiming(
+		Call{StartedAt: start, EndedAt: &end},
+		RecordingTrack{
+			Role:      "remote",
+			File:      filepath.Join(callID, "remote.wav"),
+			CreatedAt: start.Add(100 * time.Millisecond),
+		},
+	)
+	if track.OffsetMS != 9_500 || track.DurationMS != 500 {
+		t.Fatalf("timing = offset %dms, duration %dms; want 9500ms and 500ms", track.OffsetMS, track.DurationMS)
 	}
 }
 

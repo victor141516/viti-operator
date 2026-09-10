@@ -334,16 +334,26 @@ func (a *App) recordingTrackTiming(call Call, track RecordingTrack) RecordingTra
 		offset = 0
 	}
 	track.OffsetMS = offset.Milliseconds()
-	if track.DurationMS > 0 {
-		return track
+	if track.DurationMS <= 0 {
+		path, err := a.recordingPath(track.File)
+		if err == nil {
+			duration, err := pcm16WAVDuration(path)
+			if err == nil {
+				track.DurationMS = (duration.Nanoseconds() + int64(time.Millisecond) - 1) / int64(time.Millisecond)
+			}
+		}
 	}
-	path, err := a.recordingPath(track.File)
-	if err != nil {
-		return track
-	}
-	duration, err := pcm16WAVDuration(path)
-	if err == nil {
-		track.DurationMS = (duration.Nanoseconds() + int64(time.Millisecond) - 1) / int64(time.Millisecond)
+	if track.Role == "remote" && call.EndedAt != nil && track.DurationMS > 0 {
+		// The carrier MixMonitor hook is installed before the INVITE so it can
+		// capture early media. Asterisk does not write leading silence before
+		// the first media frame, however, so the hook timestamp is not the
+		// beginning of the WAV. The carrier channel and its recording both end
+		// with the call; align the finalized file from that reliable boundary.
+		callDuration := call.EndedAt.Sub(call.StartedAt)
+		recordingDuration := time.Duration(track.DurationMS) * time.Millisecond
+		if callDuration >= recordingDuration {
+			track.OffsetMS = (callDuration - recordingDuration).Milliseconds()
+		}
 	}
 	return track
 }
