@@ -497,9 +497,11 @@ surface. It reports only that client's WebRTC leg. **Incoming loss** and
 **Incoming jitter** cover RTP received by that device; **Outgoing loss** is
 available only when RTCP from the media peer exposes it. **Media RTT** is the
 RTCP round trip to the media peer, while **ICE path RTT** is the selected ICE
-pair's STUN round trip. All RTT and jitter values are milliseconds, packet loss
-is a percentage over the displayed sampling interval, and none of these values
-measure the carrier/PSTN leg.
+pair's STUN round trip. All RTT and jitter values are milliseconds. Incoming and
+outgoing counter-based packet-loss percentages show their own sampling interval.
+When outgoing loss comes from the peer's latest RTCP `fractionLost`, the UI says
+that its exact interval is unavailable. None of these values measure the
+carrier/PSTN leg.
 
 The route label is based on the selected candidate pair, not configured server
 intent. **TURN relay · UDP** means the client observed a relay candidate using

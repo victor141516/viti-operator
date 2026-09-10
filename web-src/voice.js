@@ -53,7 +53,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
     current.__vitiQualityPeer = null
     if (status) emitQuality({
       status, sampledAtMs: Date.now(), inboundLossPercent: null, outboundLossPercent: null,
-      inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', windowMs: null, route: null,
+      inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', inboundWindowMs: null, outboundWindowMs: null, route: null,
     }, current)
   }
   const microphoneMute = createMicrophoneMuteController((muted) => {

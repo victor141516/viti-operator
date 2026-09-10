@@ -240,7 +240,8 @@ data class VoiceCallQuality(
     val inboundJitterMs: Double? = null,
     val roundTripTimeMs: Double? = null,
     val roundTripScope: String = "",
-    val windowMs: Double? = null,
+    val inboundWindowMs: Double? = null,
+    val outboundWindowMs: Double? = null,
     val route: VoiceMediaRoute? = null,
 )
 

@@ -49,7 +49,8 @@ internal object VoiceQualityJson {
                 "sampledAtMs" to it.optLong("sampledAtMs", 0), "inboundLossPercent" to it.optNullableDouble("inboundLossPercent"),
                 "outboundLossPercent" to it.optNullableDouble("outboundLossPercent"), "inboundJitterMs" to it.optNullableDouble("inboundJitterMs"),
                 "roundTripTimeMs" to it.optNullableDouble("roundTripTimeMs"), "roundTripScope" to it.optString("roundTripScope"),
-                "windowMs" to it.optNullableDouble("windowMs"),
+                "inboundWindowMs" to it.optNullableDouble("inboundWindowMs"),
+                "outboundWindowMs" to it.optNullableDouble("outboundWindowMs"),
             ),
             routeValues = route?.let { value -> mapOf(
                 "mode" to value.optString("mode"), "protocol" to value.optString("protocol", "unknown"),
@@ -85,7 +86,8 @@ internal object VoiceQualityJson {
             inboundJitterMs = number("inboundJitterMs"),
             roundTripTimeMs = number("roundTripTimeMs"),
             roundTripScope = values["roundTripScope"] as? String ?: "",
-            windowMs = number("windowMs"),
+            inboundWindowMs = number("inboundWindowMs"),
+            outboundWindowMs = number("outboundWindowMs"),
             route = route,
         )
     }

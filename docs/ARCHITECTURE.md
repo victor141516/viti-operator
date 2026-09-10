@@ -523,14 +523,18 @@ peer connection cancels the previous sampler, and terminal events discard any
 late asynchronous result. Android additionally rejects samples for another leg
 or with a non-increasing sequence number.
 
-Packet loss is calculated over consecutive counters for each continuing audio
-RTP report and is then aggregated. A first sample, idle interval, counter reset,
-signed loss correction, added or removed SSRC, or selected ICE-pair change starts
-a new baseline instead of producing an invented percentage. Incoming loss and
-jitter describe RTP received by the local client. Outgoing loss is shown only
-when the media peer supplies a linked `remote-inbound-rtp` RTCP report. Jitter
-and RTT values defined in seconds by WebRTC statistics are converted to
-milliseconds for display.
+Incoming packet loss is calculated over consecutive counters for each continuing
+audio RTP report and is then aggregated. Outgoing loss uses the equivalent
+linked `remote-inbound-rtp` counters when the browser exposes them; otherwise it
+uses the peer's latest RTCP `fractionLost`, whose exact interval is not exposed.
+A first sample, idle interval, counter reset, signed loss correction, added or
+removed SSRC, or selected ICE-pair change starts a new counter baseline instead
+of producing an invented percentage. Incoming loss and jitter describe RTP
+received by the local client. Outgoing loss is shown only when the media peer
+supplies a linked RTCP report. Jitter and RTT values defined in seconds by
+WebRTC statistics are converted to milliseconds for display. Incoming and
+outgoing counter intervals remain separate; an unavailable RTCP interval is
+reported as such.
 
 Media RTT comes from a linked remote-inbound RTCP report when available. The
 fallback ICE-path RTT is the selected candidate pair's current STUN RTT. Neither
@@ -541,12 +545,15 @@ pair is accepted only when transport linkage is unavailable. The UI says
 **ICE direct**, and displays the observed relay/protocol value such as UDP. TURN
 does not imply TCP.
 
-Normal quality events contain only timestamps, sequence numbers, numeric
-measurements, candidate types, and protocol labels. Candidate addresses, ports,
-IDs, SDP, raw reports, and audio levels remain outside this UI path. Connecting,
-reconnecting, unsupported, ambiguous, and failed-statistics states clear current
-measurements rather than freezing an earlier successful sample. Route evidence
-may appear while numeric measurements are still collecting.
+The normal quality payload contains only timestamps, sequence numbers, numeric
+measurements, candidate types, and protocol labels; its event wrapper retains
+the usual call/client correlation identifiers. Candidate addresses, ports,
+candidate or RTCStats IDs, SDP, raw reports, and audio levels remain outside this
+UI path. Connecting, reconnecting, unsupported, and failed-statistics states
+clear current measurements rather than freezing an earlier successful sample.
+Ambiguous route evidence suppresses only the route label, so valid RTP metrics
+can remain available. Route evidence may also appear while numeric measurements
+are still collecting.
 
 ### Call recordings
 

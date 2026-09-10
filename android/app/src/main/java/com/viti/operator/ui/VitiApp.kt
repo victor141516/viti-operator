@@ -1267,6 +1267,11 @@ private fun CallQualityCard(quality: VoiceCallQuality?, legToken: String) {
     val route = quality.route?.let {
         "${if (it.mode == "turn-relay") "TURN relay" else "ICE direct"} · ${it.protocol.uppercase()}"
     }.orEmpty()
+    val intervalDetail = listOfNotNull(
+        quality.inboundWindowMs?.let { "Incoming loss interval: ${it.toLong()} ms." },
+        quality.outboundWindowMs?.let { "Outgoing loss interval: ${it.toLong()} ms." }
+            ?: if (quality.outboundLossPercent != null) "Outgoing loss uses the latest peer RTCP report; its interval is unavailable." else null,
+    ).joinToString(" ")
     Card(
         onClick = { expanded = !expanded },
         modifier = Modifier.fillMaxWidth(),
@@ -1295,7 +1300,7 @@ private fun CallQualityCard(quality: VoiceCallQuality?, legToken: String) {
                     )
                 }
                 Text(
-                    "Incoming values describe RTP received by this device. Outgoing loss is reported by the media peer. RTT covers only the WebRTC media path, not the mobile operator or PSTN leg.",
+                    "Incoming values describe RTP received by this device. Outgoing loss is reported by the media peer. $intervalDetail RTT covers only the WebRTC media path, not the mobile operator or PSTN leg.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

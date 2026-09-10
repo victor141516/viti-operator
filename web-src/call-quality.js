@@ -142,7 +142,8 @@ export function collectCallQuality(stats, previous = {}) {
       inboundJitterMs: currentJitter(inbound, previousInbound),
       roundTripTimeMs,
       roundTripScope,
-      windowMs: inboundLoss.windowMs ?? outboundLoss.windowMs,
+      inboundWindowMs: inboundLoss.windowMs,
+      outboundWindowMs: outboundLoss.windowMs,
       route,
     },
     next: {
@@ -185,12 +186,12 @@ export function createCallQualitySampler({
     const unavailable = unavailableStatus(peerConnection)
     if (unavailable) {
       previous = {}
-      onSample({ status: unavailable, sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', windowMs: null, route: null })
+      onSample({ status: unavailable, sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', inboundWindowMs: null, outboundWindowMs: null, route: null })
       schedule()
       return
     }
     if (typeof peerConnection.getStats !== 'function') {
-      onSample({ status: 'unsupported', sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', windowMs: null, route: null })
+      onSample({ status: 'unsupported', sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', inboundWindowMs: null, outboundWindowMs: null, route: null })
       schedule()
       return
     }
@@ -205,7 +206,7 @@ export function createCallQualitySampler({
     } catch (error) {
       if (active) {
         onError(error)
-        onSample({ status: 'unavailable', sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', windowMs: null, route: null })
+        onSample({ status: 'unavailable', sampledAtMs: now(), inboundLossPercent: null, outboundLossPercent: null, inboundJitterMs: null, roundTripTimeMs: null, roundTripScope: '', inboundWindowMs: null, outboundWindowMs: null, route: null })
       }
     } finally {
       inFlight = false

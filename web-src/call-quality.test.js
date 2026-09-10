@@ -33,7 +33,8 @@ test('derives interval inbound loss, jitter, media RTT and a UDP TURN route', ()
   assert.equal(current.sample.inboundJitterMs, 9)
   assert.equal(current.sample.roundTripTimeMs, 43)
   assert.equal(current.sample.roundTripScope, 'media-peer')
-  assert.equal(current.sample.windowMs, 1_500)
+  assert.equal(current.sample.inboundWindowMs, 1_500)
+  assert.equal(current.sample.outboundWindowMs, 1_500)
   assert.deepEqual(current.sample.route, {
     mode: 'turn-relay',
     protocol: 'udp',
@@ -63,7 +64,7 @@ test('keeps loss unavailable for first, idle, reset, added and removed RTP repor
     { id: 'b', type: 'inbound-rtp', kind: 'audio', packetsReceived: 140, packetsLost: 15, timestamp: 5_000 },
   ), reset.next)
   assert.equal(continued.sample.inboundLossPercent, 10)
-  assert.equal(continued.sample.windowMs, 2_000)
+  assert.equal(continued.sample.inboundWindowMs, 2_000)
 })
 
 test('aggregates continuing SSRC deltas instead of subtracting lifetime totals', () => {
@@ -124,6 +125,16 @@ test('starts a fresh loss window when the selected ICE pair changes', () => {
   assert.equal(changed.sample.inboundLossPercent, null)
   const stable = collectCallQuality(stats('pair-b', 280, 21, 3_000), changed.next)
   assert.equal(stable.sample.inboundLossPercent, 10)
+})
+
+test('keeps the peer RTCP fraction-loss interval explicitly unavailable', () => {
+  const current = collectCallQuality(report(
+    { id: 'out', type: 'outbound-rtp', kind: 'audio', remoteId: 'remote', packetsSent: 100, timestamp: 1_000 },
+    { id: 'remote', type: 'remote-inbound-rtp', localId: 'out', fractionLost: 0.125, roundTripTime: 0.05, timestamp: 1_000 },
+  ))
+  assert.equal(current.sample.outboundLossPercent, 12.5)
+  assert.equal(current.sample.outboundWindowMs, null)
+  assert.equal(current.sample.inboundWindowMs, null)
 })
 
 test('sampler serializes getStats and drops a result after cancellation', async () => {
