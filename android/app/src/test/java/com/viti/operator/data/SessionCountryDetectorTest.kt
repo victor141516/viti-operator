@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 import kotlinx.coroutines.runBlocking
+import java.time.Instant
 
 class SessionCountryDetectorTest {
     @Test
@@ -104,5 +105,49 @@ class SessionCountryDetectorTest {
         assertEquals("serving-network-pending", result.reason)
         assertEquals("", result.country)
         assertFalse(fallbackRequested)
+    }
+
+    @Test
+    fun deniedOptionalPhoneStatePermissionIsTerminalAndAllowsConservativeFallback() = runBlocking {
+        val denied = classifyServingCountryObservation(
+            CellularServiceDetails(availability = "permission_denied"),
+            country = "",
+        )
+        val initializing = classifyServingCountryObservation(
+            CellularServiceDetails(availability = "unknown"),
+            country = "",
+        )
+        var fallbackRequested = false
+
+        val result = detectSessionCountryWithProbes(
+            sessionGeneration = "no-phone-state-permission",
+            servingProbe = { denied },
+            fallbackSignals = {
+                fallbackRequested = true
+                SessionCountrySignals(ipCountry = "ES", timezoneCountry = "ES")
+            },
+            pause = {},
+        )
+
+        assertEquals(ServingCountryObservation(), denied)
+        assertEquals(ServingCountryObservation(pending = true), initializing)
+        assertEquals(SessionCountryDetection("no-phone-state-permission", "ES", "ip+timezone"), result)
+        assertEquals(true, fallbackRequested)
+    }
+
+    @Test
+    fun currentInServiceObservationStillWinsWhenFresh() {
+        val now = Instant.parse("2026-09-10T10:00:00Z")
+        val result = classifyServingCountryObservation(
+            CellularServiceDetails(
+                availability = "available",
+                registration = "in_service",
+                measuredAt = now.minusSeconds(30).toString(),
+            ),
+            country = "us",
+            now = now,
+        )
+
+        assertEquals(ServingCountryObservation("US"), result)
     }
 }

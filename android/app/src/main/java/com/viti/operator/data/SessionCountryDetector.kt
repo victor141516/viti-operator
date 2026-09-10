@@ -34,6 +34,24 @@ internal data class ServingCountryObservation(
     val pending: Boolean = false,
 )
 
+internal fun classifyServingCountryObservation(
+    service: CellularServiceDetails,
+    country: String,
+    now: Instant = Instant.now(),
+): ServingCountryObservation {
+    if (service.availability == "unknown") return ServingCountryObservation(pending = true)
+    if (service.availability != "available") return ServingCountryObservation()
+    if (service.registration.isBlank()) return ServingCountryObservation(pending = true)
+    if (service.registration != "in_service") return ServingCountryObservation()
+    val observedAt = runCatching { Instant.parse(service.measuredAt) }.getOrNull()
+        ?: return ServingCountryObservation(pending = true)
+    if (Duration.between(observedAt, now).abs() > Duration.ofMinutes(2)) {
+        return ServingCountryObservation(pending = true)
+    }
+    val normalized = canonicalCountry(country)
+    return ServingCountryObservation(normalized, pending = normalized.isBlank())
+}
+
 internal fun canonicalCountry(value: String): String = value.trim().uppercase(Locale.ROOT)
     .takeIf { it.length == 2 && it.all(Char::isLetter) }
     .orEmpty()
@@ -106,20 +124,15 @@ class SessionCountryDetector(
         }
         val observation = CellularTelemetryMonitor.get(appContext).snapshot()
             ?: return ServingCountryObservation(pending = true)
-        if (observation.service.availability == "unknown") return ServingCountryObservation(pending = true)
-        if (observation.service.registration.isBlank()) return ServingCountryObservation(pending = true)
-        if (observation.service.registration != "in_service") return ServingCountryObservation()
-        val observedAt = runCatching { Instant.parse(observation.service.measuredAt) }.getOrNull()
-            ?: return ServingCountryObservation(pending = true)
-        if (Duration.between(observedAt, Instant.now()).abs() > Duration.ofMinutes(2)) {
-            return ServingCountryObservation(pending = true)
+        if (observation.service.registration != "in_service") {
+            return classifyServingCountryObservation(observation.service, "")
         }
         val subscriptionId = simAuthSubscriptionId()
         if (subscriptionId == SubscriptionManager.INVALID_SUBSCRIPTION_ID) return ServingCountryObservation()
         val manager = appContext.getSystemService(TelephonyManager::class.java)
             ?: return ServingCountryObservation(pending = true)
         val country = runCatching { manager.createForSubscriptionId(subscriptionId).networkCountryIso }.getOrDefault("")
-        return ServingCountryObservation(country, pending = country.isBlank())
+        return classifyServingCountryObservation(observation.service, country)
     }
 }
 
