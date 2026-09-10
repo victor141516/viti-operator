@@ -335,16 +335,16 @@ type engineCallUpdate struct {
 	HangupCause  string
 }
 
+var errEngineCallAwaitingStart = errors.New("engine call start has not arrived")
+
 func engineTunnelDownBoundary(checkpoint EngineTunnelCheckpoint) time.Time {
 	if !checkpoint.LastDownAt.IsZero() {
 		return checkpoint.LastDownAt
 	}
-	// Compatibility with checkpoints written before LastDownAt existed: a
-	// currently-down record's UpdatedAt is the only durable down boundary.
-	if !checkpoint.Ready {
-		return checkpoint.UpdatedAt
-	}
-	return time.Time{}
+	// Compatibility with checkpoints written before LastDownAt existed. For a
+	// down record UpdatedAt is the down boundary; for an up record it is a
+	// conservative generation boundary that rejects only older hooks.
+	return checkpoint.UpdatedAt
 }
 
 // ApplyEngineCallEvent performs lookup, lifecycle mutation, tunnel
@@ -405,7 +405,7 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 	}
 	if !found {
 		if update.Peer == "" {
-			return Call{}, false, nil
+			return Call{}, false, errEngineCallAwaitingStart
 		}
 		call = Call{
 			ID: update.ProposedID, TraceID: update.TraceID, EngineCallID: update.EngineCallID,

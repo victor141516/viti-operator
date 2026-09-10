@@ -545,6 +545,28 @@ func TestOldCallHookCannotReopenAfterNewTunnelAndManagerRestart(t *testing.T) {
 	}
 }
 
+func TestLegacyReadyCheckpointUsesUpdatedAtAsCausalBoundary(t *testing.T) {
+	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := time.Date(2026, 9, 10, 12, 15, 0, 0, time.UTC)
+	store.engineTunnels["engine-1"] = EngineTunnelCheckpoint{
+		Instance: "engine-1", Generation: "pre-last-down-field", Sequence: 7,
+		Ready: true, UpdatedAt: boundary,
+	}
+	call, _, err := store.ApplyEngineCallEvent(engineCallUpdate{
+		ProposedID: "legacy-boundary-call", Instance: "engine-1", EngineCallID: "old-hook",
+		Event: "call_out", Direction: DirectionOutgoing, Peer: "+15555550114", At: boundary.Add(-time.Second),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if call.State != "interrupted" || call.EndedAt == nil || !call.EndedAt.Equal(boundary) {
+		t.Fatalf("legacy checkpoint admitted a pre-generation hook: %#v", call)
+	}
+}
+
 func TestPrivateIncomingCallUpdatesByStableCallID(t *testing.T) {
 	app, err := New(Config{
 		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
@@ -570,7 +592,53 @@ func TestPrivateIncomingCallUpdatesByStableCallID(t *testing.T) {
 	}
 }
 
-func TestUnknownEmptyPeerCallUpdateDoesNotCreateHistory(t *testing.T) {
+func TestPrivateCallLifecycleRetriesUntilStartIsDurable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	app, err := New(Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	startedAt := time.Date(2026, 9, 10, 12, 45, 0, 0, time.UTC)
+	activeAt := startedAt.Add(time.Second)
+	endedAt := startedAt.Add(time.Minute)
+	base := map[string]any{"instance": "engine-1", "call_id": "retry-private-call"}
+	originalPath := app.store.path
+	app.store.path = t.TempDir()
+	base["event"], base["recorded_at_ns"], base["args"] = "call_in", startedAt.UnixNano(), []string{""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusInternalServerError)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_active", activeAt.UnixNano(), []string{"in", ""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusConflict)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_result", endedAt.UnixNano(), []string{"in", "", "ANSWER", "16"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusConflict)
+	if calls := app.store.Calls(); len(calls) != 0 {
+		t.Fatalf("failed private start leaked partial history: %#v", calls)
+	}
+
+	// A later outbox pass retries the retained files in source-time order.
+	app.store.path = originalPath
+	base["event"], base["recorded_at_ns"], base["args"] = "call_in", startedAt.UnixNano(), []string{""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_active", activeAt.UnixNano(), []string{"in", ""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_result", endedAt.UnixNano(), []string{"in", "", "ANSWER", "16"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+
+	reopened, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, ok := reopened.GetCallByEngineID("engine-1", "retry-private-call")
+	if !ok || call.Peer != "Private number" || call.State != "ended" || call.EndedAt == nil || !call.EndedAt.Equal(endedAt) {
+		t.Fatalf("retained private lifecycle did not converge durably: %#v", call)
+	}
+}
+
+func TestUnknownEmptyPeerCallUpdateWaitsForStart(t *testing.T) {
 	app, err := New(Config{
 		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
 		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
@@ -583,7 +651,7 @@ func TestUnknownEmptyPeerCallUpdateDoesNotCreateHistory(t *testing.T) {
 	postEngineEvent(t, server.URL, "test-token", map[string]any{
 		"instance": "engine-1", "event": "call_result", "call_id": "unknown-private-call",
 		"recorded_at_ns": time.Now().UTC().UnixNano(), "args": []string{"in", "", "NOANSWER", "19"},
-	}, http.StatusNoContent)
+	}, http.StatusConflict)
 	if calls := app.store.Calls(); len(calls) != 0 {
 		t.Fatalf("empty update without a matching call created history: %#v", calls)
 	}

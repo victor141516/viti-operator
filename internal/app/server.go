@@ -394,12 +394,12 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	callUpdate.ProposedID = id
 	call, changed, err := a.store.ApplyEngineCallEvent(*callUpdate)
 	if err != nil {
+		if errors.Is(err, errEngineCallAwaitingStart) {
+			writeError(w, http.StatusConflict, "call start has not arrived yet")
+			return
+		}
 		a.diag.RecordTrace("manager.call", "persist.failed", request.TraceID, map[string]any{"engine_event": request, "error": err.Error()})
 		writeError(w, http.StatusInternalServerError, "could not persist call")
-		return
-	}
-	if call.ID == "" {
-		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if changed {

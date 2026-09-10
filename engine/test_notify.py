@@ -1,4 +1,6 @@
 import os
+from pathlib import Path
+import re
 import sys
 import unittest
 from unittest import mock
@@ -8,6 +10,18 @@ import notify
 
 
 class NotifyTest(unittest.TestCase):
+    def test_call_hooks_wait_for_durable_enqueue(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        background_call_hooks = [
+            line for line in template.splitlines()
+            if "notify.py call_" in line and re.search(r"\s&\)\s*$", line)
+        ]
+        self.assertEqual(background_call_hooks, [])
+
     def test_ordered_tunnel_transition_uses_durable_outbox(self):
         environment = {
             "VITI_TUNNEL_GENERATION": "process-one",
