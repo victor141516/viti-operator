@@ -55,6 +55,8 @@ class VoiceCallService : Service() {
         private set
     var coreTelecomAvailable: Boolean = false
         private set
+    var startedForBackgroundCalls: Boolean = false
+        private set
     val snapshot get() = runtime.snapshot
 
     override fun onCreate() {
@@ -131,6 +133,7 @@ class VoiceCallService : Service() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        startedForBackgroundCalls = true
         val token = intent?.getStringExtra(EXTRA_LEG_TOKEN)?.takeIf(String::isNotBlank)
         when (intent?.action) {
             ACTION_ANSWER -> runtime.answer(token)

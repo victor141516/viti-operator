@@ -31,3 +31,6 @@ internal fun buildCarDialTargets(
         .forEach { add(it.name, it.number) }
     return result
 }
+
+internal fun limitCarDialTargets(targets: List<CarDialTarget>, hostLimit: Int): List<CarDialTarget> =
+    targets.take(hostLimit.coerceAtLeast(0))

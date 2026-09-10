@@ -7,6 +7,7 @@ import androidx.car.app.CarContext
 import androidx.car.app.Screen
 import androidx.car.app.Session
 import androidx.car.app.SessionInfo
+import androidx.car.app.constraints.ConstraintManager
 import androidx.car.app.model.Action
 import androidx.car.app.model.Header
 import androidx.car.app.model.ItemList
@@ -92,7 +93,10 @@ internal class VitiCarCallsScreen(
 
     private fun directory(targets: List<CarDialTarget>): Template {
         val items = ItemList.Builder()
-        targets.forEach { target ->
+        val hostLimit = carContext
+            .getCarService(ConstraintManager::class.java)
+            .getContentLimit(ConstraintManager.CONTENT_LIMIT_TYPE_LIST)
+        limitCarDialTargets(targets, hostLimit).forEach { target ->
             items.addItem(
                 Row.Builder()
                     .setTitle(target.name)

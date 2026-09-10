@@ -40,6 +40,14 @@ class CarCallDirectoryTest {
         assertEquals(emptyList<CarDialTarget>(), buildCarDialTargets(emptyList(), contacts, limit = 0))
     }
 
+    @Test
+    fun renderedDirectoryRespectsTheHostContentLimit() {
+        val targets = (1..10).map { CarDialTarget("Contact $it", "+3460000000$it") }
+
+        assertEquals(targets.take(6), limitCarDialTargets(targets, hostLimit = 6))
+        assertEquals(emptyList<CarDialTarget>(), limitCarDialTargets(targets, hostLimit = 0))
+    }
+
     private fun call(peer: String, contactName: String) = Call(
         id = peer,
         direction = "outgoing",

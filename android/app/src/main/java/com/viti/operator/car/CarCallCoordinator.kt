@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 internal data class CarCallState(
     val coreTelecomAvailable: Boolean = false,
     val serviceConnected: Boolean = false,
+    val serviceDurable: Boolean = false,
     val loadingDirectory: Boolean = true,
     val targets: List<CarDialTarget> = emptyList(),
     val call: VoiceCallSnapshot = VoiceCallSnapshot(),
@@ -62,15 +63,19 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
     private var started = false
     private var directoryJob: Job? = null
     private var snapshotJob: Job? = null
+    private var startRequestAccepted = false
+    private var startFailureDetail = ""
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
             val connected = (binder as VoiceCallService.LocalBinder).service
             service = connected
+            val durable = startRequestAccepted || connected.startedForBackgroundCalls
             _state.value = _state.value.copy(
                 coreTelecomAvailable = connected.coreTelecomAvailable,
                 serviceConnected = true,
-                notice = "",
+                serviceDurable = durable,
+                notice = if (durable) "" else backgroundStartFailureNotice(startFailureDetail),
             )
             snapshotJob?.cancel()
             snapshotJob = scope.launch {
@@ -86,6 +91,7 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
             service = null
             _state.value = _state.value.copy(
                 serviceConnected = false,
+                serviceDurable = false,
                 notice = "Call service disconnected. Open Viti on your phone when safe.",
             )
         }
@@ -105,16 +111,16 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
         val startError = runCatching {
             ContextCompat.startForegroundService(appContext, serviceIntent)
         }.exceptionOrNull()
+        startRequestAccepted = startError == null
+        startFailureDetail = startError?.message.orEmpty()
         val didBind = runCatching {
             appContext.bindService(serviceIntent, connection, Context.BIND_AUTO_CREATE)
         }.getOrDefault(false)
         bound = didBind
         if (!didBind) {
             _state.value = _state.value.copy(
-                notice = buildString {
-                    append("Call service could not start. Open Viti on your phone when safe.")
-                    startError?.message?.takeIf(String::isNotBlank)?.let { append(" ").append(it) }
-                },
+                serviceDurable = false,
+                notice = backgroundStartFailureNotice(startFailureDetail),
             )
         }
         refresh()
@@ -147,19 +153,7 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
     override fun call(target: CarDialTarget) {
         val current = _state.value
         val connected = service
-        val notice = when {
-            !current.coreTelecomAvailable ->
-                "This phone cannot expose Viti calls to Android Auto because Core-Telecom is unavailable."
-            !hasRequiredCallPermissions() ->
-                "Complete microphone and nearby-device permissions in Viti on your phone when safe."
-            connected == null ->
-                "Call service is not connected. Open Viti on your phone when safe."
-            current.call.legToken.isNotBlank() ->
-                "Android Auto is already handling the current Viti call."
-            !current.call.voice.registered ->
-                "Viti is still connecting service calls. Try again shortly."
-            else -> ""
-        }
+        val notice = carCallBlockReason(current, connected != null, hasMicrophonePermission())
         if (notice.isNotBlank()) {
             _state.value = current.copy(notice = notice)
             return
@@ -181,12 +175,27 @@ internal class CarCallCoordinator(context: Context) : CarCallController {
         scope.cancel()
     }
 
-    private fun hasRequiredCallPermissions(): Boolean {
-        val microphone = ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) ==
-            PackageManager.PERMISSION_GRANTED
-        val bluetooth = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
-            ContextCompat.checkSelfPermission(appContext, Manifest.permission.BLUETOOTH_CONNECT) ==
-            PackageManager.PERMISSION_GRANTED
-        return microphone && bluetooth
-    }
+    private fun hasMicrophonePermission(): Boolean =
+        ContextCompat.checkSelfPermission(appContext, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+}
+
+internal fun carCallBlockReason(state: CarCallState, servicePresent: Boolean, microphoneGranted: Boolean): String = when {
+    !state.coreTelecomAvailable ->
+        "This phone cannot expose Viti calls to Android Auto because Core-Telecom is unavailable."
+    !microphoneGranted ->
+        "Complete microphone permission in Viti on your phone when safe."
+    !servicePresent ->
+        "Call service is not connected. Open Viti on your phone when safe."
+    !state.serviceDurable ->
+        backgroundStartFailureNotice("")
+    state.call.legToken.isNotBlank() ->
+        "Android Auto is already handling the current Viti call."
+    !state.call.voice.registered ->
+        "Viti is still connecting service calls. Try again shortly."
+    else -> ""
+}
+
+internal fun backgroundStartFailureNotice(detail: String): String = buildString {
+    append("Call service could not start durably. Open Viti on your phone when safe.")
+    detail.takeIf(String::isNotBlank)?.let { append(" ").append(it) }
 }

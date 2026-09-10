@@ -58,8 +58,8 @@ val verifyDebugCarManifest by tasks.registering {
         check(manifest.isFile) { "Merged debug manifest was not generated" }
         val contents = manifest.readText()
         check("com.google.android.gms.car.application" in contents) { "Android Auto application metadata is missing" }
-        check("androidx.car.app.minCarApiLevel" in contents && "android:value=\"1\"" in contents) {
-            "The merged manifest must declare minimum Car API level 1"
+        check("androidx.car.app.minCarApiLevel" in contents && "android:value=\"5\"" in contents) {
+            "The merged manifest must declare minimum Car API level 5"
         }
         check("com.viti.operator.car.VitiCarAppService" in contents) { "The projected CarAppService is missing" }
         check("androidx.car.app.category.CALLING" in contents) { "The calling category is missing" }
