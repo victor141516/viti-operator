@@ -329,6 +329,15 @@ replacement_parse = r'''static void parse_rpdata(pjsip_rx_data *rdata, struct as
 			}
 			offset += unpackaddress(recipient, tpdu + offset, sizeof(recipient));
 			service_centre_time = viti_sms_decode_scts(tpdu + offset);
+			/* Some networks encode TP-SCTS with a stale standard-time offset
+			 * during daylight saving time.  A service-centre acceptance time
+			 * cannot be materially later than receipt of its status report.
+			 * Discard that unreliable correlation hint instead of allowing it
+			 * to detach the report from the in-memory submission track. */
+			if (service_centre_time != (time_t)-1 &&
+				service_centre_time > time(NULL) + VITI_SMS_SCTS_TOLERANCE) {
+				service_centre_time = (time_t)-1;
+			}
 			offset += 14; /* TP-SCTS + TP-DT */
 			status = tpdu[offset] & 0xff;
 			ast_msg_set_var(msg, "VITI_SMS_PROTOCOL_ONLY", "1");

@@ -167,7 +167,17 @@ func (s *Store) smsCorrelationCandidatesLocked(event SMSProtocolEvent, eventTime
 				if !sameReference(part.TPReference, event.TPReference) {
 					continue
 				}
-				if event.ServiceCentreTime != nil {
+				// TP-SCTS is useful when TP-MR has been reused, but it is not
+				// universally trustworthy.  Digi has been observed encoding a
+				// timestamp exactly one hour in the future (a network timezone/DST
+				// discrepancy).  A service centre cannot accept the message after
+				// the corresponding report was received, so ignore an implausibly
+				// future SCTS and fall back to the durable event receive time.  The
+				// fallback remains conservative: reused references yield an
+				// ambiguous result instead of being guessed.
+				serviceCentreTimeReliable := event.ServiceCentreTime != nil &&
+					!event.ServiceCentreTime.After(eventTime.Add(smsServiceCentreTimeTolerance))
+				if serviceCentreTimeReliable {
 					if !smsTimesClose(*part.SubmittedAt, *event.ServiceCentreTime) {
 						continue
 					}
