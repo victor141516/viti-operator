@@ -1,0 +1,100 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import { LiveCallSoakTracker } from './live-call-soak-core.mjs'
+
+const sample = (seconds, overrides = {}) => ({
+  timestamp: new Date(seconds * 1000).toISOString(),
+  snapshot_ok: true,
+  active_channels: 4,
+  charon: true,
+  python: false,
+  tunnel: true,
+  ims: true,
+  ike_ids: [1],
+  child_ids: [10],
+  ...overrides,
+})
+
+test('accepts one call only after the required natural SA transitions and post-call window', () => {
+  const tracker = new LiveCallSoakTracker({
+    minCallSeconds: 100,
+    minIkeRenewals: 2,
+    minChildRenewals: 2,
+    postCallSeconds: 10,
+  })
+  tracker.observe(sample(0, { active_channels: 0 }))
+  tracker.observe(sample(10))
+  tracker.observe(sample(50, { ike_ids: [2], child_ids: [11] }))
+  tracker.observe(sample(90, { ike_ids: [3], child_ids: [12] }))
+  tracker.observe(sample(115))
+  tracker.observe(sample(120, { active_channels: 0 }))
+  tracker.observe(sample(130, { active_channels: 0 }))
+
+  assert.deepEqual(tracker.summary(), {
+    accepted: true,
+    phase: 'complete',
+    fatal_reason: null,
+    call_detected: true,
+    call_duration_seconds: 110,
+    active_samples: 4,
+    unhealthy_samples: 0,
+    observed_ike_renewals: 2,
+    observed_child_renewals: 2,
+    requirements: {
+      minimum_call_seconds: 100,
+      minimum_ike_renewals: 2,
+      minimum_child_renewals: 2,
+      post_call_seconds: 10,
+    },
+  })
+})
+
+test('does not treat a failed snapshot as a remote hangup', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 10, minIkeRenewals: 0, postCallSeconds: 1 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(5, { snapshot_ok: false, active_channels: 0 }))
+  tracker.observe(sample(11))
+  tracker.observe(sample(12, { active_channels: 0 }))
+  tracker.observe(sample(13, { active_channels: 0 }))
+
+  const summary = tracker.summary()
+  assert.equal(summary.call_duration_seconds, 11)
+  assert.equal(summary.unhealthy_samples, 1)
+  assert.equal(summary.accepted, false)
+})
+
+test('rejects infrastructure loss during the active call', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, postCallSeconds: 0 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(2, { ims: false }))
+  tracker.observe(sample(3, { active_channels: 0 }))
+  tracker.observe(sample(4, { active_channels: 0 }))
+
+  assert.equal(tracker.summary().unhealthy_samples, 1)
+  assert.equal(tracker.summary().accepted, false)
+})
+
+test('rejects a second call during the post-call observation window', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 0, postCallSeconds: 10 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(3, { active_channels: 0 }))
+  tracker.observe(sample(5))
+
+  assert.equal(tracker.summary().fatal_reason, 'another call started during the post-call observation window')
+  assert.equal(tracker.summary().accepted, false)
+})
+
+test('counts each replacement SA once while old and new generations overlap', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 2, minIkeRenewals: 1, minChildRenewals: 1, postCallSeconds: 0 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(2, { ike_ids: [1, 2], child_ids: [10, 11] }))
+  tracker.observe(sample(3, { ike_ids: [2], child_ids: [11] }))
+  tracker.observe(sample(4, { active_channels: 0 }))
+  tracker.observe(sample(5, { active_channels: 0 }))
+
+  const summary = tracker.summary()
+  assert.equal(summary.observed_ike_renewals, 1)
+  assert.equal(summary.observed_child_renewals, 1)
+  assert.equal(summary.accepted, true)
+})
