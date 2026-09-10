@@ -335,6 +335,18 @@ type engineCallUpdate struct {
 	HangupCause  string
 }
 
+func engineTunnelDownBoundary(checkpoint EngineTunnelCheckpoint) time.Time {
+	if !checkpoint.LastDownAt.IsZero() {
+		return checkpoint.LastDownAt
+	}
+	// Compatibility with checkpoints written before LastDownAt existed: a
+	// currently-down record's UpdatedAt is the only durable down boundary.
+	if !checkpoint.Ready {
+		return checkpoint.UpdatedAt
+	}
+	return time.Time{}
+}
+
 // ApplyEngineCallEvent performs lookup, lifecycle mutation, tunnel
 // reconciliation and persistence under one lock. Engine hooks are independent
 // processes, so composing GetCall and SaveCall in the HTTP handler would allow
@@ -372,13 +384,15 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 		previous := call
 		call.StartedAt = update.At
 		if call.State == "interrupted" {
-			if checkpoint, ok := s.engineTunnels[update.Instance]; ok && !checkpoint.Ready &&
-				!checkpoint.UpdatedAt.Before(call.StartedAt) && call.EndedAt != nil && checkpoint.UpdatedAt.Before(*call.EndedAt) {
-				endedAt := checkpoint.UpdatedAt
-				call.UpdatedAt = endedAt
-				call.EndedAt = &endedAt
-				if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
-					call.AnsweredAt = nil
+			if checkpoint, ok := s.engineTunnels[update.Instance]; ok {
+				downAt := engineTunnelDownBoundary(checkpoint)
+				if !downAt.IsZero() && !downAt.Before(call.StartedAt) && call.EndedAt != nil && downAt.Before(*call.EndedAt) {
+					endedAt := downAt
+					call.UpdatedAt = endedAt
+					call.EndedAt = &endedAt
+					if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
+						call.AnsweredAt = nil
+					}
 				}
 			}
 		}
@@ -390,6 +404,9 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 		return call, true, nil
 	}
 	if !found {
+		if update.Peer == "" {
+			return Call{}, false, nil
+		}
 		call = Call{
 			ID: update.ProposedID, TraceID: update.TraceID, EngineCallID: update.EngineCallID,
 			Instance: update.Instance, Direction: update.Direction, Peer: update.Peer,
@@ -437,23 +454,17 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 	// the call in the same critical section so either ordering produces the same
 	// terminal state and a concurrent handler cannot resurrect it afterward.
 	if call.EndedAt == nil {
-		if checkpoint, ok := s.engineTunnels[update.Instance]; ok && !checkpoint.Ready {
-			call.State = "interrupted"
-			endedAt := checkpoint.UpdatedAt
-			// An event claiming to start after the latest observed down has no
-			// established carrier path. Keep it terminal without manufacturing an
-			// end before its provisional start; a later start hook can refine both.
-			if endedAt.Before(call.StartedAt) {
-				endedAt = update.At
-				if endedAt.Before(call.StartedAt) {
-					endedAt = call.StartedAt
+		if checkpoint, ok := s.engineTunnels[update.Instance]; ok {
+			downAt := engineTunnelDownBoundary(checkpoint)
+			if !downAt.IsZero() && !downAt.Before(call.StartedAt) {
+				call.State = "interrupted"
+				endedAt := downAt
+				if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
+					call.AnsweredAt = nil
 				}
+				call.UpdatedAt = endedAt
+				call.EndedAt = &endedAt
 			}
-			if call.AnsweredAt != nil && call.AnsweredAt.After(endedAt) {
-				call.AnsweredAt = nil
-			}
-			call.UpdatedAt = endedAt
-			call.EndedAt = &endedAt
 		}
 	}
 
@@ -531,7 +542,7 @@ func (s *Store) ApplyEngineTunnelEvent(instance, generation string, sequence uin
 	}
 	previousCalls := make(map[string]Call)
 	changedCalls := make([]Call, 0)
-	if previous.Ready && !next.Ready {
+	if !next.Ready && (previous.Ready || next.LastDownAt.After(previous.LastDownAt)) {
 		for id, call := range s.calls {
 			if call.EndedAt != nil || (!call.StartedAt.IsZero() && call.StartedAt.After(at)) {
 				continue

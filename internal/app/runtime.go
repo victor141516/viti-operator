@@ -29,6 +29,7 @@ type EngineTunnelCheckpoint struct {
 	Sequence           uint64    `json:"sequence"`
 	Ready              bool      `json:"ready"`
 	UpdatedAt          time.Time `json:"updated_at"`
+	LastDownAt         time.Time `json:"last_down_at,omitempty"`
 	RetiredGenerations []string  `json:"retired_generations,omitempty"`
 }
 
@@ -39,6 +40,9 @@ func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, ge
 	if previous.Generation == generation {
 		if sequence <= previous.Sequence {
 			return previous, false
+		}
+		if !ready {
+			previous.LastDownAt = at
 		}
 		previous.Sequence, previous.Ready, previous.UpdatedAt = sequence, ready, at
 		return previous, true
@@ -64,9 +68,13 @@ func advanceEngineTunnelCheckpoint(previous EngineTunnelCheckpoint, instance, ge
 	if previous.Generation != "" {
 		retired = append(retired, previous.Generation)
 	}
+	lastDownAt := previous.LastDownAt
+	if !ready {
+		lastDownAt = at
+	}
 	return EngineTunnelCheckpoint{
 		Instance: instance, Generation: generation, Sequence: sequence,
-		Ready: ready, UpdatedAt: at, RetiredGenerations: retired,
+		Ready: ready, UpdatedAt: at, LastDownAt: lastDownAt, RetiredGenerations: retired,
 	}, true
 }
 

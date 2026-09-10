@@ -334,7 +334,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		if direction == DirectionIncoming && peer == "" {
 			peer = "Private number"
 		}
-		if peer == "" {
+		if peer == "" && request.CallID == "" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -353,7 +353,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		peer := strings.TrimSpace(request.Args[1])
-		if peer == "" {
+		if peer == "" && request.CallID == "" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -372,7 +372,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		peer := strings.TrimSpace(request.Args[1])
-		if peer == "" {
+		if peer == "" && request.CallID == "" {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -396,6 +396,10 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		a.diag.RecordTrace("manager.call", "persist.failed", request.TraceID, map[string]any{"engine_event": request, "error": err.Error()})
 		writeError(w, http.StatusInternalServerError, "could not persist call")
+		return
+	}
+	if call.ID == "" {
+		w.WriteHeader(http.StatusNoContent)
 		return
 	}
 	if changed {

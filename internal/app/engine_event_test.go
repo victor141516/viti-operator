@@ -460,6 +460,135 @@ func TestHistoricalCallEventsAfterTunnelFailureCannotReopenCall(t *testing.T) {
 	}
 }
 
+func TestCallCanPrecedeDelayedTunnelUpDelivery(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	firstUpAt := time.Date(2026, 9, 10, 11, 0, 0, 0, time.UTC)
+	processStartAt := firstUpAt.Add(time.Second)
+	secondUpAt := firstUpAt.Add(2 * time.Second)
+	callStartedAt := firstUpAt.Add(3 * time.Second)
+	callActiveAt := firstUpAt.Add(4 * time.Second)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, firstUpAt, http.StatusNoContent)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "tunnel_start", "recorded_at_ns": processStartAt.UnixNano(),
+		"tunnel_generation": "process-two", "tunnel_sequence": 1, "args": []string{"replacement process"},
+	}, http.StatusNoContent)
+
+	// The direct call evidence overtakes the already-recorded tunnel_up in its
+	// durable delivery queue. Since it is newer than the last down boundary, it
+	// must remain open while the up webhook catches up.
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_out", "call_id": "after-down-call",
+		"recorded_at_ns": callStartedAt.UnixNano(), "args": []string{"+15555550112"},
+	}, http.StatusOK)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_active", "call_id": "after-down-call",
+		"recorded_at_ns": callActiveAt.UnixNano(), "args": []string{"out", "+15555550112"},
+	}, http.StatusOK)
+	call, _ := app.store.GetCallByEngineID("engine-1", "after-down-call")
+	if call.State != "active" || call.EndedAt != nil {
+		t.Fatalf("queued tunnel up caused a false terminal call: %#v", call)
+	}
+	postTunnelEvent(t, server.URL, "process-two", 2, true, secondUpAt, http.StatusNoContent)
+	call, _ = app.store.GetCallByEngineID("engine-1", "after-down-call")
+	if call.State != "active" || call.EndedAt != nil {
+		t.Fatalf("delayed tunnel up did not preserve the established call: %#v", call)
+	}
+}
+
+func TestOldCallHookCannotReopenAfterNewTunnelAndManagerRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	cfg := Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}
+	app, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	firstUpAt := time.Date(2026, 9, 10, 11, 30, 0, 0, time.UTC)
+	oldCallAt := firstUpAt.Add(time.Second)
+	lastDownAt := firstUpAt.Add(2 * time.Second)
+	processStartAt := firstUpAt.Add(3 * time.Second)
+	secondUpAt := firstUpAt.Add(4 * time.Second)
+	postTunnelEvent(t, server.URL, "process-one", 1, true, firstUpAt, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-one", 2, false, lastDownAt, http.StatusNoContent)
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "tunnel_start", "recorded_at_ns": processStartAt.UnixNano(),
+		"tunnel_generation": "process-two", "tunnel_sequence": 1, "args": []string{"replacement process"},
+	}, http.StatusNoContent)
+	postTunnelEvent(t, server.URL, "process-two", 2, true, secondUpAt, http.StatusNoContent)
+	server.Close()
+
+	restarted, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedServer := httptest.NewServer(restarted.Handler())
+	defer restartedServer.Close()
+	postEngineEvent(t, restartedServer.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_out", "call_id": "old-generation-call",
+		"recorded_at_ns": oldCallAt.UnixNano(), "args": []string{"+15555550113"},
+	}, http.StatusOK)
+	call, _ := restarted.store.GetCallByEngineID("engine-1", "old-generation-call")
+	if call.State != "interrupted" || call.EndedAt == nil || !call.EndedAt.Equal(processStartAt) {
+		t.Fatalf("old hook reopened after a newer tunnel generation: %#v", call)
+	}
+}
+
+func TestPrivateIncomingCallUpdatesByStableCallID(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	startedAt := time.Date(2026, 9, 10, 12, 30, 0, 0, time.UTC)
+	base := map[string]any{"instance": "engine-1", "call_id": "private-call"}
+	base["event"], base["recorded_at_ns"], base["args"] = "call_in", startedAt.UnixNano(), []string{""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_active", startedAt.Add(time.Second).UnixNano(), []string{"in", ""}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+	base["event"], base["recorded_at_ns"], base["args"] = "call_result", startedAt.Add(time.Minute).UnixNano(), []string{"in", "", "ANSWER", "16"}
+	postEngineEvent(t, server.URL, "test-token", base, http.StatusOK)
+
+	call, ok := app.store.GetCallByEngineID("engine-1", "private-call")
+	if !ok || call.Peer != "Private number" || call.State != "ended" || call.AnsweredAt == nil || call.EndedAt == nil {
+		t.Fatalf("private call did not complete through empty-peer updates: %#v", call)
+	}
+}
+
+func TestUnknownEmptyPeerCallUpdateDoesNotCreateHistory(t *testing.T) {
+	app, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "test-token"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "engine-1", "event": "call_result", "call_id": "unknown-private-call",
+		"recorded_at_ns": time.Now().UTC().UnixNano(), "args": []string{"in", "", "NOANSWER", "19"},
+	}, http.StatusNoContent)
+	if calls := app.store.Calls(); len(calls) != 0 {
+		t.Fatalf("empty update without a matching call created history: %#v", calls)
+	}
+}
+
 func TestConcurrentCallHooksAndTunnelFailureConvergeAtomically(t *testing.T) {
 	store, err := OpenStore(filepath.Join(t.TempDir(), "state.json"))
 	if err != nil {

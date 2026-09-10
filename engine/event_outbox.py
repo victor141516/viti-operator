@@ -3,7 +3,7 @@
 
 Files are written atomically below the bind-mounted runtime directory before an
 AMI callback returns.  A separate worker retries transient failures until the
-manager has durably accepted the event.  The manager's SMS state machine is
+manager has durably accepted the event.  The manager's event handlers are
 idempotent, so losing the HTTP response and retrying is safe.
 """
 import json
