@@ -20,8 +20,9 @@ OUTBOX = Path(os.environ.get("VITI_EVENT_OUTBOX_DIR", os.path.join(RUNDIR, "even
 
 
 class _Response:
-    def __init__(self, status_code):
+    def __init__(self, status_code, text=""):
         self.status_code = status_code
+        self.text = text
 
 
 class _HTTPSession:

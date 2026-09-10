@@ -99,11 +99,14 @@ def main():
             response = event_outbox.HTTP.post(f"{manager_url.rstrip('/')}/api/engine/event",
                                               json=payload, headers=headers, timeout=10)
             if diagnostics_enabled:
-                append_json("/logs/event-delivery.jsonl", {
-                    "at_ns": time.time_ns(), "event": event, "call_id": payload.get("call_id", ""),
-                    "trace_id": payload.get("trace_id", ""), "status": response.status_code,
-                    "response": response.text,
-                })
+                try:
+                    append_json("/logs/event-delivery.jsonl", {
+                        "at_ns": time.time_ns(), "event": event, "call_id": payload.get("call_id", ""),
+                        "trace_id": payload.get("trace_id", ""), "status": response.status_code,
+                        "response": getattr(response, "text", ""),
+                    })
+                except Exception:
+                    pass
             return 0 if 200 <= response.status_code < 300 else 1
         except Exception as error:
             if diagnostics_enabled:

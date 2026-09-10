@@ -134,6 +134,21 @@ class NotifyTest(unittest.TestCase):
         self.assertEqual(payload["args"], ["web-a", "web-a", "leg-a", "PJSIP/web-0001"])
         self.assertEqual(result, 0)
 
+    def test_diagnostics_do_not_turn_a_real_204_admission_into_failure(self):
+        with mock.patch.dict(os.environ, {"VOWIFI_DIAGNOSTICS_ENABLED": "1"}, clear=True), \
+                mock.patch.object(sys, "argv", [
+                    "notify.py", "participant_joined", "linked-42", "trace-99",
+                    "web-a", "web-a", "leg-a", "PJSIP/web-0001",
+                ]), \
+                mock.patch.object(notify, "load_env", return_value={"VOWIFI_ID": "engine-one", "MANAGER_URL": "http://manager"}), \
+                mock.patch.object(os, "makedirs"), \
+                mock.patch.object(notify, "append_json", side_effect=[None, OSError("log disk full")]) as append, \
+                mock.patch.object(event_outbox.HTTP, "post", return_value=event_outbox._Response(204)):
+            result = notify.main()
+
+        self.assertEqual(result, 0)
+        self.assertGreaterEqual(append.call_count, 2)
+
     def test_participant_join_fails_closed_when_manager_admission_is_deferred(self):
         response = mock.Mock(status_code=502, text="temporary AMI failure")
         with mock.patch.dict(os.environ, {}, clear=True), \
