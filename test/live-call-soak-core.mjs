@@ -12,8 +12,8 @@ export class LiveCallSoakTracker {
     this.callEndedAt = null
     this.activeSamples = 0
     this.unhealthySamples = []
-    this.ikeIDs = new Set()
-    this.childIDs = new Set()
+    this.ikeGeneration = null
+    this.childGeneration = null
     this.ikeRenewals = 0
     this.childRenewals = 0
     this.mediaStreams = new Map()
@@ -45,6 +45,28 @@ export class LiveCallSoakTracker {
       this[changeCounter] += 1
       reasons.push(changedReason)
     }
+  }
+
+  observeSAReplacement(property, ids, renewalCounter) {
+    const current = new Set((ids || []).map(id => String(id)))
+    if (current.size === 0) return
+    const baseline = this[property]
+    if (baseline === null) {
+      this[property] = current
+      return
+    }
+    const surviving = new Set([...baseline].filter(id => current.has(id)))
+    if (surviving.size > 0) {
+      // A rekey can expose old and new SAs concurrently.  Keep only the old
+      // generation members that still survive and do not count the candidate
+      // until every prior member has disappeared.
+      this[property] = surviving
+      return
+    }
+    // None of the previously established generation remains.  This is a
+    // completed replacement, not merely a candidate that appeared briefly.
+    this[property] = current
+    this[renewalCounter] += 1
   }
 
   observeMediaDirection(stream, direction, packets, at, reasons) {
@@ -117,8 +139,8 @@ export class LiveCallSoakTracker {
       if (!answered) return
       this.phase = 'active'
       this.callStartedAt = at
-      for (const id of sample.ike_ids || []) this.ikeIDs.add(String(id))
-      for (const id of sample.child_ids || []) this.childIDs.add(String(id))
+      this.observeSAReplacement('ikeGeneration', sample.ike_ids, 'ikeRenewals')
+      this.observeSAReplacement('childGeneration', sample.child_ids, 'childRenewals')
     } else if (this.phase === 'active' && !active) {
       this.phase = 'post-call'
       this.callEndedAt = at
@@ -151,20 +173,8 @@ export class LiveCallSoakTracker {
     this.observeMediaStreams(sample.media_streams, at, reasons)
     if (reasons.length) this.unhealthySamples.push({ timestamp: sample.timestamp, reasons: [...new Set(reasons)] })
 
-    for (const id of sample.ike_ids || []) {
-      const value = String(id)
-      if (!this.ikeIDs.has(value)) {
-        this.ikeIDs.add(value)
-        this.ikeRenewals += 1
-      }
-    }
-    for (const id of sample.child_ids || []) {
-      const value = String(id)
-      if (!this.childIDs.has(value)) {
-        this.childIDs.add(value)
-        this.childRenewals += 1
-      }
-    }
+    this.observeSAReplacement('ikeGeneration', sample.ike_ids, 'ikeRenewals')
+    this.observeSAReplacement('childGeneration', sample.child_ids, 'childRenewals')
   }
 
   finish(reason) {

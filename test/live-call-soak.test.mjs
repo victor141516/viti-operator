@@ -41,7 +41,7 @@ test('accepts one call only after the required natural SA transitions and post-c
   tracker.observe(sample(10))
   tracker.observe(sample(50, { ike_ids: [2], child_ids: [11] }))
   tracker.observe(sample(90, { ike_ids: [3], child_ids: [12] }))
-  tracker.observe(sample(115))
+  tracker.observe(sample(115, { ike_ids: [3], child_ids: [12] }))
   tracker.observe(sample(120, { active_channels: 0 }))
   tracker.observe(sample(130, { active_channels: 0 }))
 
@@ -120,6 +120,33 @@ test('counts each replacement SA once while old and new generations overlap', ()
   assert.equal(summary.observed_ike_renewals, 1)
   assert.equal(summary.observed_child_renewals, 1)
   assert.equal(summary.accepted, true)
+})
+
+test('does not count a replacement candidate until the old SA disappears', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 1, minIkeRenewals: 1, minChildRenewals: 1, postCallSeconds: 0 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(2, { ike_ids: [1, 2], child_ids: [10, 11] }))
+
+  assert.equal(tracker.ikeRenewals, 0)
+  assert.equal(tracker.childRenewals, 0)
+
+  tracker.observe(sample(3, { ike_ids: [2], child_ids: [11] }))
+  assert.equal(tracker.ikeRenewals, 1)
+  assert.equal(tracker.childRenewals, 1)
+})
+
+test('does not count an aborted replacement candidate', () => {
+  const tracker = new LiveCallSoakTracker({ minCallSeconds: 2, minIkeRenewals: 1, minChildRenewals: 1, postCallSeconds: 0 })
+  tracker.observe(sample(1))
+  tracker.observe(sample(2, { ike_ids: [1, 2], child_ids: [10, 11] }))
+  tracker.observe(sample(3, { ike_ids: [1], child_ids: [10] }))
+  tracker.observe(sample(4, { active_channels: 0 }))
+  tracker.observe(sample(5, { active_channels: 0 }))
+
+  const summary = tracker.summary()
+  assert.equal(summary.observed_ike_renewals, 0)
+  assert.equal(summary.observed_child_renewals, 0)
+  assert.equal(summary.accepted, false)
 })
 
 test('rejects a call whose RTP packet counters stop advancing', () => {
