@@ -8,7 +8,7 @@ import socket
 import subprocess
 import time
 
-from tunnel_contract import validate_status, validate_transition_sequence
+from tunnel_contract import ContractViolation, validate_status, validate_transition_sequence
 
 
 RUNDIR = Path(os.environ.get("VOWIFI_RUNDIR", "/run/vowifi"))
@@ -17,6 +17,8 @@ EXPECTED_INNER = os.environ.get("LAB_EXPECTED_INNER", "2001:db8:39:100::1")
 EXPECTED_PCSCF = os.environ.get("LAB_EXPECTED_PCSCF", "2001:db8:39:200::10")
 ECHO_PORT = int(os.environ.get("LAB_ECHO_PORT", "18080"))
 TIMEOUT = float(os.environ.get("LAB_ATTACH_TIMEOUT", "30"))
+MODE = os.environ.get("LAB_PROBE_MODE", "connected")
+EXPECT_DUPLICATE_DOWN = os.environ.get("LAB_EXPECT_LEGACY_DUPLICATE_DOWN") == "1"
 
 
 def command(*args):
@@ -37,6 +39,22 @@ def wait_for_connected():
             last = repr(error)
         time.sleep(0.2)
     raise AssertionError(f"backend did not connect within {TIMEOUT}s: {last}")
+
+
+def wait_for_down():
+    deadline = time.monotonic() + TIMEOUT
+    last = "status not published"
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads((RUNDIR / "swu_status.json").read_text(encoding="utf-8"))
+            observation = validate_status(payload)
+            if observation.state == "DOWN":
+                return observation
+            last = f"state={observation.state}"
+        except Exception as error:
+            last = repr(error)
+        time.sleep(0.2)
+    raise AssertionError(f"backend did not stop within {TIMEOUT}s: {last}")
 
 
 def load_transitions():
@@ -62,7 +80,7 @@ def echo(sock_type, payload):
         raise AssertionError(f"echo mismatch: {received!r} != {payload!r}")
 
 
-def main():
+def probe_connected():
     observation = wait_for_connected()
     assert observation.backend == EXPECTED_BACKEND
     assert observation.inner_ip == EXPECTED_INNER
@@ -90,6 +108,36 @@ def main():
     echo(socket.SOCK_DGRAM, b"viti-swu-lab-udp")
     echo(socket.SOCK_STREAM, b"viti-swu-lab-tcp")
     print(f"LAB_BACKEND_OK={EXPECTED_BACKEND}")
+
+
+def probe_lifecycle():
+    observation = wait_for_down()
+    assert observation.backend == EXPECTED_BACKEND
+    transitions = load_transitions()
+    names = [event["event"] for event in transitions]
+    if EXPECT_DUPLICATE_DOWN:
+        assert EXPECTED_BACKEND == "python"
+        assert names == ["tunnel_start", "tunnel_up", "tunnel_down", "tunnel_down"]
+        try:
+            validate_transition_sequence(transitions)
+        except ContractViolation as error:
+            assert "invalid tunnel lifecycle" in str(error)
+        else:
+            raise AssertionError("legacy duplicate tunnel_down was unexpectedly accepted")
+        print("LAB_XFAIL=python:duplicate_tunnel_down")
+        return
+    validate_transition_sequence(transitions)
+    assert names == ["tunnel_start", "tunnel_up", "tunnel_down"]
+    print(f"LAB_LIFECYCLE_OK={EXPECTED_BACKEND}")
+
+
+def main():
+    if MODE == "connected":
+        probe_connected()
+    elif MODE == "lifecycle":
+        probe_lifecycle()
+    else:
+        raise ValueError(f"unknown LAB_PROBE_MODE: {MODE}")
 
 
 if __name__ == "__main__":

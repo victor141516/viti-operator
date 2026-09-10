@@ -1,0 +1,44 @@
+{
+  "schema_version": 1,
+  "backend": "python",
+  "scenario": "deterministic_attach_transport_clean_stop",
+  "fixture": {
+    "imsi": "001010123456789",
+    "inner_ip": "2001:db8:39:100::1",
+    "pcscf": "2001:db8:39:200::10",
+    "interface": "ipsec0",
+    "mtu": 1400
+  },
+  "passes": [
+    "ike_sa_init",
+    "eap_aka",
+    "inner_ip_assignment",
+    "pcscf_discovery",
+    "userspace_tun",
+    "outer_route_isolation",
+    "udp_bidirectional",
+    "tcp_bidirectional",
+    "terminal_down_status"
+  ],
+  "lifecycle": [
+    "tunnel_start",
+    "tunnel_up",
+    "tunnel_down",
+    "tunnel_down"
+  ],
+  "expected_failures": [
+    {
+      "id": "duplicate_tunnel_down",
+      "contract_requirement": [
+        "tunnel_start",
+        "tunnel_up",
+        "tunnel_down"
+      ],
+      "strongswan_must_pass": true
+    }
+  ],
+  "legacy_diagnostics_not_in_contract": [
+    "malformed attempted link-local address fe80:::1/64",
+    "Asterisk reload error in the minimal lab image"
+  ]
+}

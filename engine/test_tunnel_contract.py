@@ -47,6 +47,22 @@ class TunnelContractTest(unittest.TestCase):
         with self.assertRaises(tunnel_contract.ContractViolation):
             tunnel_contract.validate_transition_sequence(events)
 
+    def test_duplicate_down_transition_is_not_part_of_the_contract(self):
+        events = [
+            {"event": "tunnel_start", "tunnel_generation": "g1", "tunnel_sequence": 1,
+             "recorded_at_ns": 10},
+            {"event": "tunnel_up", "tunnel_generation": "g1", "tunnel_sequence": 2,
+             "recorded_at_ns": 20},
+            {"event": "tunnel_down", "tunnel_generation": "g1", "tunnel_sequence": 3,
+             "recorded_at_ns": 30},
+            {"event": "tunnel_down", "tunnel_generation": "g1", "tunnel_sequence": 4,
+             "recorded_at_ns": 40},
+        ]
+        with self.assertRaisesRegex(
+            tunnel_contract.ContractViolation, "invalid tunnel lifecycle"
+        ):
+            tunnel_contract.validate_transition_sequence(events)
+
     def test_python_backend_command_maps_the_stable_inputs(self):
         backend, command = tunnel_backend.backend_command({
             "SWU_BACKEND": "python",

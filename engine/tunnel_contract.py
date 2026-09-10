@@ -116,4 +116,13 @@ def validate_transition_sequence(events):
         expected_sequence += 1
     if events[0]["event"] != "tunnel_start":
         raise ContractViolation("first transition must claim tunnel_start")
+    observed = tuple(event["event"] for event in events)
+    allowed = {
+        ("tunnel_start",),
+        ("tunnel_start", "tunnel_up"),
+        ("tunnel_start", "tunnel_down"),
+        ("tunnel_start", "tunnel_up", "tunnel_down"),
+    }
+    if observed not in allowed:
+        raise ContractViolation(f"invalid tunnel lifecycle: {observed!r}")
     return generation

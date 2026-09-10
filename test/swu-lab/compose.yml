@@ -67,6 +67,21 @@ services:
     volumes:
       - python-runtime:/run/vowifi:ro
 
+  python-lifecycle-probe:
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/python-backend.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_EXPECTED_BACKEND: python
+      LAB_EXPECT_LEGACY_DUPLICATE_DOWN: "1"
+      LAB_PROBE_MODE: lifecycle
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - python-runtime:/run/vowifi:ro
+
 networks:
   outer:
     driver: bridge
