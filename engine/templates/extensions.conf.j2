@@ -253,7 +253,7 @@ exten => s,1,Goto(viti-carrier-conference,s,1)
 same => n,Goto(viti-client-conference,s,1)
 
 [viti-outgoing-conference]
-exten => s,1,Goto(viti-client-conference,s,1)
+exten => s,1,GotoIf($["${VITI_PARTICIPANT_ROLE}" = "service"]?viti-service-conference,s,1:viti-client-conference,s,1)
 same => n,Goto(viti-carrier-conference,s,1)
 
 [viti-client-conference]

@@ -146,6 +146,15 @@ class NotifyTest(unittest.TestCase):
         self.assertIn('${VITI_CLIENT_ID}" = ""]?Set(__VITI_CLIENT_ID=', public_call)
         self.assertIn('${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=', public_call)
 
+        outgoing_dispatch = template[
+            template.index("[viti-outgoing-conference]"):
+            template.index("[viti-client-conference]")
+        ]
+        self.assertIn('VITI_PARTICIPANT_ROLE', outgoing_dispatch)
+        self.assertIn('viti-service-conference', outgoing_dispatch)
+        self.assertIn('viti-client-conference', outgoing_dispatch)
+        self.assertIn('viti-carrier-conference', outgoing_dispatch)
+
     def test_participant_event_keeps_call_and_trace_identity(self):
         response = mock.Mock(status_code=204, text="")
         with mock.patch.dict(os.environ, {}, clear=True), \
