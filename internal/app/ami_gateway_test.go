@@ -59,6 +59,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err := gateway.EndConference(ctx, "asterisk-call-42"); err != nil {
 		t.Fatal(err)
 	}
+	if err := gateway.RingClients(ctx, Call{EngineCallID: "asterisk-call-42", TraceID: "trace-42", Peer: "+34987654321"}); err != nil {
+		t.Fatal(err)
+	}
 	mediaRequest := serviceMediaBridgeRequest{
 		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
 		ServiceName: "transcriber", ConnectionID: "integration-42", RecordingID: "track-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
@@ -82,11 +85,12 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	var sawRegister bool
 	var sawDirectedHangup bool
 	var sawConferenceEnd bool
+	var sawScreenedRing bool
 	var sawMediaJoin bool
 	var sawServiceCall bool
 	var sawMediaDTMF bool
 	var sawMediaLeave bool
-	for range 28 {
+	for range 31 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -108,6 +112,10 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 			sawConferenceEnd = first(request, "Conference") == "asterisk-call-42" && first(request, "Channel") == "all"
 		}
 		if first(request, "Action") == "Originate" {
+			if first(request, "Channel") == "Local/s@viti-ring-clients" {
+				sawScreenedRing = first(request, "Application") == "Wait" && first(request, "Data") == "1" &&
+					strings.Contains(first(request, "Variable"), "__VITI_CALL_ID=asterisk-call-42")
+			}
 			if first(request, "Context") == "viti-service-conference" {
 				sawMediaJoin = first(request, "Channel") == "UnicastRTP/manager:32000/c(opus)" &&
 					first(request, "ChannelId") == "media-42" && strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ROLE=service") &&
@@ -132,8 +140,8 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if !sawUnregister || !sawRegister {
 		t.Fatalf("IMS commands missing: unregister=%t register=%t", sawUnregister, sawRegister)
 	}
-	if !sawDirectedHangup || !sawConferenceEnd {
-		t.Fatalf("conference controls missing: directed=%t end=%t", sawDirectedHangup, sawConferenceEnd)
+	if !sawDirectedHangup || !sawConferenceEnd || !sawScreenedRing {
+		t.Fatalf("conference controls missing: directed=%t end=%t screened_ring=%t", sawDirectedHangup, sawConferenceEnd, sawScreenedRing)
 	}
 	if !sawMediaJoin || !sawServiceCall || !sawMediaDTMF || !sawMediaLeave {
 		t.Fatalf("service media actions missing: join=%t call=%t dtmf=%t leave=%t", sawMediaJoin, sawServiceCall, sawMediaDTMF, sawMediaLeave)

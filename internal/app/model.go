@@ -97,10 +97,11 @@ type ScreeningStageRecord struct {
 }
 
 type ScreeningUpdate struct {
-	CommandID string          `json:"command_id"`
-	Action    string          `json:"action"`
-	Output    json.RawMessage `json:"output,omitempty"`
-	At        time.Time       `json:"at"`
+	ServiceName string          `json:"service_name"`
+	CommandID   string          `json:"command_id"`
+	Action      string          `json:"action"`
+	Output      json.RawMessage `json:"output,omitempty"`
+	At          time.Time       `json:"at"`
 }
 
 type CallScreeningSummary struct {

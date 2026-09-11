@@ -408,6 +408,86 @@ func TestIntegrationServiceCallRequiresMediaCapability(t *testing.T) {
 	}
 }
 
+func TestIntegrationScreeningDecisionAdvancesPipeline(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	application.screening = newScreeningManager([]string{"screen"}, application.store, application.events, application.integrations, screeningCallbacks{})
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "screen",
+		Capabilities: map[string]json.RawMessage{"call.screen": json.RawMessage(`{"decision_timeout_ms":2000,"processing_timeout_ms":-1}`)},
+	})
+	defer socket.Close()
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	call := saveIncomingScreeningCall(t, application, "call-integration-screen")
+	application.screening.StartIncoming(call)
+	readIntegrationType(t, socket, "call.incoming")
+	readIntegrationType(t, socket, "screening.offer")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "screening.decision", Version: 1, CommandID: "screen-next", CallID: call.ID,
+		Payload: json.RawMessage(`{"revision":1,"action":"next","output":{"spam":false}}`),
+	})
+	readCommandResult(t, socket, "screen-next", "accepted")
+	completed := readCommandResult(t, socket, "screen-next", "completed")
+	payload := completed["payload"].(map[string]any)
+	if payload["state"] != "ringing_clients" || payload["authoritative"] != true || payload["revision"] != float64(2) {
+		t.Fatalf("screening result = %#v", completed)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if action := application.screening.WaitInitial(ctx, call.ID); action != "ring_clients" {
+		t.Fatalf("initial action = %q", action)
+	}
+}
+
+func TestIntegrationControllerMediaCanAttachBeforeCarrierAnswer(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	application.screening = newScreeningManager([]string{"voice"}, application.store, application.events, application.integrations, screeningCallbacks{})
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "voice",
+		Capabilities: map[string]json.RawMessage{"call.screen": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`)},
+	})
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	call := saveIncomingScreeningCall(t, application, "call-controller-attach")
+	application.screening.StartIncoming(call)
+	readIntegrationType(t, socket, "call.incoming")
+	readIntegrationType(t, socket, "screening.offer")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "screening.decision", Version: 1, CommandID: "take-control", CallID: call.ID,
+		Payload: json.RawMessage(`{"revision":1,"action":"take_control"}`),
+	})
+	readCommandResult(t, socket, "take-control", "accepted")
+	readCommandResult(t, socket, "take-control", "completed")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "controller-media", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"controller"}`),
+	})
+	readCommandResult(t, socket, "controller-media", "accepted")
+	readIntegrationType(t, socket, "media.session.created")
+	readCommandResult(t, socket, "controller-media", "completed")
+	media.mu.Lock()
+	if media.attach.Purpose != "controller" || media.attach.Call.State != "ringing" {
+		t.Fatalf("controller attach = %#v", media.attach)
+	}
+	media.mu.Unlock()
+	_ = socket.Close()
+	deadline := time.Now().Add(time.Second)
+	for {
+		stored, _ := application.store.GetCall(call.ID)
+		if stored.Screening != nil && stored.Screening.Outcome == "ring_clients" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("controller disconnect did not finish fail-open persistence")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)
 	media := &fakeServiceMediaController{resolvedSession: "media-source", resolvedService: "transcriber"}
@@ -521,7 +601,8 @@ func (f *fakeServiceMediaController) CloseConnection(connectionID, _ string) {
 	}
 }
 
-func (*fakeServiceMediaController) CloseCall(string, string) {}
+func (*fakeServiceMediaController) CloseCall(string, string)                {}
+func (*fakeServiceMediaController) CloseServiceCall(string, string, string) {}
 
 func (f *fakeServiceMediaController) ResolveEngineSession(sessionID string) (string, string, bool) {
 	f.mu.Lock()

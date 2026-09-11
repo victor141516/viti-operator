@@ -45,6 +45,16 @@ type serviceMediaController interface {
 	SendDTMF(context.Context, serviceMediaDTMFRequest) error
 	CloseConnection(connectionID, reason string)
 	CloseCall(callID, reason string)
+	CloseServiceCall(serviceName, callID, reason string)
+}
+
+type serviceMediaState struct {
+	State        string
+	SessionID    string
+	CallID       string
+	ServiceName  string
+	ConnectionID string
+	Purpose      string
 }
 
 type serviceMediaOutgoingPreparation struct {

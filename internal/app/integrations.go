@@ -275,6 +275,9 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 				a.serviceMedia.CloseConnection(connection.id, "control_disconnected")
 			}
 			if a.integrations.release(connection.name, connection.id) {
+				if a.screening != nil {
+					a.screening.ServiceDisconnected(connection.name, connection.id)
+				}
 				a.events.Publish("service.disconnected", a.integrationServicePayload(connection))
 			}
 		})
@@ -345,6 +348,17 @@ func validateIntegrationHello(hello integrationHello) error {
 		}
 		if len(bytes.TrimSpace(options)) > 0 && !json.Valid(options) {
 			return fmt.Errorf("invalid options for capability %q", capability)
+		}
+		if capability == "call.screen" {
+			parsed := screeningCapabilityOptions{}
+			if len(bytes.TrimSpace(options)) != 0 {
+				if err := json.Unmarshal(options, &parsed); err != nil {
+					return fmt.Errorf("invalid options for capability %q", capability)
+				}
+			}
+			if err := parsed.validate(); err != nil {
+				return fmt.Errorf("invalid options for capability %q: %w", capability, err)
+			}
 		}
 	}
 	return nil
@@ -464,7 +478,7 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 	if replayed {
 		return queueIntegrationResult(results, previous)
 	}
-	if _, granted := connection.capabilities[integrationCommandCapability(command.Type)]; !granted {
+	if !integrationCommandGranted(connection, command) {
 		base.Status = "rejected"
 		base.ErrorCode = "capability_not_granted"
 		base.Message = "the service did not advertise the required capability"
@@ -519,9 +533,23 @@ func integrationCommandCapability(commandType string) string {
 	switch commandType {
 	case "media.attach", "media.ice":
 		return "call.media"
+	case "screening.decision":
+		return "call.screen"
 	default:
 		return commandType
 	}
+}
+
+func integrationCommandGranted(connection *integrationConnection, command integrationCommand) bool {
+	_, granted := connection.capabilities[integrationCommandCapability(command.Type)]
+	if granted || command.Type != "screening.decision" {
+		return granted
+	}
+	var payload screeningDecisionPayload
+	if decodeIntegrationPayload(command.Payload, &payload) == nil && strings.EqualFold(strings.TrimSpace(payload.Action), "hangup") {
+		_, granted = connection.capabilities["call.hangup"]
+	}
+	return granted
 }
 
 func integrationCommandAffectsCallLifecycle(commandType string) bool {
@@ -577,6 +605,23 @@ func validateIntegrationCommand(command integrationCommand) (string, string) {
 		}
 		if payload.Duration != 0 && (payload.Duration < 40 || payload.Duration > 6000) {
 			return "invalid_payload", "duration_ms must be between 40 and 6000"
+		}
+	case "screening.decision":
+		if strings.TrimSpace(command.CallID) == "" {
+			return "invalid_payload", "call_id is required"
+		}
+		var payload screeningDecisionPayload
+		if err := decodeIntegrationPayload(command.Payload, &payload); err != nil {
+			return "invalid_payload", err.Error()
+		}
+		if payload.Revision == 0 {
+			return "invalid_payload", "revision is required"
+		}
+		if !screeningDecisionAction(strings.ToLower(strings.TrimSpace(payload.Action))) {
+			return "invalid_payload", "action must be take_control, next, ring_clients, or hangup"
+		}
+		if len(payload.Output) > screeningOutputLimit {
+			return "output_too_large", "output exceeds 64 KiB"
 		}
 	default:
 		return "unsupported_command", "this capability does not define a command in protocol version 1"
@@ -654,6 +699,8 @@ func (a *App) executeIntegrationCommand(ctx context.Context, connection *integra
 		return a.executeIntegrationMediaICE(ctx, connection, command, result)
 	case "call.dtmf":
 		return a.executeIntegrationDTMF(ctx, connection, command, result)
+	case "screening.decision":
+		return a.executeIntegrationScreeningDecision(connection, command, result)
 	default:
 		result.Status = "rejected"
 		result.ErrorCode = "unsupported_command"
@@ -676,15 +723,24 @@ func (a *App) executeIntegrationMediaAttach(ctx context.Context, connection *int
 		result.Status, result.ErrorCode, result.Message = "rejected", "already_ended", "call has already ended"
 		return result
 	}
-	if call.State != "active" {
-		result.Status, result.ErrorCode, result.Message = "rejected", "call_not_active", "media can only attach after the carrier call is active"
-		return result
-	}
 	var payload integrationMediaAttachPayload
 	_ = decodeIntegrationPayload(command.Payload, &payload)
 	purpose := strings.TrimSpace(payload.Purpose)
 	if purpose == "" {
 		purpose = "auxiliary"
+	}
+	if purpose == "controller" {
+		if a.screening == nil {
+			result.Status, result.ErrorCode, result.Message = "rejected", "screening_not_found", "screening is not enabled"
+			return result
+		}
+		if err := a.screening.ControllerAttachAllowed(connection.name, connection.id, call.ID); err != nil {
+			result.Status, result.ErrorCode, result.Message = "rejected", screeningErrorCode(err), err.Error()
+			return result
+		}
+	} else if call.State != "active" {
+		result.Status, result.ErrorCode, result.Message = "rejected", "call_not_active", "auxiliary media can only attach after the carrier call is active"
+		return result
 	}
 	description, err := a.serviceMedia.Attach(ctx, serviceMediaAttachRequest{
 		ServiceName: connection.name, ConnectionID: connection.id, Call: call,
@@ -695,6 +751,23 @@ func (a *App) executeIntegrationMediaAttach(ctx context.Context, connection *int
 		return result
 	}
 	result.Status, result.Payload = "completed", description
+	return result
+}
+
+func (a *App) executeIntegrationScreeningDecision(connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+	if a.screening == nil {
+		result.Status, result.ErrorCode, result.Message = "failed", "screening_unavailable", "screening is not enabled"
+		return result
+	}
+	var payload screeningDecisionPayload
+	_ = decodeIntegrationPayload(command.Payload, &payload)
+	_, canHangup := connection.capabilities["call.hangup"]
+	receipt, err := a.screening.Decide(connection.name, connection.id, command.CommandID, strings.TrimSpace(command.CallID), payload, canHangup)
+	if err != nil {
+		result.Status, result.ErrorCode, result.Message = "rejected", screeningErrorCode(err), err.Error()
+		return result
+	}
+	result.Status, result.Payload = "completed", receipt
 	return result
 }
 
