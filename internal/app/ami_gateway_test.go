@@ -59,12 +59,34 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err := gateway.EndConference(ctx, "asterisk-call-42"); err != nil {
 		t.Fatal(err)
 	}
+	mediaRequest := serviceMediaBridgeRequest{
+		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
+		ServiceName: "transcriber", ConnectionID: "integration-42", RecordingID: "track-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
+	}
+	if err := gateway.JoinServiceMedia(ctx, mediaRequest); err != nil {
+		t.Fatal(err)
+	}
+	callRequest := mediaRequest
+	callRequest.SessionID = "media-call-43"
+	if err := gateway.StartServiceCall(ctx, callRequest, "+34987654321"); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.SendServiceDTMF(ctx, "media-42", "#", 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.LeaveServiceMedia(ctx, "media-42"); err != nil {
+		t.Fatal(err)
+	}
 	var sawMessage bool
 	var sawUnregister bool
 	var sawRegister bool
 	var sawDirectedHangup bool
 	var sawConferenceEnd bool
-	for range 18 {
+	var sawMediaJoin bool
+	var sawServiceCall bool
+	var sawMediaDTMF bool
+	var sawMediaLeave bool
+	for range 28 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -79,11 +101,29 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 				sawRegister = true
 			}
 		}
-		if first(request, "Action") == "Hangup" {
-			sawDirectedHangup = first(request, "Channel") == "PJSIP/webrtc-0000002a"
+		if first(request, "Action") == "Hangup" && first(request, "Channel") == "PJSIP/webrtc-0000002a" {
+			sawDirectedHangup = true
 		}
 		if first(request, "Action") == "ConfbridgeKick" {
 			sawConferenceEnd = first(request, "Conference") == "asterisk-call-42" && first(request, "Channel") == "all"
+		}
+		if first(request, "Action") == "Originate" {
+			if first(request, "Context") == "viti-service-conference" {
+				sawMediaJoin = first(request, "Channel") == "UnicastRTP/manager:32000/c(opus)" &&
+					first(request, "ChannelId") == "media-42" && strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ROLE=service") &&
+					strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ID=transcriber") &&
+					strings.Contains(first(request, "Variable"), "VITI_RECORDING_FILE_ID=track-42")
+			}
+			if first(request, "Context") == "from-local" {
+				sawServiceCall = first(request, "Exten") == "+34987654321" && first(request, "ChannelId") == "media-call-43"
+			}
+		}
+		if first(request, "Action") == "PlayDTMF" {
+			sawMediaDTMF = first(request, "Channel") == "UnicastRTP/manager:32000-00000001" && first(request, "Digit") == "#" &&
+				first(request, "Duration") == "300" && first(request, "Receive") == "true"
+		}
+		if first(request, "Action") == "Hangup" && first(request, "Channel") == "UnicastRTP/manager:32000-00000001" {
+			sawMediaLeave = true
 		}
 	}
 	if !sawMessage {
@@ -94,6 +134,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	}
 	if !sawDirectedHangup || !sawConferenceEnd {
 		t.Fatalf("conference controls missing: directed=%t end=%t", sawDirectedHangup, sawConferenceEnd)
+	}
+	if !sawMediaJoin || !sawServiceCall || !sawMediaDTMF || !sawMediaLeave {
+		t.Fatalf("service media actions missing: join=%t call=%t dtmf=%t leave=%t", sawMediaJoin, sawServiceCall, sawMediaDTMF, sawMediaLeave)
 	}
 }
 
@@ -117,7 +160,52 @@ func TestAMITargetAlreadyGoneOnlyAcceptsMissingResources(t *testing.T) {
 	}
 }
 
-func serveFakeAMI(conn net.Conn, requests chan<- map[string][]string) {
+func TestAMIGatewayCleansAcceptedOriginateWhenResponseEventIsLost(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan map[string][]string, 16)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveUncertainOriginateAMI(conn, requests)
+		}
+	}()
+	gateway, err := NewAMIGateway(AMIConfig{
+		Address: listener.Addr().String(), Username: "manager", Secret: "secret",
+		FromNumber: "+34123456789", Realm: "ims.example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := serviceMediaBridgeRequest{
+		SessionID: "media-uncertain", EngineCallID: "call-uncertain", TraceID: "trace-uncertain",
+		ServiceName: "screening-bot", ConnectionID: "connection-uncertain", RecordingID: "track-uncertain",
+		RTPHost: "manager", RTPPort: 32001, Codec: "opus",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := gateway.JoinServiceMedia(ctx, request); err == nil {
+		t.Fatal("originate succeeded despite losing its correlated response event")
+	}
+	foundHangup := false
+	for len(requests) != 0 {
+		action := <-requests
+		if first(action, "Action") == "Hangup" && first(action, "Channel") == "UnicastRTP/manager:32001-00000077" {
+			foundHangup = true
+		}
+	}
+	if !foundHangup {
+		t.Fatal("accepted provisional Originate was not resolved and hung up")
+	}
+}
+
+func serveUncertainOriginateAMI(conn net.Conn, requests chan<- map[string][]string) {
 	defer conn.Close()
 	_, _ = fmt.Fprint(conn, "Asterisk Call Manager/5.0\r\n")
 	reader := bufio.NewReader(conn)
@@ -128,8 +216,53 @@ func serveFakeAMI(conn net.Conn, requests chan<- map[string][]string) {
 		}
 		requests <- frame
 		switch first(frame, "Action") {
+		case "Originate":
+			actionID := first(frame, "ActionID")
+			_, _ = fmt.Fprintf(conn,
+				"Event: Newchannel\r\nChannel: unrelated\r\n\r\n"+
+					"Response: Success\r\nActionID: %s\r\nMessage: Originate successfully queued\r\n\r\n",
+				actionID,
+			)
+			return
+		case "CoreShowChannels":
+			actionID := first(frame, "ActionID")
+			_, _ = fmt.Fprintf(conn,
+				"Response: Success\r\nActionID: %s\r\nEventList: start\r\n\r\n"+
+					"Event: CoreShowChannel\r\nActionID: %s\r\nChannel: UnicastRTP/manager:32001-00000077\r\nUniqueid: media-uncertain\r\n\r\n"+
+					"Event: CoreShowChannelsComplete\r\nActionID: %s\r\nEventList: Complete\r\n\r\n",
+				actionID, actionID, actionID,
+			)
+		case "Logoff":
+			_, _ = fmt.Fprint(conn, "Response: Goodbye\r\n\r\n")
+			return
+		default:
+			_, _ = fmt.Fprint(conn, "Response: Success\r\n\r\n")
+		}
+	}
+}
+
+func serveFakeAMI(conn net.Conn, requests chan<- map[string][]string) {
+	defer conn.Close()
+	_, _ = fmt.Fprint(conn, "Asterisk Call Manager/5.0\r\n")
+	reader := bufio.NewReader(conn)
+	originateSequence := 0
+	for {
+		frame, err := readAMIFrame(reader)
+		if err != nil {
+			return
+		}
+		requests <- frame
+		switch first(frame, "Action") {
 		case "Command":
 			_, _ = fmt.Fprint(conn, "Response: Follows\r\nOutput: volte_ims Registered\r\n\r\n")
+		case "Originate":
+			originateSequence++
+			channel := fmt.Sprintf("UnicastRTP/manager:32000-%08d", originateSequence)
+			_, _ = fmt.Fprintf(conn,
+				"Response: Success\r\nActionID: %s\r\nMessage: Originate successfully queued\r\n\r\n"+
+					"Event: OriginateResponse\r\nActionID: %s\r\nResponse: Success\r\nChannel: %s\r\nUniqueid: %s\r\nReason: 4\r\n\r\n",
+				first(frame, "ActionID"), first(frame, "ActionID"), channel, first(frame, "ChannelId"),
+			)
 		case "Logoff":
 			_, _ = fmt.Fprint(conn, "Response: Goodbye\r\n\r\n")
 			return

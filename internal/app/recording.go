@@ -70,7 +70,7 @@ func (a *App) ingestRecordingTrack(w http.ResponseWriter, instance, callID strin
 	if len(args) > 4 {
 		segmentID = strings.TrimSpace(args[4])
 	}
-	if role != "remote" && role != "client" {
+	if role != "remote" && role != "client" && role != "service" {
 		writeError(w, http.StatusBadRequest, "invalid recording track role")
 		return
 	}
@@ -90,6 +90,13 @@ func (a *App) ingestRecordingTrack(w http.ResponseWriter, instance, callID strin
 			label = "Connected device"
 		}
 		trackID = "client-" + participantID
+		if segmentID != "" {
+			trackID += "-" + segmentID
+		}
+	}
+	if role == "service" {
+		label = clientID
+		trackID = "service-" + participantID
 		if segmentID != "" {
 			trackID += "-" + segmentID
 		}

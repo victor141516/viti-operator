@@ -372,6 +372,14 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 			}
 		}
 	}
+	if !found && update.TraceID != "" {
+		for _, candidate := range s.calls {
+			if candidate.EndedAt == nil && candidate.TraceID == update.TraceID {
+				call, found = candidate, true
+				break
+			}
+		}
+	}
 
 	if found && call.EndedAt != nil {
 		// A start hook may itself have been delayed beyond the terminal event.
@@ -414,6 +422,12 @@ func (s *Store) ApplyEngineCallEvent(update engineCallUpdate) (Call, bool, error
 		}
 	}
 	previous, existed := call, found
+	if call.Instance == "" {
+		call.Instance = update.Instance
+	}
+	if call.EngineCallID == "" {
+		call.EngineCallID = update.EngineCallID
+	}
 	if call.TraceID == "" {
 		call.TraceID = update.TraceID
 	}

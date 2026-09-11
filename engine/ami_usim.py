@@ -61,6 +61,26 @@ def forward_sms_protocol_event(message):
         print("CRITICAL: could not persist VitiSMS event: %r" % error, flush=True)
 
 
+def forward_dtmf_event(message):
+    """Forward one source-side completed RFC 4733 tone to the manager."""
+    if str(getattr(message, "Direction", "")).lower() != "received":
+        return
+    call_id = str(getattr(message, "Linkedid", "") or "").strip()
+    channel = str(getattr(message, "Channel", "") or "").strip()
+    unique_id = str(getattr(message, "Uniqueid", "") or "").strip()
+    digit = str(getattr(message, "Digit", "") or "").strip().upper()
+    duration = str(getattr(message, "DurationMs", "0") or "0").strip()
+    if not call_id or not channel or not unique_id or digit not in "0123456789*#ABCD":
+        print("Ignoring invalid DTMFEnd event", flush=True)
+        return
+    try:
+        event_outbox.enqueue_event(
+            "dtmf", [channel, unique_id, digit, duration], extra={"call_id": call_id}
+        )
+    except Exception as error:
+        print("CRITICAL: could not persist DTMF event: %r" % error, flush=True)
+
+
 # --- Reader binding by physical USB port -----------------------------------------------------
 # Resolve a reader by its STABLE physical USB port path (USIM_READER_PORT, e.g. "3-2") so the SIP
 # IMS-AKA path addresses the same physical reader as pin_keeper — even when pcscd flips
@@ -620,6 +640,10 @@ def main():
     @manager.register_event("VitiSMS")
     def on_sms_protocol(manager, message):
         forward_sms_protocol_event(message)
+
+    @manager.register_event("DTMFEnd")
+    def on_dtmf_end(manager, message):
+        forward_dtmf_event(message)
 
     @manager.register_event("Newchannel")
     def on_newchannel(manager, message):

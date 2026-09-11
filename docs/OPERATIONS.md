@@ -87,7 +87,7 @@ assets before compilation.
 
 | Service | Host exposure | Notes |
 |---|---|---|
-| `manager` | Tailscale TCP 18787 by default | Web, JSON API, event long polling, trusted integration WebSocket, SIP WebSocket proxy |
+| `manager` | Tailscale TCP 18787 and UDP 8790 by default | Web, JSON API, integration/SIP WebSockets, and the trusted-service WebRTC ICE mux |
 | `loopback-proxy` | 127.0.0.1 TCP 18788 by default | Local desktop convenience endpoint |
 | `turn` | Tailscale UDP 3479 | Private ICE relay listener |
 | `engine` | Tailscale UDP 5060, TCP 5061, UDP 10000–10059 | Optional native SIP and media; carrier tunnel stays internal |
@@ -95,6 +95,38 @@ assets before compilation.
 | `capture-engine` | none | Shares engine network namespace and writes PCAP |
 
 AMI, engine WebSocket, and TURN relay ports are private to the Compose network.
+Per-service RTP bridge sockets are also private and ephemeral between `manager`
+and `engine`; do not publish them. `VITI_SERVICE_MEDIA_ENABLED=0` disables the
+integration media endpoint. When enabled, `VITI_SERVICE_MEDIA_ADVERTISE` must be
+the host/VLAN address reachable by the trusted service containers and UDP 8790
+must be allowed on that trusted path.
+
+### Trusted service media
+
+Open `/api/v1/integrations/ws`, register a stable name with `call.media`, and
+send `media.attach` with the target `call_id`, an audio `sdp_offer`, and
+`purpose` set to `auxiliary` or `controller`. Apply the `sdp_answer` returned in
+`media.session.created`; send subsequent candidates with `media.ice`. The full
+answer already contains the manager candidates gathered before the response.
+The offer must provide full-duplex audio. Viti selects the first mutually
+supported format in the offer from Opus, G.722, PCMU, and PCMA, and asks
+Asterisk to use that same format for the session's private RTP bridge.
+
+To originate a call from a service, advertise both `call.start` and
+`call.media`, then include `sdp_offer` with the E.164 destination in the
+`call.start` payload. Viti sends `media.session.created` first and does not dial
+the carrier until the service has applied that answer and WebRTC reaches the
+connected state. ICE candidates can be sent concurrently while the start
+command remains accepted. If media cannot connect within 15 seconds, the call
+record is failed without dialing. Closing the control WebSocket closes the
+originating media leg; Asterisk keeps the carrier call only when another human
+conference participant is present.
+
+Use `call.dtmf` with the call and optional session ID to inject one RFC 4733
+digit. The resulting source-attributed `call.dtmf` event is broadcast to every
+integration. Replacing an attachment for the same stable service/call closes
+the old peer connection. Reconnecting the control WebSocket always requires a
+new SDP exchange; transport state is deliberately not recoverable.
 
 ## Windows OpenStick ADB bridge
 

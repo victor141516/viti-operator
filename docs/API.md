@@ -222,14 +222,36 @@ uses `service.connected` and `service.disconnected`. Logical call membership
 uses `call.participant.joined` and `call.participant.left`; individual media
 generations use `call.media.connected` and `call.media.disconnected`.
 
-Commands travel over the same socket. Version 1 implements outgoing
-`call.start` and `call.hangup`; the other advertised capabilities are protocol
-extension points for the media and screening APIs.
+Commands travel over the same socket. Version 1 implements `call.start`,
+`call.hangup`, `media.attach`, `media.ice`, and `call.dtmf`. Screening commands
+are added by the pipeline API separately.
 
 ```json
-{"type":"call.start","version":1,"command_id":"dial-17","payload":{"to":"+34123456789"}}
+{"type":"media.attach","version":1,"command_id":"media-17","call_id":"call-...","payload":{"sdp_offer":"v=0\\r\\n...","purpose":"auxiliary"}}
+{"type":"media.ice","version":1,"command_id":"ice-17","payload":{"session_id":"media-...","candidate":"candidate:...","sdp_mid":"0","sdp_mline_index":0}}
+{"type":"call.dtmf","version":1,"command_id":"tone-17","call_id":"call-...","payload":{"session_id":"media-...","digit":"#","duration_ms":250}}
+{"type":"call.start","version":1,"command_id":"dial-17","payload":{"to":"+34123456789","sdp_offer":"v=0\\r\\n..."}}
 {"type":"call.hangup","version":1,"command_id":"stop-17","call_id":"call-..."}
 ```
+
+`media.attach` accepts only an active carrier call and returns
+`media.session.created` with the SDP answer before its completed command result.
+The full-duplex offer must contain Opus, G.722, PCMU, or PCMA. One service can
+own one media session per call; attaching again replaces its prior generation.
+Later ICE candidates remain bound to the stable service name and exact control
+connection that created the session. A service must allocate new `command_id`
+values for `media.attach` and `media.ice` after reconnecting; replaying either
+command from an older connection is rejected with
+`error_code: "stale_connection_generation"`.
+
+When service media is enabled, `call.start` requires the service to advertise
+both `call.start` and `call.media`. The manager sends `media.session.created`
+and waits up to 15 seconds for the WebRTC connection before dialing the carrier.
+`media.ice` can run concurrently during that wait. Disconnecting an initiating
+service ends its carrier call unless a human participant has already joined.
+`call.dtmf` injects one tone through that service's conference channel; the
+authoritative, source-attributed `call.dtmf` event is then broadcast to every
+integration.
 
 The server sends `command.result` with `accepted` before executing a valid
 command and then `completed`, `rejected`, or `failed`. A repeated command ID

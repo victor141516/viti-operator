@@ -144,16 +144,16 @@ same => n,GotoIf($["${VITI_PUBLIC_DIGITS:0:1}" = "0"]?invalid_destination)
 same => n,GotoIf($[${LEN(${VITI_PUBLIC_DIGITS})} < 8]?invalid_destination)
 same => n,GotoIf($[${LEN(${VITI_PUBLIC_DIGITS})} > 15]?invalid_destination)
 same => n,Set(CALLPEER=${EXTEN})
-same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
-same => n,Set(VITI_TRACE_ID=${PJSIP_HEADER(read,X-Viti-Trace-ID)})
+same => n,ExecIf($["${VITI_CALL_ID}" = ""]?Set(VITI_CALL_ID=${CHANNEL(linkedid)}))
+same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER(read,X-Viti-Trace-ID)}))
 same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER(read,Call-ID)}))
 same => n,ExecIf($["${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${VITI_CALL_ID}))
-same => n,Set(__VITI_CLIENT_ID=${PJSIP_HEADER(read,X-Viti-Client-ID)})
-same => n,Set(__VITI_CONNECTION_ID=${PJSIP_HEADER(read,X-Viti-Connection-ID)})
+same => n,ExecIf($["${VITI_CLIENT_ID}" = ""]?Set(__VITI_CLIENT_ID=${PJSIP_HEADER(read,X-Viti-Client-ID)}))
+same => n,ExecIf($["${VITI_CONNECTION_ID}" = ""]?Set(__VITI_CONNECTION_ID=${PJSIP_HEADER(read,X-Viti-Connection-ID)}))
 same => n,ExecIf($["${VITI_CONNECTION_ID}" = ""]?Set(__VITI_CONNECTION_ID=${CHANNEL(uniqueid)}))
-same => n,Set(__VITI_PARTICIPANT_ID=${VITI_CLIENT_ID})
+same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${VITI_CLIENT_ID}))
 same => n,ExecIf($["${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=${VITI_CONNECTION_ID}))
-same => n,Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)})
+same => n,ExecIf($["${VITI_RECORDING_FILE_ID}" = ""]?Set(__VITI_RECORDING_FILE_ID=${CHANNEL(uniqueid)}))
 same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=outgoing-received peer=${CALLPEER})
 same => n,GotoIf($["${GLOBAL(VITI_ACTIVE_CONF)}" != ""]?busy)
 same => n,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
@@ -253,7 +253,7 @@ exten => s,1,Goto(viti-carrier-conference,s,1)
 same => n,Goto(viti-client-conference,s,1)
 
 [viti-outgoing-conference]
-exten => s,1,Goto(viti-client-conference,s,1)
+exten => s,1,GotoIf($["${VITI_PARTICIPANT_ROLE}" = "service"]?viti-service-conference,s,1:viti-client-conference,s,1)
 same => n,Goto(viti-carrier-conference,s,1)
 
 [viti-client-conference]
@@ -280,6 +280,17 @@ same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID
 same => n,GotoIf($["${VITI_JOIN_ADMITTED}" != "1"]?done)
 same => n,TrySystem(python3 /usr/local/bin/notify.py participant_left "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_CLIENT_ID}" "${VITI_PARTICIPANT_ID}" "${VITI_CONNECTION_ID}" "${CHANNEL(name)}")
 same => n(done),Hangup()
+
+; Manager-owned WebRTC integrations enter through an ephemeral UnicastRTP
+; channel. They intentionally bypass participant_joined/left admission because
+; service sessions never count as human lifecycle owners; the manager publishes
+; their logical and transport events directly from the WebRTC registry.
+[viti-service-conference]
+exten => s,1,Answer()
+same => n,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-service-enter service=${VITI_CLIENT_ID})
+same => n,Gosub(viti-start-client-recording,s,1(${VITI_PARTICIPANT_ID},${VITI_CLIENT_ID},${VITI_RECORDING_FILE_ID}))
+same => n,ConfBridge(${VITI_CALL_ID},viti_bridge,viti_client)
+same => n,Hangup()
 
 [viti-carrier-conference]
 exten => s,1,Verbose(1,VITI_TRACE trace_id=${VITI_TRACE_ID} linkedid=${VITI_CALL_ID} stage=conference-carrier-enter direction=${VITI_DIRECTION} peer=${CALLPEER})
@@ -336,7 +347,8 @@ exten => s,1,Set(VITI_RECORDING_ENABLED=${SHELL(python3 /usr/local/bin/recording
 same => n,GotoIf($["${VITI_RECORDING_ENABLED}" != "1"]?done)
 same => n,TrySystem(mkdir -p "/recordings/${VITI_CALL_ID}")
 same => n,MixMonitor(/recordings/${VITI_CALL_ID}/participant-${ARG3}-mix.wav,r(/recordings/${VITI_CALL_ID}/participant-${ARG3}-input.wav)t(/recordings/${VITI_CALL_ID}/participant-${ARG3}-output.wav))
-same => n,TrySystem(python3 /usr/local/bin/notify.py recording_track "${VITI_CALL_ID}" "${VITI_TRACE_ID}" client "${ARG1}" "${ARG2}" "participant-${ARG3}-input.wav" "${ARG3}" &)
+same => n,Set(VITI_RECORDING_ROLE=${IF($["${VITI_PARTICIPANT_ROLE}" = "service"]?service:client)})
+same => n,TrySystem(python3 /usr/local/bin/notify.py recording_track "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${VITI_RECORDING_ROLE}" "${ARG1}" "${ARG2}" "participant-${ARG3}-input.wav" "${ARG3}" &)
 same => n(done),Return()
 
 ; ===== Outgoing SMS from a local endpoint =====

@@ -26,6 +26,10 @@ func TestLoadConfigContainerOverrides(t *testing.T) {
 	t.Setenv("VITI_VOICE_ICE_URLS", " stun:100.64.0.1:3478, stun:100.64.0.2:3478 ")
 	t.Setenv("VITI_VOICE_ICE_USERNAME", "test-user")
 	t.Setenv("VITI_VOICE_ICE_CREDENTIAL", "test-credential")
+	t.Setenv("VITI_SERVICE_MEDIA_ENABLED", "true")
+	t.Setenv("VITI_SERVICE_MEDIA_LISTEN", "0.0.0.0:8790")
+	t.Setenv("VITI_SERVICE_MEDIA_ADVERTISE", "100.64.0.10")
+	t.Setenv("VITI_SERVICE_MEDIA_ASTERISK_HOST", "manager")
 	t.Setenv("VITI_SIM_AUTH_TYPE", "remote")
 	t.Setenv("VITI_DIAGNOSTICS_DIR", filepath.Join(t.TempDir(), "diagnostics"))
 	t.Setenv("VITI_DIAGNOSTICS_ENABLED", "0")
@@ -47,6 +51,10 @@ func TestLoadConfigContainerOverrides(t *testing.T) {
 	}
 	if cfg.Diagnostics.Enabled {
 		t.Fatal("a diagnostics directory alone must not enable unredacted tracing")
+	}
+	if !cfg.Voice.ServiceMedia.Enabled || cfg.Voice.ServiceMedia.ListenAddress != "0.0.0.0:8790" ||
+		cfg.Voice.ServiceMedia.AdvertiseAddress != "100.64.0.10" || cfg.Voice.ServiceMedia.AsteriskRTPHost != "manager" {
+		t.Fatalf("service media environment override not applied: %s", encoded)
 	}
 }
 

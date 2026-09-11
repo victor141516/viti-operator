@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -187,13 +188,346 @@ func TestIntegrationCommandCanRetryWhenAcceptedWasNotDelivered(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	results := make(chan integrationResultDelivery, 1)
+	results := make(chan integrationDelivery, 1)
 	if application.handleIntegrationCommand(ctx, connection, command, results) {
 		t.Fatal("command continued after accepted delivery failed")
 	}
-	if _, replayed, err := application.integrations.beginCommand(connection.name, command); err != nil || replayed {
+	if _, replayed, err := application.integrations.beginCommand(connection.name, "retry-connection", command); err != nil || replayed {
 		t.Fatalf("exact retry remained reserved: replayed=%v err=%v", replayed, err)
 	}
+}
+
+func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-media", TraceID: "trace-media", EngineCallID: "engine-media", Instance: "engine-1",
+		Direction: DirectionIncoming, Peer: "+12025550123", State: "active", StartedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "transcriber",
+		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`), "call.dtmf": json.RawMessage(`{}`)},
+	})
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+
+	attachCommand := integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "attach-1", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
+	}
+	writeIntegrationCommand(t, socket, attachCommand)
+	readCommandResult(t, socket, "attach-1", "accepted")
+	created := readIntegrationType(t, socket, "media.session.created")
+	if created["session_id"] != "media-test" || created["call_id"] != call.ID || created["sdp_answer"] != "answer" {
+		t.Fatalf("media.session.created = %#v", created)
+	}
+	completed := readCommandResult(t, socket, "attach-1", "completed")
+	payload := completed["payload"].(map[string]any)
+	if payload["session_id"] != "media-test" || payload["sdp_answer"] != "answer" {
+		t.Fatalf("completed attach = %#v", completed)
+	}
+
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.ice", Version: 1, CommandID: "ice-1",
+		Payload: json.RawMessage(`{"session_id":"media-test","candidate":"candidate:1 1 UDP 1 127.0.0.1 9 typ host"}`),
+	})
+	readCommandResult(t, socket, "ice-1", "accepted")
+	readCommandResult(t, socket, "ice-1", "completed")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "call.dtmf", Version: 1, CommandID: "dtmf-1", CallID: call.ID,
+		Payload: json.RawMessage(`{"session_id":"media-test","digit":"#","duration_ms":300}`),
+	})
+	readCommandResult(t, socket, "dtmf-1", "accepted")
+	readCommandResult(t, socket, "dtmf-1", "completed")
+
+	media.mu.Lock()
+	if media.attach.ServiceName != "transcriber" || media.attach.Call.ID != call.ID || media.ice.SessionID != "media-test" ||
+		media.dtmf.Digit != "#" || media.dtmf.DurationMS != 300 {
+		t.Fatalf("media requests: attach=%#v ice=%#v dtmf=%#v", media.attach, media.ice, media.dtmf)
+	}
+	connectionID := media.attach.ConnectionID
+	media.mu.Unlock()
+	_ = socket.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		media.mu.Lock()
+		closed := media.closedConnection == connectionID
+		media.mu.Unlock()
+		if closed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control disconnect did not close owned media sessions")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	for len(application.integrations.snapshot()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("disconnected service name was not released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reconnected := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "transcriber",
+		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`), "call.dtmf": json.RawMessage(`{}`)},
+	})
+	defer reconnected.Close()
+	readIntegrationType(t, reconnected, "service.ready")
+	readIntegrationType(t, reconnected, "system.snapshot")
+	readIntegrationType(t, reconnected, "service.connected")
+	writeIntegrationCommand(t, reconnected, attachCommand)
+	stale := readCommandResult(t, reconnected, "attach-1", "rejected")
+	if stale["error_code"] != "stale_connection_generation" {
+		t.Fatalf("reconnected attach replay = %#v", stale)
+	}
+	media.mu.Lock()
+	defer media.mu.Unlock()
+	if media.attachCount != 1 {
+		t.Fatalf("stale attach invoked controller %d times", media.attachCount)
+	}
+}
+
+func TestIntegrationDisconnectClosesMediaBeforeBlockedCommandsFinish(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-blocked-media", TraceID: "trace-blocked-media", EngineCallID: "engine-blocked-media", Instance: "engine-1",
+		Direction: DirectionIncoming, Peer: "+12025550123", State: "active", StartedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "blocked-transcriber",
+		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`)},
+	})
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "initial-attach", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
+	})
+	readCommandResult(t, socket, "initial-attach", "accepted")
+	readIntegrationType(t, socket, "media.session.created")
+	readCommandResult(t, socket, "initial-attach", "completed")
+	media.mu.Lock()
+	connectionID := media.attach.ConnectionID
+	media.attachStarted = make(chan struct{})
+	media.attachRelease = make(chan struct{})
+	media.closed = make(chan string, 1)
+	attachStarted := media.attachStarted
+	attachRelease := media.attachRelease
+	closed := media.closed
+	media.mu.Unlock()
+	defer close(attachRelease)
+
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "blocked-attach", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
+	})
+	readCommandResult(t, socket, "blocked-attach", "accepted")
+	<-attachStarted
+	_ = socket.Close()
+	select {
+	case got := <-closed:
+		if got != connectionID {
+			t.Fatalf("closed connection = %q, want %q", got, connectionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("control disconnect waited for the blocked command before closing media")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for len(application.integrations.snapshot()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("control disconnect waited for the blocked command before releasing the service name")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reconnected := dialIntegration(t, server, integrationHello{Type: "service.hello", Version: 1, Name: "blocked-transcriber"})
+	defer reconnected.Close()
+	readIntegrationType(t, reconnected, "service.ready")
+}
+
+func TestIntegrationServiceCallPreparesMediaBeforeDialActivation(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "dialer",
+		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`)},
+	})
+	defer socket.Close()
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "service-start", Payload: json.RawMessage(`{"to":"+12025550123","sdp_offer":"v=0\\r\\n"}`),
+	})
+	readCommandResult(t, socket, "service-start", "accepted")
+	created := readIntegrationType(t, socket, "media.session.created")
+	completed := readCommandResult(t, socket, "service-start", "completed")
+	call := commandResultCall(t, completed)
+	if created["call_id"] != call.ID || created["purpose"] != "originator" || call.EngineCallID != call.ID {
+		t.Fatalf("created=%#v call=%#v", created, call)
+	}
+	media.mu.Lock()
+	defer media.mu.Unlock()
+	if media.attach.ServiceName != "dialer" || media.attach.Call.ID != call.ID || media.attach.Purpose != "originator" || media.activatedDestination != call.Peer {
+		t.Fatalf("outgoing media preparation=%#v destination=%q", media.attach, media.activatedDestination)
+	}
+}
+
+func TestIntegrationServiceCallRequiresMediaCapability(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	application.serviceMedia = &fakeServiceMediaController{}
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "control-only-dialer",
+		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`)},
+	})
+	defer socket.Close()
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "missing-media", Payload: json.RawMessage(`{"to":"+12025550123","sdp_offer":"v=0\\r\\n"}`),
+	})
+	result := readCommandResult(t, socket, "missing-media", "rejected")
+	if result["error_code"] != "capability_not_granted" || len(application.store.Calls()) != 0 {
+		t.Fatalf("result=%#v calls=%#v", result, application.store.Calls())
+	}
+}
+
+func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{resolvedSession: "media-source", resolvedService: "transcriber"}
+	application.serviceMedia = media
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-dtmf", TraceID: "trace-dtmf", EngineCallID: "engine-dtmf", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	streamID, sequence := application.events.StreamState()
+	_, events, cancel := application.events.Subscribe(streamID, sequence)
+	defer cancel()
+	recorder := httptest.NewRecorder()
+	application.ingestEngineDTMF(recorder, call.Instance, "media-source", []string{
+		"UnicastRTP/manager-0001", "media-source", "#", "240",
+	})
+	if recorder.Code != 204 {
+		t.Fatalf("DTMF ingest status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	event := <-events
+	payload := event.Payload.(map[string]any)
+	if event.Type != "call.dtmf" || event.CallID != call.ID || payload["source_type"] != "service" ||
+		payload["source_name"] != "transcriber" || payload["digit"] != "#" {
+		t.Fatalf("DTMF event = %#v", event)
+	}
+	carrierRecorder := httptest.NewRecorder()
+	application.ingestEngineDTMF(carrierRecorder, call.Instance, "media-source", []string{
+		"PJSIP/volte_ims-00000002", "carrier-unique-id", "5", "160",
+	})
+	if carrierRecorder.Code != 204 {
+		t.Fatalf("carrier DTMF ingest status = %d body=%s", carrierRecorder.Code, carrierRecorder.Body.String())
+	}
+	carrierEvent := <-events
+	carrierPayload := carrierEvent.Payload.(map[string]any)
+	if carrierPayload["source_type"] != "carrier" || carrierPayload["source_name"] != "remote" || carrierPayload["digit"] != "5" {
+		t.Fatalf("carrier DTMF event = %#v", carrierEvent)
+	}
+}
+
+type fakeServiceMediaController struct {
+	mu                   sync.Mutex
+	attach               serviceMediaAttachRequest
+	ice                  serviceMediaICERequest
+	dtmf                 serviceMediaDTMFRequest
+	closedConnection     string
+	activatedDestination string
+	resolvedSession      string
+	resolvedService      string
+	attachCount          int
+	attachStarted        chan struct{}
+	attachRelease        chan struct{}
+	closed               chan string
+}
+
+func (f *fakeServiceMediaController) Attach(_ context.Context, request serviceMediaAttachRequest) (serviceMediaDescription, error) {
+	f.mu.Lock()
+	f.attach = request
+	f.attachCount++
+	started := f.attachStarted
+	release := f.attachRelease
+	f.mu.Unlock()
+	if started != nil {
+		close(started)
+		<-release
+	}
+	return serviceMediaDescription{SessionID: "media-test", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: request.Purpose}, nil
+}
+
+func (f *fakeServiceMediaController) PrepareOutgoing(_ context.Context, request serviceMediaAttachRequest) (serviceMediaOutgoingPreparation, error) {
+	f.mu.Lock()
+	f.attach = request
+	f.mu.Unlock()
+	return serviceMediaOutgoingPreparation{
+		Description: serviceMediaDescription{SessionID: "media-outgoing", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: "originator"},
+		Activate: func(_ context.Context, destination string) error {
+			f.mu.Lock()
+			f.activatedDestination = destination
+			f.mu.Unlock()
+			return nil
+		},
+	}, nil
+}
+
+func (f *fakeServiceMediaController) AddICECandidate(_ context.Context, request serviceMediaICERequest) error {
+	f.mu.Lock()
+	f.ice = request
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeServiceMediaController) SendDTMF(_ context.Context, request serviceMediaDTMFRequest) error {
+	f.mu.Lock()
+	f.dtmf = request
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeServiceMediaController) CloseConnection(connectionID, _ string) {
+	f.mu.Lock()
+	f.closedConnection = connectionID
+	closed := f.closed
+	f.mu.Unlock()
+	if closed != nil {
+		select {
+		case closed <- connectionID:
+		default:
+		}
+	}
+}
+
+func (*fakeServiceMediaController) CloseCall(string, string) {}
+
+func (f *fakeServiceMediaController) ResolveEngineSession(sessionID string) (string, string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	found := sessionID == f.resolvedSession && f.resolvedService != ""
+	return f.resolvedService, "call-dtmf", found
 }
 
 func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {

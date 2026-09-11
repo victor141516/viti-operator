@@ -297,6 +297,26 @@ content preventing an ID from being reused for a different action. Since the
 deployment owns one physical line, call commands share one serialization lock.
 Neither replay nor command deduplication is durable across manager restart.
 
+An integration with `call.media` negotiates a call-scoped peer connection over
+that same control socket. `media.attach` carries the SDP offer and returns both
+`media.session.created` and a completed command result containing the SDP
+answer; `media.ice` carries later remote candidates. The manager terminates
+ICE/DTLS/SRTP itself and relays the first mutually supported Opus, G.722, PCMU,
+or PCMA stream to a dedicated Asterisk `UnicastRTP` channel in the existing
+ConfBridge. Bots therefore never receive the shared SIP identity or dialplan
+access. The Compose deployment exposes one fixed UDP ICE mux port regardless
+of the number of services, while the manager-to-engine RTP sockets remain
+ephemeral and private to the Docker network.
+
+Each service has at most one media session per call. A replacement, the owning
+WebSocket generation ending, or the call ending closes only the matching media
+leg. Service participants use the normal ConfBridge mix-minus: they hear all
+other participants and every injected audio/DTMF event reaches the conference.
+Their logical join/leave and WebRTC connect/disconnect events are distinct, and
+they never enter the human-participant ownership registry. Recording labels use
+the stable service name, but SDP, ICE, socket IDs, and transport generations are
+never persisted.
+
 ## Contact synchronization and resolution
 
 Android contact access is opt-in in two distinct steps: the user accepts an

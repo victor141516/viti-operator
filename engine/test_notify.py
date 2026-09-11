@@ -114,6 +114,47 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("participant_join_aborted", client_context[join_guard:])
         self.assertIn('${VITI_JOIN_ADMITTED}" != "1', client_context[conference:])
 
+    def test_service_media_uses_non_owning_conference_context_and_service_recording_role(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        service_context = template[
+            template.index("[viti-service-conference]"):
+            template.index("[viti-carrier-conference]")
+        ]
+
+        self.assertIn("ConfBridge(${VITI_CALL_ID},viti_bridge,viti_client)", service_context)
+        self.assertIn("viti-start-client-recording", service_context)
+        self.assertNotIn("participant_joined", service_context)
+        self.assertNotIn("participant_left", service_context)
+        recording_context = template[template.index("[viti-start-client-recording]"):]
+        self.assertIn("VITI_PARTICIPANT_ROLE", recording_context)
+        self.assertIn("?service:client", recording_context)
+
+    def test_service_originated_call_preserves_manager_media_identity(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        public_call = template[template.index("exten => _[+0-9].,1"):template.index("; Report the outcome", template.index("exten => _[+0-9].,1"))]
+
+        self.assertIn('${VITI_CALL_ID}" = ""]?Set(VITI_CALL_ID=${CHANNEL(linkedid)})', public_call)
+        self.assertIn('${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER', public_call)
+        self.assertIn('${VITI_CLIENT_ID}" = ""]?Set(__VITI_CLIENT_ID=', public_call)
+        self.assertIn('${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=', public_call)
+
+        outgoing_dispatch = template[
+            template.index("[viti-outgoing-conference]"):
+            template.index("[viti-client-conference]")
+        ]
+        self.assertIn('VITI_PARTICIPANT_ROLE', outgoing_dispatch)
+        self.assertIn('viti-service-conference', outgoing_dispatch)
+        self.assertIn('viti-client-conference', outgoing_dispatch)
+        self.assertIn('viti-carrier-conference', outgoing_dispatch)
+
     def test_participant_event_keeps_call_and_trace_identity(self):
         response = mock.Mock(status_code=204, text="")
         with mock.patch.dict(os.environ, {}, clear=True), \
