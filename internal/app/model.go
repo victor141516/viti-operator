@@ -134,8 +134,16 @@ type IMSRegistrationState struct {
 }
 
 type Event struct {
-	Sequence uint64    `json:"sequence"`
-	Type     string    `json:"type"`
-	At       time.Time `json:"at"`
-	Data     any       `json:"data"`
+	Type       string    `json:"type"`
+	Version    int       `json:"version"`
+	EventID    string    `json:"event_id"`
+	StreamID   string    `json:"stream_id"`
+	Sequence   uint64    `json:"sequence"`
+	OccurredAt time.Time `json:"occurred_at"`
+	CallID     string    `json:"call_id,omitempty"`
+	Payload    any       `json:"payload"`
+	// At and Data keep the established long-poll wire contract while clients
+	// migrate to OccurredAt and Payload.
+	At   time.Time `json:"at"`
+	Data any       `json:"data"`
 }
