@@ -325,7 +325,8 @@ func (m *screeningManager) applyCurrentDecisionLocked(session *screeningSession,
 		stage := m.currentStageLocked(session)
 		stage.Outcome = "waiting_media"
 		duration := screeningTimeout(stage.MediaTimeoutMS)
-		session.mediaTimer = time.AfterFunc(duration, func() { m.mediaTimeout(session.call.ID, session.current, session.record.ContextRevision) })
+		callID, stageIndex, revision := session.call.ID, session.current, session.record.ContextRevision
+		session.mediaTimer = time.AfterFunc(duration, func() { m.mediaTimeout(callID, stageIndex, revision) })
 		m.persistLocked(session)
 	case "next":
 		m.completeCurrentStageLocked(session, "next", now)
@@ -396,8 +397,9 @@ func (m *screeningManager) advanceLocked(session *screeningSession) {
 				return
 			}
 		}
-		stageIndex, revision, connectionID := session.current, session.record.ContextRevision, connection.id
-		session.decisionTimer = time.AfterFunc(time.Until(deadline), func() { m.decisionTimeout(session.call.ID, stageIndex, revision, connectionID) })
+		callID, stageIndex := session.call.ID, session.current
+		revision, connectionID := session.record.ContextRevision, connection.id
+		session.decisionTimer = time.AfterFunc(time.Until(deadline), func() { m.decisionTimeout(callID, stageIndex, revision, connectionID) })
 		return
 	}
 	m.finishRingLocked(session, "viti", "pipeline_exhausted")
@@ -620,9 +622,9 @@ func (m *screeningManager) startProcessingTimerLocked(session *screeningSession)
 	if stage.ProcessingTimeoutMS == -1 {
 		return
 	}
-	stageIndex, revision := session.current, session.record.ContextRevision
+	callID, stageIndex, revision := session.call.ID, session.current, session.record.ContextRevision
 	session.processingTimer = time.AfterFunc(screeningTimeout(stage.ProcessingTimeoutMS), func() {
-		m.processingTimeout(session.call.ID, stageIndex, revision)
+		m.processingTimeout(callID, stageIndex, revision)
 	})
 }
 
