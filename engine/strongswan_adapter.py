@@ -277,11 +277,47 @@ def isolate_tunnel_route(inner_ip, runner=subprocess.run):
     address = ipaddress.ip_address(inner_ip)
     if address.version != 6:
         raise ValueError("the StrongSwan SWu profile requires an IPv6 inner address")
-    runner(["ip", "-6", "rule", "del", "priority", "220"], check=False)
+
+    # A process crash does not create a fresh network namespace.  Remove every
+    # rule that a previous or newly started charon may have installed, not just
+    # the first rule at this priority (Linux permits duplicates).
+    delete_command = [
+        "ip", "-6", "rule", "del", "priority", "220", "table", "220",
+    ]
+    for _ in range(64):
+        removed = runner(
+            delete_command, check=False, capture_output=True, text=True
+        )
+        if removed.returncode != 0:
+            break
+    else:
+        raise RuntimeError("too many stale StrongSwan routing rules at priority 220")
+
     runner([
         "ip", "-6", "rule", "add", "priority", "220",
         "from", f"{address}/128", "lookup", "220",
     ], check=True)
+    rules = runner(
+        ["ip", "-6", "rule", "show"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout
+    managed = [
+        line.strip()
+        for line in rules.splitlines()
+        if re.match(r"^220:\s", line.strip())
+        and ("lookup 220" in line or "table 220" in line)
+    ]
+    if (
+        len(managed) != 1
+        or "from all" in managed[0]
+        or f"from {address}" not in managed[0]
+    ):
+        raise RuntimeError(
+            "StrongSwan routing isolation failed; expected exactly one "
+            f"source-specific table-220 rule, got {managed!r}"
+        )
 
 
 class RuntimeContract:
@@ -696,19 +732,32 @@ class StrongSwanAdapter:
             reason = "signal"
             failure = {"reason_code": reason, "reason_policy": "transient"}
         except Exception as error:
-            failure = classify_failure(error, self.env)
-            reason = failure["reason_code"]
-            return_code = 1
-            self.log(f"backend failed: {error}")
+            if self.stop_requested or self.signal_received is not None:
+                # Closing an active VICI socket is how the signal handler wakes
+                # a blocked operation.  That expected exception is a clean
+                # shutdown, not a StrongSwan failure.
+                reason = "signal"
+                failure = {"reason_code": reason, "reason_policy": "transient"}
+                self.log(f"backend stopping after interrupted operation: {error}")
+            else:
+                failure = classify_failure(error, self.env)
+                reason = failure["reason_code"]
+                return_code = 1
+                self.log(f"backend failed: {error}")
         finally:
             # Persist the causal boundary before any best-effort peer teardown.
-            # This makes tunnel_down durable even if charon ignores SIGTERM.
-            self.runtime.disconnected(**failure)
-            self.terminate()
-            if self.control:
-                self.control.close()
-            for signum, handler in previous_handlers.items():
-                signal.signal(signum, handler)
+            # Cleanup still runs if persistence itself fails, otherwise the
+            # supervisor could start a second charon beside an orphaned first.
+            try:
+                try:
+                    self.runtime.disconnected(**failure)
+                finally:
+                    self.terminate()
+            finally:
+                if self.control:
+                    self.control.close()
+                for signum, handler in previous_handlers.items():
+                    signal.signal(signum, handler)
         return return_code
 
 

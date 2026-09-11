@@ -164,7 +164,7 @@ services:
     cap_add: [NET_ADMIN, NET_RAW]
     devices:
       - /dev/net/tun:/dev/net/tun
-    stop_grace_period: 15s
+    stop_grace_period: 20s
     environment:
       SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
       SWU_HTTP_AKA_TOKEN: lab-token
@@ -191,6 +191,24 @@ services:
       LAB_PROBE_MODE: terminated
       PYTHONPATH: /usr/local/bin
       VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - engine-entrypoint-runtime:/run/vowifi:ro
+
+  engine-entrypoint-probe:
+    profiles: [entrypoint]
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/tools.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: service:engine-entrypoint
+    cap_add: [NET_ADMIN, NET_RAW]
+    depends_on:
+      engine-entrypoint:
+        condition: service_started
+    environment:
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+      LAB_EPDG: 172.30.40.10
     volumes:
       - engine-entrypoint-runtime:/run/vowifi:ro
 

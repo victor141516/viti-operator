@@ -68,7 +68,8 @@ else
   SWU_LOG_TARGET=/dev/null
 fi
 rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json" \
-  "$VOWIFI_RUNDIR/pcscf.applied" "$VOWIFI_RUNDIR/inner_ip.applied"
+  "$VOWIFI_RUNDIR/pcscf.applied" "$VOWIFI_RUNDIR/inner_ip.applied" \
+  "$VOWIFI_RUNDIR/swu_adapter.pid"
 
 # Full adapter/charon output goes to the opt-in diagnostic file. Normal operation
 # retains only normalized lifecycle evidence in Docker logs and a bounded file.
@@ -98,11 +99,13 @@ rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json" \
         > >(tee -a "$SWU_LOG_TARGET" | awk '/^\[strongswan-adapter\]/ { print; fflush() }' | tee -a "$SWU_OPERATIONAL_LOG") 2>&1 &
     fi
     active_pid=$!
+    printf '%s' "$active_pid" > "$VOWIFI_RUNDIR/swu_adapter.pid"
     if wait "$active_pid"; then
       rc=0
     else
       rc=$?
     fi
+    rm -f "$VOWIFI_RUNDIR/swu_adapter.pid"
     active_pid=""
     [ "$stop_supervisor" = "1" ] && break
     retry_delay=$(python3 -c \
@@ -171,7 +174,24 @@ shutdown_engine() {
   SHUTDOWN_STARTED=1
   trap - TERM INT
   log "stopping engine services..."
+  adapter_pid=$(cat "$VOWIFI_RUNDIR/swu_adapter.pid" 2>/dev/null || true)
   kill -TERM "$SWU_PID" 2>/dev/null || true
+  # Also signal the adapter directly. This closes the narrow race where PID 1
+  # asks the supervisor to stop while the latter is blocked in `wait` and its
+  # nested trap has not run yet.
+  [ -n "$adapter_pid" ] && kill -TERM "$adapter_pid" 2>/dev/null || true
+  # The supervisor is a subshell and is PID 1's child, but the adapter is its
+  # grandchild.  A signal may make the subshell exit before the adapter has
+  # persisted tunnel_down.  Keep PID 1 alive until that causal boundary is on
+  # disk; otherwise Docker tears down the namespace and can leave a stale
+  # CONNECTED status even though every process is gone.
+  if [ -n "$adapter_pid" ]; then
+    for _ in $(seq 1 120); do
+      st=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json'))['state'])" 2>/dev/null || echo "")
+      [ "$st" = "DOWN" ] && break
+      sleep 0.1
+    done
+  fi
   wait "$SWU_PID" 2>/dev/null || true
   # Give the durable worker one final chance to deliver tunnel_down before exit.
   python3 /usr/local/bin/event_outbox.py --flush-once >/dev/null 2>&1 || true

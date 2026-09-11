@@ -161,7 +161,9 @@ def wait_for_broker_requests(minimum, timeout=30):
 
 
 def reset_lab():
-    compose("down", "-v", "--remove-orphans")
+    # Explicitly enable opt-in services so Compose also removes their
+    # containers and volumes after packaged-entrypoint checks.
+    compose("--profile", "entrypoint", "down", "-v", "--remove-orphans")
 
 
 def run_attach(backend, connected_probe, lifecycle_probe):
@@ -508,15 +510,38 @@ def run_resilience_scenarios(backend, connected_probe, lifecycle_probe):
     run_crash_recovery(backend, connected_probe, lifecycle_probe)
 
 
-def run_production_entrypoint_shutdown():
-    """Stop the packaged PID 1 and require its durable terminal event."""
+def run_production_entrypoint_recovery_and_shutdown():
+    """Crash charon in the packaged namespace, recover, then stop PID 1."""
     reset_lab()
     compose(
         "--profile", "entrypoint", "up", "-d",
         "epdg", "aka-broker", "nat-gateway", "engine-entrypoint",
     )
     wait_for_log("engine-entrypoint", "starting Asterisk", timeout=120)
-    compose("--profile", "entrypoint", "stop", "-t", "15", "engine-entrypoint")
+    compose(
+        "--profile", "entrypoint", "run", "--rm", "engine-entrypoint-probe"
+    )
+    before = compose(
+        "--profile", "entrypoint", "ps", "-q", "engine-entrypoint", capture=True
+    ).stdout.strip()
+    compose(
+        "--profile", "entrypoint", "exec", "-T",
+        "engine-entrypoint", "pkill", "-KILL", "-x", "charon",
+    )
+    compose(
+        "--profile", "entrypoint", "run", "--rm",
+        "-e", "LAB_PROBE_MODE=recovered", "engine-entrypoint-probe",
+    )
+    after = compose(
+        "--profile", "entrypoint", "ps", "-q", "engine-entrypoint", capture=True
+    ).stdout.strip()
+    if not before or before != after:
+        raise AssertionError(
+            "production entrypoint container was recreated during charon recovery"
+        )
+    print("LAB_PRODUCTION_ENTRYPOINT_CRASH_RECOVERY_OK=strongswan")
+
+    compose("--profile", "entrypoint", "stop", "-t", "20", "engine-entrypoint")
     compose(
         "--profile", "entrypoint", "run", "--rm",
         "engine-entrypoint-terminated-probe",
@@ -535,12 +560,16 @@ def main():
     )
     parser.add_argument(
         "--scenario",
-        choices=("all", "attach", "auth-faults", "protocol", "resilience"),
+        choices=(
+            "all", "attach", "auth-faults", "protocol", "resilience", "entrypoint",
+        ),
         default="all",
     )
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--keep", action="store_true", help="leave the lab running")
     args = parser.parse_args()
+    if args.scenario == "entrypoint" and not args.backend_image:
+        parser.error("the entrypoint scenario requires --backend-image")
 
     (
         backend,
@@ -581,8 +610,8 @@ def main():
             )
         if args.scenario in ("all", "resilience"):
             run_resilience_scenarios(backend, connected_probe, lifecycle_probe)
-        if args.backend_image and args.scenario in ("all", "resilience"):
-            run_production_entrypoint_shutdown()
+        if args.backend_image and args.scenario in ("all", "resilience", "entrypoint"):
+            run_production_entrypoint_recovery_and_shutdown()
         print("LAB_SUITE_OK=strongswan")
     except Exception:
         try:

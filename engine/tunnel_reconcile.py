@@ -101,7 +101,66 @@ class TunnelReconciler:
         return True
 
     def apply(self, inner_ip, pcscf):
-        # Restart first: a subsequent PJSIP reload/REGISTER must target the new transport.
-        inner_changed = self.apply_inner_ip(inner_ip)
-        pcscf_changed = self.apply_pcscf(pcscf)
-        return inner_changed or pcscf_changed
+        """Apply a tunnel observation without exposing a half-configured IMS stack.
+
+        A first attach may complete after Asterisk has already started without a
+        P-CSCF.  In that case both the transport address and all IMS objects must
+        be installed by one restart: rendering after the restart would leave no
+        ``volte_ims`` registration for the recovery wait to observe.
+        """
+        inner_changed = bool(
+            inner_ip and self._read_marker("inner_ip.applied") != inner_ip
+        )
+        pcscf_changed = bool(
+            pcscf and self._read_marker("pcscf.applied") != pcscf
+        )
+        if not inner_changed and not pcscf_changed:
+            return False
+
+        asterisk_running = self._call(["asterisk", "-rx", "core show uptime"]) == 0
+        if not asterisk_running:
+            # The entrypoint renders the discovered P-CSCF and starts Asterisk
+            # after the initial attach.  Mark both values as one observation.
+            if inner_changed:
+                self._write_marker("inner_ip.applied", inner_ip)
+            if pcscf_changed:
+                self._write_marker("pcscf.applied", pcscf)
+            return True
+
+        if inner_changed and pcscf_changed:
+            if not self.render.exists():
+                raise RuntimeError("render is unavailable while applying tunnel changes")
+            self.log(
+                "tunnel endpoints changed "
+                f"(inner={inner_ip}, pcscf={pcscf}); rendering and restarting Asterisk"
+            )
+            if self._call(["python3", str(self.render)]) != 0:
+                raise RuntimeError("render failed while applying tunnel changes")
+            if self._call(["asterisk", "-rx", "core restart now"]) != 0:
+                raise RuntimeError("Asterisk core restart failed after tunnel changes")
+
+            for _ in range(60):
+                time.sleep(0.5)
+                try:
+                    ready = subprocess.check_output(
+                        ["asterisk", "-rx", "pjsip show registrations"],
+                        stderr=subprocess.DEVNULL,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    continue
+                if b"volte_ims" in ready and self._call(
+                    ["asterisk", "-rx", "pjsip send register volte_ims"]
+                ) == 0:
+                    break
+            else:
+                raise RuntimeError("Asterisk did not recover after tunnel changes")
+
+            # Advance neither marker until render, restart and registration all
+            # succeed, so a failed transaction is retried in full.
+            self._write_marker("inner_ip.applied", inner_ip)
+            self._write_marker("pcscf.applied", pcscf)
+            return True
+
+        if inner_changed:
+            return self.apply_inner_ip(inner_ip)
+        return self.apply_pcscf(pcscf)

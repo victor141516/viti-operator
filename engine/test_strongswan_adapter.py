@@ -1,3 +1,5 @@
+import subprocess
+import signal
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,18 +27,71 @@ def environment(**extra):
 
 class StrongSwanAdapterTest(unittest.TestCase):
     def test_tunnel_default_route_is_restricted_to_the_assigned_source(self):
-        runner = mock.Mock()
+        runner = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess([], 2),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess(
+                [], 0, stdout="220: from 2001:db8::10 lookup 220\n"
+            ),
+        ])
         strongswan_adapter.isolate_tunnel_route("2001:db8::10", runner)
         self.assertEqual(runner.call_args_list, [
             mock.call(
-                ["ip", "-6", "rule", "del", "priority", "220"],
+                [
+                    "ip", "-6", "rule", "del", "priority", "220",
+                    "table", "220",
+                ],
                 check=False,
+                capture_output=True,
+                text=True,
+            ),
+            mock.call(
+                [
+                    "ip", "-6", "rule", "del", "priority", "220",
+                    "table", "220",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            ),
+            mock.call(
+                [
+                    "ip", "-6", "rule", "del", "priority", "220",
+                    "table", "220",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
             ),
             mock.call([
                 "ip", "-6", "rule", "add", "priority", "220",
                 "from", "2001:db8::10/128", "lookup", "220",
             ], check=True),
+            mock.call(
+                ["ip", "-6", "rule", "show"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ),
         ])
+
+    def test_tunnel_route_rejects_a_remaining_broad_rule(self):
+        runner = mock.Mock(side_effect=[
+            subprocess.CompletedProcess([], 2),
+            subprocess.CompletedProcess([], 0),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                stdout=(
+                    "220: from all lookup 220\n"
+                    "220: from 2001:db8::10 lookup 220\n"
+                ),
+            ),
+        ])
+        with self.assertRaisesRegex(RuntimeError, "routing isolation failed"):
+            strongswan_adapter.isolate_tunnel_route("2001:db8::10", runner)
 
     def test_ipv4_inner_address_is_rejected_by_the_ipv6_only_profile(self):
         with self.assertRaisesRegex(ValueError, "requires an IPv6"):
@@ -345,6 +400,65 @@ class StrongSwanAdapterTest(unittest.TestCase):
 
             self.assertEqual(adapter.run(), 0)
             self.assertEqual(events, ["start", "down", "terminate"])
+
+    def test_persistence_failure_still_terminates_charon_before_propagating(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+
+            class Runtime:
+                rundir = Path(directory)
+
+                @staticmethod
+                def start():
+                    events.append("start")
+
+                @staticmethod
+                def disconnected(**_failure):
+                    events.append("down-attempt")
+                    raise OSError("outbox fsync failed")
+
+            adapter = strongswan_adapter.StrongSwanAdapter(environment())
+            adapter.runtime = Runtime()
+            adapter.wait_auth_ready = lambda: False
+            adapter.terminate = lambda: events.append("terminate")
+
+            with self.assertRaisesRegex(OSError, "outbox fsync failed"):
+                adapter.run()
+            self.assertEqual(events, ["start", "down-attempt", "terminate"])
+
+    def test_interrupted_vici_operation_is_a_clean_signal_shutdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            failures = []
+
+            class Runtime:
+                rundir = Path(directory)
+
+                @staticmethod
+                def start():
+                    return None
+
+                @staticmethod
+                def disconnected(**failure):
+                    failures.append(failure)
+
+            adapter = strongswan_adapter.StrongSwanAdapter(environment())
+            adapter.runtime = Runtime()
+            adapter.wait_auth_ready = lambda: True
+            adapter.start_charon = lambda: None
+
+            def interrupted():
+                adapter.stop_requested = True
+                adapter.signal_received = signal.SIGTERM
+                raise OSError("VICI socket closed")
+
+            adapter.load_and_initiate = interrupted
+            adapter.terminate = lambda: None
+
+            self.assertEqual(adapter.run(), 0)
+            self.assertEqual(failures, [{
+                "reason_code": "signal",
+                "reason_policy": "transient",
+            }])
 
 
 if __name__ == "__main__":
