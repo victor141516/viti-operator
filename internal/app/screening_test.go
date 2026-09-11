@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -320,6 +322,58 @@ func TestScreeningCallResultFinalizesRestartRecovery(t *testing.T) {
 	if stored.Screening == nil || stored.Screening.State != "ended" || stored.Screening.CompletedAt == nil ||
 		stored.Screening.TerminatedBy != "carrier" || stored.Screening.Reason != "call_result" {
 		t.Fatalf("recovery call result record = %#v", stored.Screening)
+	}
+}
+
+func TestStoreScreeningUpdateCannotResurrectConcurrentCallResult(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	for iteration := 0; iteration < 25; iteration++ {
+		now := time.Now().UTC()
+		call := Call{
+			ID: fmt.Sprintf("call-screening-race-%d", iteration), TraceID: fmt.Sprintf("trace-screening-race-%d", iteration),
+			EngineCallID: fmt.Sprintf("engine-screening-race-%d", iteration), Instance: "engine-1",
+			Direction: DirectionIncoming, Peer: "+12025550123", State: "active", StartedAt: now, UpdatedAt: now, AnsweredAt: &now,
+			Screening: &CallScreeningRecord{Pipeline: []string{"voice"}, StartedAt: now, State: "controlled", Answered: true},
+		}
+		if err := application.store.SaveCall(call); err != nil {
+			t.Fatal(err)
+		}
+		updatedScreening := cloneCallScreening(call.Screening)
+		updatedScreening.State = "ringing_clients"
+		updatedScreening.Outcome = "ring_clients"
+		start := make(chan struct{})
+		var wait sync.WaitGroup
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			<-start
+			if _, _, err := application.store.UpdateCallScreening(call.ID, updatedScreening); err != nil {
+				t.Errorf("update screening: %v", err)
+			}
+		}()
+		go func() {
+			defer wait.Done()
+			<-start
+			if _, _, err := application.store.ApplyEngineCallEvent(engineCallUpdate{
+				Instance: call.Instance, EngineCallID: call.EngineCallID, TraceID: call.TraceID,
+				Event: "call_result", Direction: DirectionIncoming, Peer: call.Peer, At: now.Add(time.Second),
+			}); err != nil {
+				t.Errorf("apply call result: %v", err)
+			}
+		}()
+		close(start)
+		wait.Wait()
+		stored, _ := application.store.GetCall(call.ID)
+		if stored.EndedAt == nil || stored.State == "active" || stored.Screening == nil || stored.Screening.State != "ringing_clients" {
+			t.Fatalf("iteration %d resurrected or lost state: %#v", iteration, stored)
+		}
+		blockedScreening := cloneCallScreening(stored.Screening)
+		blockedScreening.State = "controlled"
+		if _, updated, err := application.store.UpdateOpenCallScreening(call.ID, blockedScreening); err != nil {
+			t.Fatalf("iteration %d reject terminal screening update: %v", iteration, err)
+		} else if updated {
+			t.Fatalf("iteration %d updated screening after the call ended", iteration)
+		}
 	}
 }
 

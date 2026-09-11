@@ -322,6 +322,43 @@ func (s *Store) SaveCall(call Call) error {
 	return err
 }
 
+// UpdateCallScreening replaces only the screening audit subtree while holding
+// the store lock. Lifecycle, contact, participant, and recording updates can
+// therefore race with screening persistence without either side replacing the
+// other's Call snapshot.
+func (s *Store) UpdateCallScreening(callID string, screening *CallScreeningRecord) (Call, bool, error) {
+	return s.updateCallScreening(callID, screening, false)
+}
+
+// UpdateOpenCallScreening additionally verifies the call is still open while
+// holding the same lock used for the partial update. Startup recovery uses this
+// to avoid initiating a handoff after a concurrent terminal engine event.
+func (s *Store) UpdateOpenCallScreening(callID string, screening *CallScreeningRecord) (Call, bool, error) {
+	return s.updateCallScreening(callID, screening, true)
+}
+
+func (s *Store) updateCallScreening(callID string, screening *CallScreeningRecord, requireOpen bool) (Call, bool, error) {
+	s.mu.Lock()
+	previous, found := s.calls[callID]
+	if !found || (requireOpen && previous.EndedAt != nil) {
+		s.mu.Unlock()
+		return previous, false, nil
+	}
+	call := previous
+	call.Screening = cloneCallScreening(screening)
+	s.calls[callID] = call
+	err := s.flushLocked()
+	if err != nil {
+		s.calls[callID] = previous
+	}
+	s.mu.Unlock()
+	s.diag.RecordTrace("manager.store", "call.screening.saved", call.TraceID, map[string]any{
+		"previous": previous.Screening, "current": call.Screening,
+		"path": s.path, "persist_error": errorString(err),
+	})
+	return call, true, err
+}
+
 type engineCallUpdate struct {
 	ProposedID   string
 	Instance     string

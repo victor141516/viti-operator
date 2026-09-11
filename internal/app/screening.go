@@ -646,11 +646,17 @@ func (m *screeningManager) recoverActive(call Call) {
 	call.Screening.Outcome = "ring_clients"
 	call.Screening.TerminatedBy = "viti"
 	call.Screening.Reason = "manager_restart_fail_open"
-	if err := m.store.SaveCall(call); err != nil {
+	updated, found, err := m.store.UpdateOpenCallScreening(call.ID, call.Screening)
+	if err != nil {
 		m.events.Publish("screening.persistence.failed", map[string]any{
 			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
 		})
 	}
+	if !found {
+		m.mu.Unlock()
+		return
+	}
+	call = updated
 	recovery := &screeningRecovery{}
 	recovery.timer = time.AfterFunc(m.ringTimeout, func() { m.recoveryExpired(call.ID, recovery) })
 	m.recovered[call.ID] = recovery
@@ -680,11 +686,17 @@ func (m *screeningManager) recoveryExpired(callID string, expected *screeningRec
 	call.Screening.TerminatedBy = "viti"
 	call.Screening.Reason = "ring_timeout"
 	call.Screening.CompletedAt = &now
-	if err := m.store.SaveCall(call); err != nil {
+	updated, found, err := m.store.UpdateOpenCallScreening(call.ID, call.Screening)
+	if err != nil {
 		m.events.Publish("screening.persistence.failed", map[string]any{
 			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
 		})
 	}
+	if !found {
+		m.mu.Unlock()
+		return
+	}
+	call = updated
 	m.mu.Unlock()
 	if m.callbacks.hangup != nil {
 		m.runCallAction("restart_ring_timeout_hangup", call, m.callbacks.hangup)
@@ -750,11 +762,7 @@ func (m *screeningManager) HumanJoined(call Call) {
 				stored.Screening.State = "human_connected"
 				stored.Screening.Outcome = "human_answered"
 				stored.Screening.CompletedAt = &now
-				if err := m.store.SaveCall(stored); err != nil {
-					m.events.Publish("screening.persistence.failed", map[string]any{
-						"call_id": stored.ID, "trace_id": stored.TraceID, "error": err.Error(),
-					})
-				}
+				m.updateScreeningLocked(stored.ID, stored.TraceID, stored.Screening)
 			}
 		}
 		return
@@ -774,34 +782,26 @@ func (m *screeningManager) HumanJoined(call Call) {
 func (m *screeningManager) CallEnded(call Call, actor, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	recovered := false
 	if recovery := m.recovered[call.ID]; recovery != nil {
 		recovery.timer.Stop()
 		delete(m.recovered, call.ID)
-		recovered = true
 	}
 	session := m.sessions[call.ID]
 	if session == nil {
-		if recovered {
-			if latest, found := m.store.GetCall(call.ID); found {
-				call = latest
+		if latest, found := m.store.GetCall(call.ID); found {
+			call = latest
+		}
+		if call.Screening != nil && call.Screening.CompletedAt == nil {
+			now := time.Now().UTC()
+			call.Screening = cloneCallScreening(call.Screening)
+			call.Screening.State = "ended"
+			if call.Screening.Outcome == "" {
+				call.Screening.Outcome = "call_ended"
 			}
-			if call.Screening != nil {
-				now := time.Now().UTC()
-				call.Screening = cloneCallScreening(call.Screening)
-				call.Screening.State = "ended"
-				if call.Screening.Outcome == "" {
-					call.Screening.Outcome = "call_ended"
-				}
-				call.Screening.TerminatedBy = actor
-				call.Screening.Reason = reason
-				call.Screening.CompletedAt = &now
-				if err := m.store.SaveCall(call); err != nil {
-					m.events.Publish("screening.persistence.failed", map[string]any{
-						"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
-					})
-				}
-			}
+			call.Screening.TerminatedBy = actor
+			call.Screening.Reason = reason
+			call.Screening.CompletedAt = &now
+			m.updateScreeningLocked(call.ID, call.TraceID, call.Screening)
 		}
 		return
 	}
@@ -921,16 +921,22 @@ func (m *screeningManager) stopAllTimers(session *screeningSession) {
 }
 
 func (m *screeningManager) persistLocked(session *screeningSession) {
-	call, found := m.store.GetCall(session.call.ID)
-	if !found {
-		call = session.call
-	}
-	call.Screening = cloneCallScreening(session.record)
-	if err := m.store.SaveCall(call); err != nil {
+	m.updateScreeningLocked(session.call.ID, session.call.TraceID, session.record)
+}
+
+func (m *screeningManager) updateScreeningLocked(callID, traceID string, record *CallScreeningRecord) (Call, bool) {
+	call, found, err := m.store.UpdateCallScreening(callID, record)
+	if err != nil {
 		m.events.Publish("screening.persistence.failed", map[string]any{
-			"call_id": session.call.ID, "trace_id": session.call.TraceID, "error": err.Error(),
+			"call_id": callID, "trace_id": traceID, "error": err.Error(),
 		})
 	}
+	if !found {
+		m.events.Publish("screening.persistence.failed", map[string]any{
+			"call_id": callID, "trace_id": traceID, "error": "call record is missing",
+		})
+	}
+	return call, found
 }
 
 func (r *integrationRegistry) screeningService(name string) (*integrationConnection, screeningCapabilityOptions, bool) {
