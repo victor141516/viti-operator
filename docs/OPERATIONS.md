@@ -472,6 +472,13 @@ periods are 30 minutes for the ESP CHILD SA and 45 minutes for the parent IKE SA
 `0` disables either timer through `SWU_CHILD_REKEY_MINUTES` or
 `SWU_IKE_REKEY_MINUTES` in the rendered engine environment.
 
+The adapter intentionally gives attach and reauthentication VICI operations
+more time than the configured AKA request timeout; ordinary status operations
+retain a short deadline. On shutdown it records `tunnel_down` before attempting
+peer teardown and bounds the remaining VICI/charon cleanup. A container that
+stops within its configured grace period should therefore leave an exact
+`tunnel_start`, `tunnel_up`, `tunnel_down` sequence even if AKA was stalled.
+
 ### Modem was unplugged
 
 Leave the manager running. Reconnect the same ADB serial. The local fallback is

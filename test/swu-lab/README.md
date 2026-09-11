@@ -42,6 +42,12 @@ To verify a separately built production artifact, pass its tag:
 python test/swu-lab/run_lab.py --backend-image viti-operator-engine:local
 ```
 
+That form also starts the production image through its real `/entrypoint.sh`,
+waits for Asterisk to start, stops the container with the production grace
+period, and verifies that shutdown emits exactly one ordered
+`tunnel_start`, `tunnel_up`, `tunnel_down` lifecycle. This catches supervision
+or shutdown regressions that a backend-only harness cannot observe.
+
 Each scenario resets the isolated topology, observes the public status/event
 contract and real network behavior, and verifies terminal lifecycle state. The
 backend control FIFO accepts the newline-delimited commands `stop`, `reauth`,

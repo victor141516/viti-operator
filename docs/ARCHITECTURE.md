@@ -431,7 +431,16 @@ The VICI adapter normalizes strongSwan state into the manager's tunnel contract.
 It also reconciles configuration attributes after attach and reauthentication:
 a changed P-CSCF re-renders PJSIP, reloads `res_pjsip`, and restores the desired
 registration; a changed inner address restarts Asterisk so its `ipsec0` transport
-binds the new address. Normal SA renewals do neither.
+binds the new address. Startup clears persisted reconciliation markers, so an
+attach that finishes after Asterisk starts is applied rather than mistaken for
+already-consumed state. Normal SA renewals do neither.
+
+VICI control has operation-specific deadlines. Status requests remain short,
+while initiation and reauthentication may outlive the synchronous AKA broker
+timeout. During container shutdown the adapter first persists `tunnel_down`,
+then closes any in-flight VICI request and tears down charon within a bounded
+budget. This keeps the durable lifecycle contract inside Docker's stop grace
+period even when the authentication provider is slow or unavailable.
 
 The engine refreshes two independent security-association lifetimes. It renews
 the ESP CHILD SA every 30 minutes and proactively renews the parent IKE SA every
@@ -452,6 +461,11 @@ down boundary in the same state file as call history. Duplicate, retired,
 out-of-order, and older cross-generation claims are ignored. The down boundary
 survives a later up and manager restart so a delayed call hook from an older data
 plane cannot reopen a terminated call.
+
+The production image uses a digest-pinned Fedora base, the immutable Fedora
+release repository, checksum-pinned Python source archives, and commit-pinned
+native telecom sources. This prevents routine repository updates from silently
+changing the packaged SWu stack between clean builds.
 
 ### IMS
 

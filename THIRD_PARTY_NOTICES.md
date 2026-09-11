@@ -5,8 +5,8 @@ Its MIT license and copyright notice are preserved in `engine/LICENSE`.
 Local changes include HTTP SIM authentication, call lifecycle handling,
 conferencing, recordings and opt-in diagnostics.
 
-The engine also incorporates SWu-IKEv2-derived code and builds sysmocom Asterisk,
-pjproject, PC/SC and other dependencies. Their source references are retained in
+The engine builds strongSwan, sysmocom Asterisk, pjproject, PC/SC and other
+dependencies. Their source references are retained in
 the engine Dockerfile and source. These components retain their respective
 upstream licenses; the engine MIT notice does not relicense dependencies.
 
