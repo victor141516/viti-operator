@@ -48,6 +48,7 @@ type App struct {
 	callSessions      *callSessionRegistry
 	integrations      *integrationRegistry
 	serviceMedia      serviceMediaController
+	screening         *screeningManager
 }
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
@@ -118,6 +119,21 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry(), integrations: newIntegrationRegistry()}
+	a.screening = newScreeningManager(cfg.ScreeningPipeline, store, events, a.integrations, screeningCallbacks{
+		closeController: func(serviceName, callID, reason string) {
+			if a.serviceMedia != nil {
+				a.serviceMedia.CloseServiceCall(serviceName, callID, reason)
+			}
+		},
+		ringClients: func(ctx context.Context, call Call) error {
+			controller, ok := gateway.(ScreeningCallController)
+			if !ok {
+				return errors.New("the telephony provider cannot ring clients for an active screened call")
+			}
+			return controller.RingClients(ctx, call)
+		},
+		hangup: func(ctx context.Context, call Call) error { return gateway.HangupCall(ctx, call.ID) },
+	})
 	if cfg.Voice.ServiceMedia.Enabled {
 		bridge, ok := gateway.(serviceMediaBridge)
 		if !ok {
@@ -129,12 +145,16 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 				call, found := store.GetCall(callID)
 				return found && call.EndedAt == nil
 			},
+			mediaState: func(state serviceMediaState) {
+				a.screening.MediaState(state.CallID, state.ServiceName, state.ConnectionID, state.SessionID, state.Purpose, state.State)
+			},
 		})
 		if err != nil {
 			return nil, fmt.Errorf("start service media: %w", err)
 		}
 		a.serviceMedia = media
 	}
+	a.screening.RecoverPersisted()
 	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
 		a.tunnel = engineTunnelState{
 			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
@@ -175,6 +195,7 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/messages", a.authorized(http.HandlerFunc(a.messages)))
 	a.mux.Handle("POST /api/v1/messages", a.authorized(http.HandlerFunc(a.sendMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
+	a.mux.Handle("GET /api/v1/calls/{id}", a.authorized(http.HandlerFunc(a.callDetails)))
 	a.mux.Handle("POST /api/v1/calls/normalize", a.authorized(http.HandlerFunc(a.normalizeCallDestination)))
 	a.mux.Handle("GET /api/v1/contacts", a.authorized(http.HandlerFunc(a.contacts)))
 	a.mux.Handle("PUT /api/v1/contacts/sources/{client}", a.authorized(http.HandlerFunc(a.replaceContactSource)))
@@ -189,6 +210,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/diagnostics/events", a.authorized(http.HandlerFunc(a.diagnosticEvent)))
 	a.mux.HandleFunc("GET /sipws", a.voiceWebSocket)
 	a.mux.HandleFunc("POST /api/engine/event", a.engineEvent)
+	a.mux.HandleFunc("POST /api/engine/screen", a.engineScreen)
 	a.mux.HandleFunc("GET /api/engine/recording", a.engineRecordingSettings)
 	a.mux.Handle("POST /api/v1/authenticate", a.authorized(http.HandlerFunc(a.authenticate)))
 	a.mux.Handle("GET /api/v1/authenticate/ready", a.authorized(http.HandlerFunc(a.authenticateReady)))
@@ -437,11 +459,21 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	if changed {
 		a.events.Publish("call.updated", call)
 	}
+	if request.Event == "call_in" && changed {
+		a.screening.StartIncoming(call)
+	}
+	if request.Event == "call_active" && changed {
+		a.events.Publish("call.active", screeningCallPayload(call))
+	}
+	if request.Event == "call_active" {
+		a.screening.CallActive(call)
+	}
 	if request.Event == "call_result" {
 		a.callSessions.ended(call.Instance, call.EngineCallID, call.TraceID)
 		if a.serviceMedia != nil {
 			a.serviceMedia.CloseCall(call.ID, "call_ended")
 		}
+		a.screening.CallEnded(call, "carrier", "call_result")
 	}
 	a.diag.RecordTrace("manager.call", "event.completed", call.TraceID, map[string]any{"engine_event": request, "call": call})
 	writeJSON(w, http.StatusOK, call)
@@ -770,13 +802,34 @@ func (a *App) ingestSMSProtocolEvent(w http.ResponseWriter, instance string, arg
 func (a *App) calls(w http.ResponseWriter, _ *http.Request) {
 	items := a.callsWithRecordingTiming()
 	contacts := a.store.Contacts("")
+	views := make([]map[string]any, 0, len(items))
 	for index := range items {
 		if contact, found := resolveContact(contacts, items[index].Peer); found {
 			items[index].ContactID = contact.ID
 			items[index].ContactName = contact.Name
 		}
+		views = append(views, callListView(items[index]))
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"calls": items})
+	writeJSON(w, http.StatusOK, map[string]any{"calls": views})
+}
+
+func callListView(call Call) map[string]any {
+	encoded, _ := json.Marshal(call)
+	view := make(map[string]any)
+	_ = json.Unmarshal(encoded, &view)
+	if call.Screening != nil {
+		view["screening"] = call.Screening.Summary()
+	}
+	return view
+}
+
+func (a *App) callDetails(w http.ResponseWriter, r *http.Request) {
+	call, found := a.store.GetCall(strings.TrimSpace(r.PathValue("id")))
+	if !found {
+		writeError(w, http.StatusNotFound, "call not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, call)
 }
 
 func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
@@ -1017,6 +1070,7 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 	if mediaConnected {
 		a.publishCallMediaEvent("connected", call, participant.clientID, participant.participantID, participant.connectionID, channel, at)
 	}
+	a.screening.HumanJoined(call)
 	w.WriteHeader(http.StatusNoContent)
 }
 

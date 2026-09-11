@@ -118,6 +118,7 @@ COPY strongswan_adapter.py /usr/local/bin/strongswan_adapter.py
 COPY strongswan/strongswan.conf /etc/strongswan.conf
 COPY render.py       /usr/local/bin/render.py
 COPY notify.py       /usr/local/bin/notify.py
+COPY screen_call.py  /usr/local/bin/screen_call.py
 COPY event_outbox.py /usr/local/bin/event_outbox.py
 COPY recording_enabled.py /usr/local/bin/recording_enabled.py
 COPY test_ami_usim_http.py /usr/local/bin/test_ami_usim_http.py
@@ -126,10 +127,11 @@ COPY test_tunnel_reconcile.py /usr/local/bin/test_tunnel_reconcile.py
 COPY test_strongswan_adapter.py /usr/local/bin/test_strongswan_adapter.py
 COPY test_event_outbox.py /usr/local/bin/test_event_outbox.py
 COPY test_notify.py /usr/local/bin/test_notify.py
+COPY test_screen_call.py /usr/local/bin/test_screen_call.py
 COPY templates/      /opt/vowifi/templates/
 COPY entrypoint.sh   /entrypoint.sh
-RUN cd /usr/local/bin && python3 -m unittest test_ami_usim_http.py test_tunnel_contract.py test_tunnel_reconcile.py test_strongswan_adapter.py test_event_outbox.py test_notify.py && \
-    rm /usr/local/bin/test_ami_usim_http.py /usr/local/bin/test_tunnel_contract.py /usr/local/bin/test_tunnel_reconcile.py /usr/local/bin/test_strongswan_adapter.py /usr/local/bin/test_event_outbox.py /usr/local/bin/test_notify.py && \
+RUN cd /usr/local/bin && python3 -m unittest test_ami_usim_http.py test_tunnel_contract.py test_tunnel_reconcile.py test_strongswan_adapter.py test_event_outbox.py test_notify.py test_screen_call.py && \
+    rm /usr/local/bin/test_ami_usim_http.py /usr/local/bin/test_tunnel_contract.py /usr/local/bin/test_tunnel_reconcile.py /usr/local/bin/test_strongswan_adapter.py /usr/local/bin/test_event_outbox.py /usr/local/bin/test_notify.py /usr/local/bin/test_screen_call.py && \
     chmod +x /usr/local/bin/*.py /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]

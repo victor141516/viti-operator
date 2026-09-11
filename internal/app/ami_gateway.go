@@ -114,6 +114,29 @@ func (g *AMIGateway) DropConferenceLeg(ctx context.Context, channel string) erro
 	return nil
 }
 
+func (g *AMIGateway) RingClients(ctx context.Context, call Call) error {
+	if !validCallControlID(call.EngineCallID) || !validCallControlID(call.TraceID) {
+		return errors.New("active screened call identifiers are invalid")
+	}
+	variables := strings.Join([]string{
+		"__VITI_CALL_ID=" + call.EngineCallID,
+		"__VITI_TRACE_ID=" + call.TraceID,
+		"__CALLPEER=" + call.Peer,
+		"__VITI_DIRECTION=in",
+	}, ",")
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Originate", "Channel": "Local/s@viti-ring-clients",
+		"Application": "Wait", "Data": "1", "Timeout": "60000", "Async": "true", "Variable": variables,
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		return fmt.Errorf("Asterisk rejected screened client ringing: %s", first(response, "Message"))
+	}
+	return nil
+}
+
 func (g *AMIGateway) JoinServiceMedia(ctx context.Context, request serviceMediaBridgeRequest) error {
 	return g.originateServiceMedia(ctx, request, "viti-service-conference", "s")
 }
@@ -487,7 +510,7 @@ func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]stri
 }
 
 func writeAMIFields(conn io.Writer, fields map[string]string) error {
-	for _, key := range []string{"Action", "ActionID", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
+	for _, key := range []string{"Action", "ActionID", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Application", "Data", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
 		value, ok := fields[key]
 		if !ok {
 			continue

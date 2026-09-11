@@ -18,6 +18,9 @@ manager-facing tunnel contract.
   system events, advertise call capabilities, and issue idempotent commands.
 - Call-scoped full-duplex WebRTC attachments for trusted services, using
   ephemeral manager-owned sessions and the existing Asterisk conference mix.
+- An ordered, fail-open incoming-call screening pipeline whose trusted services
+  can inspect metadata, take WebRTC control, append JSON results, hand off to
+  another stage, ring human clients, or reject the call.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.

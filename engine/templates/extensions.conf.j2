@@ -38,18 +38,24 @@ same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=in)
 ; enqueue call_result before call_in and leave two contradictory history rows.
 same => n,TrySystem(python3 /usr/local/bin/notify.py call_in "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLERID(num)}")
 same => n,Gosub(viti-start-carrier-recording,s,1)
-; One carrier line can carry one call. All registered clients ring together. The first
-; answer wins this initial fork, then both legs enter a server-side conference. Other
-; registered clients can join that same conference later through the private *44 extension.
+; The manager runs the configured metadata/media screening pipeline while this carrier
+; channel remains unanswered. If the manager is unavailable the helper fails open and
+; returns ring_clients. A verified controller enters the conference before Answer(), so
+; optional automation can never consume a call without a live media path.
 same => n,WaitForPrecondition(10,2000)
+same => n,Set(VITI_SCREEN_ACTION=${SHELL(python3 /usr/local/bin/screen_call.py "${VITI_CALL_ID}")})
+same => n,GotoIf($["${VITI_SCREEN_ACTION}" = "hangup"]?screen_hangup)
+same => n,GotoIf($["${VITI_SCREEN_ACTION}" = "take_control"]?screen_control)
 same => n,Ringing()
 {% if dialstr %}
 same => n,Dial({{ dialstr }},60,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-incoming-conference^s^1))
 {% else %}
-same => n,Answer()
-same => n,Wait(30)
+same => n,Wait(60)
 {% endif %}
 same => n,Hangup()
+same => n(screen_control),Answer()
+same => n,Goto(viti-carrier-conference,s,1)
+same => n(screen_hangup),Hangup()
 same => n(busy),Busy()
 same => n,Hangup()
 ; i (invalid) / t (response timeout) are explicit no-ops so the broad _. never mislogs them.
@@ -250,6 +256,23 @@ same => n,Hangup()
 ; the combined local side.
 [viti-incoming-conference]
 exten => s,1,Goto(viti-carrier-conference,s,1)
+same => n,Goto(viti-client-conference,s,1)
+
+; A screened call may already be answered and owned by a bot when the manager
+; asks local devices to ring. The Local caller is discarded after the first
+; answer while the winning client enters the existing conference. The carrier
+; remains in ConfBridge and therefore hears conference media, never ringback.
+[viti-ring-clients]
+exten => s,1,NoOp(Ring clients for screened call ${VITI_CALL_ID})
+{% if dialstr %}
+same => n,Dial({{ dialstr }},60,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-screened-client^s^1))
+{% else %}
+same => n,Wait(60)
+{% endif %}
+same => n,Hangup()
+
+[viti-screened-client]
+exten => s,1,Hangup()
 same => n,Goto(viti-client-conference,s,1)
 
 [viti-outgoing-conference]

@@ -28,6 +28,10 @@ type ConferenceCallController interface {
 	EndConference(context.Context, string) error
 }
 
+type ScreeningCallController interface {
+	RingClients(context.Context, Call) error
+}
+
 type IMSRegistrationController interface {
 	SetIMSRegistration(context.Context, bool) error
 }
@@ -59,6 +63,7 @@ func (MemoryGateway) SendSMS(context.Context, string, string, string) (SMSSubmit
 }
 func (MemoryGateway) StartCall(context.Context, string, string) error { return nil }
 func (MemoryGateway) HangupCall(context.Context, string) error        { return nil }
+func (MemoryGateway) RingClients(context.Context, Call) error         { return nil }
 func (MemoryGateway) SetIMSRegistration(context.Context, bool) error  { return nil }
 
 type CommandGateway struct {

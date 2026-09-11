@@ -2,6 +2,7 @@
   "listen": "127.0.0.1:8787",
   "data_file": "./data/state.json",
   "api_key": "change-this-long-random-token",
+  "screening_pipeline": [],
   "telephony": {
     "type": "memory",
     "poll_seconds": 2

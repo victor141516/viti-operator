@@ -57,6 +57,7 @@ type serviceMediaManager struct {
 	logger     *slog.Logger
 	hasHumans  func(Call) bool
 	callOpen   func(string) bool
+	mediaState func(serviceMediaState)
 	sessions   map[string]*serviceMediaSession
 	byOwner    map[string]string
 	sources    map[string]serviceMediaSource
@@ -64,8 +65,9 @@ type serviceMediaManager struct {
 }
 
 type serviceMediaCallbacks struct {
-	hasHumans func(Call) bool
-	callOpen  func(string) bool
+	hasHumans  func(Call) bool
+	callOpen   func(string) bool
+	mediaState func(serviceMediaState)
 }
 
 type serviceMediaSession struct {
@@ -152,6 +154,7 @@ func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerCon
 	if len(callbacks) != 0 {
 		manager.hasHumans = callbacks[0].hasHumans
 		manager.callOpen = callbacks[0].callOpen
+		manager.mediaState = callbacks[0].mediaState
 	}
 	return manager, nil
 }
@@ -488,6 +491,12 @@ func (m *serviceMediaManager) CloseCall(callID, reason string) {
 	m.closeMatching(func(session *serviceMediaSession) bool { return session.call.ID == callID }, reason)
 }
 
+func (m *serviceMediaManager) CloseServiceCall(serviceName, callID, reason string) {
+	m.closeMatching(func(session *serviceMediaSession) bool {
+		return session.serviceName == serviceName && session.call.ID == callID
+	}, reason)
+}
+
 func (m *serviceMediaManager) closeMatching(match func(*serviceMediaSession) bool, reason string) {
 	m.mu.Lock()
 	sessions := make([]*serviceMediaSession, 0)
@@ -587,6 +596,12 @@ func (s *serviceMediaSession) setMediaConnected(connected bool, reason string) {
 		s.connectedOnce.Do(func() { close(s.connected) })
 	}
 	s.manager.publishMedia(state, s, reason)
+	if s.manager.mediaState != nil {
+		s.manager.mediaState(serviceMediaState{
+			State: state, SessionID: s.id, CallID: s.call.ID, ServiceName: s.serviceName,
+			ConnectionID: s.connectionID, Purpose: s.purpose,
+		})
+	}
 }
 
 func (s *serviceMediaSession) close(reason string) {

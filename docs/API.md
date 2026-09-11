@@ -223,8 +223,8 @@ uses `call.participant.joined` and `call.participant.left`; individual media
 generations use `call.media.connected` and `call.media.disconnected`.
 
 Commands travel over the same socket. Version 1 implements `call.start`,
-`call.hangup`, `media.attach`, `media.ice`, and `call.dtmf`. Screening commands
-are added by the pipeline API separately.
+`call.hangup`, `media.attach`, `media.ice`, `call.dtmf`, and
+`screening.decision`.
 
 ```json
 {"type":"media.attach","version":1,"command_id":"media-17","call_id":"call-...","payload":{"sdp_offer":"v=0\\r\\n...","purpose":"auxiliary"}}
@@ -232,6 +232,7 @@ are added by the pipeline API separately.
 {"type":"call.dtmf","version":1,"command_id":"tone-17","call_id":"call-...","payload":{"session_id":"media-...","digit":"#","duration_ms":250}}
 {"type":"call.start","version":1,"command_id":"dial-17","payload":{"to":"+34123456789","sdp_offer":"v=0\\r\\n..."}}
 {"type":"call.hangup","version":1,"command_id":"stop-17","call_id":"call-..."}
+{"type":"screening.decision","version":1,"command_id":"screen-17","call_id":"call-...","payload":{"revision":2,"action":"next","output":{"voice_detected":true}}}
 ```
 
 `media.attach` accepts only an active carrier call and returns
@@ -252,6 +253,23 @@ service ends its carrier call unless a human participant has already joined.
 `call.dtmf` injects one tone through that service's conference channel; the
 authoritative, source-attributed `call.dtmf` event is then broadcast to every
 integration.
+
+For incoming screening, `call.incoming` is broadcast once and each current
+pipeline stage produces a `screening.offer` containing `target_service`,
+`stage_index`, `revision`, `context`, `deadline`, call metadata, and prior stage
+results. Every service sees the offer, but only its target can authoritatively
+send `take_control`, `next`, or `ring_clients`. Any connected service with
+`call.hangup` can send `hangup`, which has global priority. Output is opaque JSON
+limited to 64 KiB per update and increments the context revision. A service may
+reply early for a later stage; the manager uses that reply only if its exact
+revision is still current.
+
+`take_control` reserves the current stage. The target then sends
+`media.attach` with `purpose: "controller"`; Viti answers the carrier only after
+that WebRTC media is connected. The same `screening.decision` envelope finishes
+an active controlling stage. Decision/media/processing timeouts, service loss,
+or exhaustion fail open to the next stage or human ringing. A
+`processing_timeout_ms` of `-1` has no deadline.
 
 The server sends `command.result` with `accepted` before executing a valid
 command and then `completed`, `rejected`, or `failed`. A repeated command ID
@@ -384,6 +402,17 @@ source timestamp, call-relative `offset_ms`, actual WAV `duration_ms`, and
 client/participant identifiers when applicable. For completed legacy records,
 the manager derives missing timing from the WAV header and persists only those
 track fields atomically; concurrent call or participant updates are preserved.
+
+Calls processed by the screening pipeline include only a compact `screening`
+summary in this collection response.
+
+### `GET /api/v1/calls/{id}`
+
+Returns one complete call record, including the snapshotted pipeline order and
+the append-only per-stage screening history. The history stores service names,
+context revisions, effective timeouts, actions, opaque JSON output, outcomes,
+and timestamps, but never SDP, ICE, or other media transport state. Unknown IDs
+return `404`.
 
 ### `GET /api/v1/recording`
 
@@ -548,6 +577,15 @@ client, connection generation, exact Asterisk channel, source timestamp, and
 predecessor history so delayed abort/leave events cannot revoke a newer leg.
 `410` rejects a terminal, reused, colliding, or otherwise stale admission; an
 exact replay of the still-current generation remains idempotent.
+
+### `POST /api/engine/screen`
+
+Engine-only long-poll authenticated with `X-Viti-Engine-Token`. The engine sends
+its `instance` and carrier `call_id`; the manager returns `ring_clients`,
+`take_control`, `hangup`, or `pending`. A pending response is a two-second
+liveness heartbeat, not a pipeline timeout. The engine repeats the request with
+a five-second socket deadline, allowing arbitrarily long aggregate service
+deadlines while a wedged manager path still fails open to human ringing.
 
 ### `GET /api/engine/recording`
 
