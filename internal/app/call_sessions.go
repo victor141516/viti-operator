@@ -56,6 +56,7 @@ type callParticipantDeparture struct {
 type callParticipantJoinResult struct {
 	channelsToDrop []string
 	admitted       bool
+	changed        bool
 }
 
 type callLeaveOperation struct {
@@ -181,7 +182,7 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		replacement.predecessor = &predecessor
 	}
 	session.participants[logicalKey] = replacement
-	return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true}
+	return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true, changed: true}
 }
 
 // abortJoin revokes a join whose synchronous admission response did not reach
@@ -285,18 +286,18 @@ func (r *callSessionRegistry) left(call Call, clientID, participantID, connectio
 	r.leftChannel(call, clientID, participantID, connectionID, "", at)
 }
 
-func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) {
+func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	session := r.sessions[callSessionKey(call.Instance, call.EngineCallID)]
 	if session == nil {
-		return
+		return false
 	}
 	delete(session.pendingDrops, channel)
 	logicalKey := logicalParticipantKey(clientID, participantID)
 	participant, found := session.participants[logicalKey]
-	if !found || participant.connectionID != connectionID || at.Before(participant.updatedAt) {
-		return
+	if !found || participant.connectionID != connectionID || at.Before(participant.updatedAt) || !participant.connected {
+		return false
 	}
 	participant.connected = false
 	participant.channel = ""
@@ -307,6 +308,7 @@ func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, co
 	participant.updatedAt = at
 	session.participants[logicalKey] = participant
 	delete(session.departed, logicalKey)
+	return true
 }
 
 // claim replaces the provisional Asterisk participant identity used for an

@@ -46,6 +46,7 @@ type App struct {
 	clients           map[string]clientPresence
 	simAuthAssignment SIMAuthAssignment
 	callSessions      *callSessionRegistry
+	integrations      *integrationRegistry
 }
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
@@ -115,7 +116,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 			AuthAgentID: client.AuthAgentID, HasSIM: client.HasSIM, LastSeen: client.LastSeen,
 		}
 	}
-	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry()}
+	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry(), integrations: newIntegrationRegistry()}
 	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
 		a.tunnel = engineTunnelState{
 			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
@@ -152,6 +153,7 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/ims-registration", a.authorized(http.HandlerFunc(a.imsRegistration)))
 	a.mux.Handle("PUT /api/v1/ims-registration", a.authorized(http.HandlerFunc(a.setIMSRegistration)))
 	a.mux.Handle("GET /api/v1/events", a.authorized(http.HandlerFunc(a.waitEvents)))
+	a.mux.Handle("GET /api/v1/integrations/ws", a.authorized(http.HandlerFunc(a.integrationWebSocket)))
 	a.mux.Handle("GET /api/v1/messages", a.authorized(http.HandlerFunc(a.messages)))
 	a.mux.Handle("POST /api/v1/messages", a.authorized(http.HandlerFunc(a.sendMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
@@ -762,28 +764,38 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	destination, err := normalizeDialDestination(request.To, request.Country)
+	call, status, err := a.startCallOperation(r.Context(), request.To, request.Country, traceID)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		if status == http.StatusBadGateway && call.ID != "" {
+			writeJSON(w, status, call)
+		} else {
+			writeError(w, status, err.Error())
+		}
 		return
 	}
-	statusCtx, statusCancel := context.WithTimeout(r.Context(), 4*time.Second)
-	defer statusCancel()
-	if status, err := a.runtimeStatus(statusCtx); err != nil {
+	writeJSON(w, http.StatusCreated, call)
+}
+
+func (a *App) startCallOperation(ctx context.Context, to, country, traceID string) (Call, int, error) {
+	destination, err := normalizeDialDestination(to, country)
+	if err != nil {
+		return Call{}, http.StatusBadRequest, err
+	}
+	statusCtx, statusCancel := context.WithTimeout(ctx, 4*time.Second)
+	status, statusErr := a.runtimeStatus(statusCtx)
+	statusCancel()
+	if statusErr != nil {
 		a.diag.RecordTrace("manager.call", "api.start.blocked-unavailable", traceID, status)
-		writeError(w, http.StatusServiceUnavailable, runtimeUnavailableMessage(status))
-		return
+		return Call{}, http.StatusServiceUnavailable, errors.New(runtimeUnavailableMessage(status))
 	}
 	for _, existing := range a.store.Calls() {
 		if existing.EndedAt == nil && time.Since(existing.UpdatedAt) < 2*time.Minute {
-			writeError(w, http.StatusConflict, "the line is already in use")
-			return
+			return Call{}, http.StatusConflict, errors.New("the line is already in use")
 		}
 	}
 	id, err := randomID("call")
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "could not allocate call")
-		return
+		return Call{}, http.StatusInternalServerError, errors.New("could not allocate call")
 	}
 	now := time.Now().UTC()
 	if traceID == "" {
@@ -792,23 +804,21 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 	call := Call{ID: id, TraceID: traceID, Direction: DirectionOutgoing, Peer: destination, State: "dialing", StartedAt: now, UpdatedAt: now}
 	a.diag.RecordTrace("manager.call", "api.start.accepted", traceID, call)
 	if err := a.store.SaveCall(call); err != nil {
-		writeError(w, http.StatusInternalServerError, "could not persist call")
-		return
+		return Call{}, http.StatusInternalServerError, errors.New("could not persist call")
 	}
 	a.events.Publish("call.updated", call)
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
+	gatewayCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
-	if err := a.gateway.StartCall(ctx, call.ID, call.Peer); err != nil {
+	if err := a.gateway.StartCall(gatewayCtx, call.ID, call.Peer); err != nil {
 		a.diag.RecordTrace("manager.call", "gateway.start.failed", traceID, map[string]any{"call": call, "error": err.Error()})
 		call.State = "failed"
 		call.UpdatedAt = time.Now().UTC()
 		_ = a.store.SaveCall(call)
 		a.events.Publish("call.updated", call)
-		writeJSON(w, http.StatusBadGateway, call)
-		return
+		return call, http.StatusBadGateway, err
 	}
 	a.diag.RecordTrace("manager.call", "gateway.start.completed", traceID, call)
-	writeJSON(w, http.StatusCreated, call)
+	return call, http.StatusCreated, nil
 }
 
 func (a *App) normalizeCallDestination(w http.ResponseWriter, r *http.Request) {
@@ -830,27 +840,39 @@ func (a *App) normalizeCallDestination(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) hangupCall(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	call, ok := a.store.GetCall(id)
-	if !ok {
-		writeError(w, http.StatusNotFound, "call not found")
+	call, status, err := a.hangupCallOperation(r.Context(), id)
+	if err != nil {
+		writeError(w, status, err.Error())
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	writeJSON(w, http.StatusOK, call)
+}
+
+func (a *App) hangupCallOperation(ctx context.Context, id string) (Call, int, error) {
+	call, ok := a.store.GetCall(id)
+	if !ok {
+		return Call{}, http.StatusNotFound, errors.New("call not found")
+	}
+	if call.EndedAt != nil {
+		return call, http.StatusOK, nil
+	}
+	gatewayCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	a.diag.RecordTrace("manager.call", "api.hangup.requested", call.TraceID, call)
-	if err := a.gateway.HangupCall(ctx, id); err != nil {
+	if err := a.gateway.HangupCall(gatewayCtx, id); err != nil {
 		a.diag.RecordTrace("manager.call", "gateway.hangup.failed", call.TraceID, map[string]any{"call": call, "error": err.Error()})
-		writeError(w, http.StatusBadGateway, err.Error())
-		return
+		return call, http.StatusBadGateway, err
 	}
 	now := time.Now().UTC()
 	call.State = "ended"
 	call.UpdatedAt = now
 	call.EndedAt = &now
-	_ = a.store.SaveCall(call)
+	if err := a.store.SaveCall(call); err != nil {
+		return call, http.StatusInternalServerError, errors.New("could not persist ended call")
+	}
 	a.events.Publish("call.updated", call)
 	a.diag.RecordTrace("manager.call", "api.hangup.completed", call.TraceID, call)
-	writeJSON(w, http.StatusOK, call)
+	return call, http.StatusOK, nil
 }
 
 func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance, engineCallID string, args []string, at time.Time) {
@@ -882,7 +904,9 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		return
 	}
 	if event == "participant_join_aborted" {
-		if a.callSessions.abortJoin(call, clientID, participantID, connectionID, channel, at) {
+		removed := a.callSessions.abortJoin(call, clientID, participantID, connectionID, channel, at)
+		if removed {
+			a.publishCallParticipantEvents("left", "disconnected", call, clientID, participantID, connectionID, channel, at)
 			controller, ok := a.gateway.(ConferenceCallController)
 			if !ok {
 				writeError(w, http.StatusNotImplemented, "the telephony provider cannot end an abandoned conference")
@@ -901,7 +925,9 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		return
 	}
 	if event == "participant_left" {
-		a.callSessions.leftChannel(call, clientID, participantID, connectionID, channel, at)
+		if a.callSessions.leftChannel(call, clientID, participantID, connectionID, channel, at) {
+			a.publishCallParticipantEvents("left", "disconnected", call, clientID, participantID, connectionID, channel, at)
+		}
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -928,7 +954,19 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		writeError(w, http.StatusGone, "participant admission was rejected")
 		return
 	}
+	if joinResult.changed {
+		a.publishCallParticipantEvents("joined", "connected", call, clientID, participantID, connectionID, channel, at)
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) publishCallParticipantEvents(participantState, mediaState string, call Call, clientID, participantID, connectionID, channel string, at time.Time) {
+	payload := map[string]any{
+		"call_id": call.ID, "trace_id": call.TraceID, "client_id": clientID,
+		"participant_id": participantID, "connection_id": connectionID, "channel": channel, "occurred_at": at,
+	}
+	a.events.Publish("call.participant."+participantState, payload)
+	a.events.Publish("call.media."+mediaState, payload)
 }
 
 func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
