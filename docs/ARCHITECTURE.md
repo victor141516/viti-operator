@@ -275,10 +275,27 @@ State is written to `deploy/data/state.json` through a temporary file followed
 by an atomic rename. Web and Android clients render the same records; neither
 client maintains an independent authoritative history.
 
-The event hub retains the most recent 256 events in memory. Long-polling clients
-provide the last sequence they observed. Events accelerate refreshes, but
-clients always recover by fetching current state, so missing an old event does
-not corrupt history.
+The event hub assigns one random stream generation per manager process and
+retains the most recent 256 globally sequenced events in memory. Long-polling
+clients provide the last sequence they observed. Events accelerate refreshes,
+but clients always recover by fetching current state, so missing an old event
+does not corrupt history.
+
+Trusted local integrations use one persistent manager WebSocket each. A stable
+service name owns at most one live socket and advertises automatically granted
+call capabilities plus capability-specific timeouts. The connection receives
+the same complete event stream as every other integration; capabilities govern
+commands, not visibility. A reconnect supplies its previous stream generation
+and sequence. The manager atomically installs the live subscription while
+capturing replay state, preventing a gap between history and live delivery; a
+new generation or an evicted gap produces a current-state snapshot instead.
+
+Each integration has a bounded event queue and ping/pong lease. A blocked
+writer loses its connection rather than delaying producers or other services.
+Command IDs are deduplicated in memory per service, with semantic request
+content preventing an ID from being reused for a different action. Since the
+deployment owns one physical line, call commands share one serialization lock.
+Neither replay nor command deduplication is durable across manager restart.
 
 ## Contact synchronization and resolution
 

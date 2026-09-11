@@ -87,7 +87,7 @@ assets before compilation.
 
 | Service | Host exposure | Notes |
 |---|---|---|
-| `manager` | Tailscale TCP 18787 by default | Web, JSON API, event long polling, SIP WebSocket proxy |
+| `manager` | Tailscale TCP 18787 by default | Web, JSON API, event long polling, trusted integration WebSocket, SIP WebSocket proxy |
 | `loopback-proxy` | 127.0.0.1 TCP 18788 by default | Local desktop convenience endpoint |
 | `turn` | Tailscale UDP 3479 | Private ICE relay listener |
 | `engine` | Tailscale UDP 5060, TCP 5061, UDP 10000–10059 | Optional native SIP and media; carrier tunnel stays internal |

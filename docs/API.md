@@ -1,8 +1,8 @@
-# HTTP API
+# Manager API
 
-The manager serves JSON under `/api/v1`, the web application at `/`, a SIP
-WebSocket proxy at `/sipws`, and one engine-only webhook at
-`/api/engine/event`.
+The manager serves JSON under `/api/v1`, the web application at `/`, a trusted
+integration WebSocket at `/api/v1/integrations/ws`, a SIP WebSocket proxy at
+`/sipws`, and one engine-only webhook at `/api/engine/event`.
 
 ## Authentication and conventions
 
@@ -154,9 +154,90 @@ adapter that cannot control registration.
 
 Long-polls for events newer than the supplied sequence. Common event types are
 `status.updated`, `contacts.updated`, `message.updated`, `call.updated`, and
-`recording.updated`. The in-memory buffer is bounded, so clients must refresh
-the corresponding resource after a wake-up instead of treating events as
-permanent storage.
+`recording.updated`. Each event uses the versioned envelope documented below.
+`at` and `data` remain compatibility aliases for `occurred_at` and `payload`.
+The in-memory buffer is bounded, so clients must refresh the corresponding
+resource after a wake-up instead of treating events as permanent storage.
+
+## Trusted service integrations
+
+### `GET /api/v1/integrations/ws`
+
+Upgrades to the bidirectional control WebSocket. It uses the normal manager API
+key when one is configured. This endpoint is intended only for trusted services
+on the same private host or VLAN; it does not add per-service credentials.
+
+The first client message must identify one stable service name and its requested
+capabilities. Capability options are preserved, including service-selected
+timeouts; `-1` may represent no processing deadline where the capability using
+that option permits it.
+
+```json
+{
+  "type": "service.hello",
+  "version": 1,
+  "name": "local-spam-filter",
+  "capabilities": {
+    "call.screen": {"decision_timeout_ms": 2000, "processing_timeout_ms": -1},
+    "call.hangup": {}
+  },
+  "resume": {"stream_id": "stream-...", "sequence": 42}
+}
+```
+
+Names contain 1–64 letters, digits, dots, underscores, or hyphens. A second
+live connection with the same name is rejected; the name becomes available as
+soon as the first socket disconnects or fails its heartbeat. Protocol version 1
+recognizes `call.screen`, `call.media`, `call.hangup`, `call.dtmf`, and
+`call.start`, and automatically grants every advertised capability.
+
+The server first sends `service.ready`. If `resume` names the current process
+generation and its gap remains in the 256-event buffer, retained events follow
+in sequence. Otherwise, the server sends `system.snapshot` containing current
+calls, messages, known clients, connected services, contacts and their version,
+recording settings, SIM-auth assignment, IMS registration, and complete runtime
+status. Live events then use:
+
+```json
+{
+  "type": "call.updated",
+  "version": 1,
+  "event_id": "stream-...-43",
+  "stream_id": "stream-...",
+  "sequence": 43,
+  "occurred_at": "2026-09-11T10:00:00Z",
+  "call_id": "call-...",
+  "payload": {}
+}
+```
+
+`stream_id` is new on every manager-process generation. `sequence` is global
+within that generation and preserves live socket order. Compatible fields may
+be added without changing `version`; an incompatible message shape requires a
+new version. Events are not a durable outbox. A service that cannot drain its
+bounded queue is disconnected so it cannot delay other consumers.
+
+All connected services receive all events regardless of capability. Presence
+uses `service.connected` and `service.disconnected`. Logical call membership
+uses `call.participant.joined` and `call.participant.left`; individual media
+generations use `call.media.connected` and `call.media.disconnected`.
+
+Commands travel over the same socket. Version 1 implements outgoing
+`call.start` and `call.hangup`; the other advertised capabilities are protocol
+extension points for the media and screening APIs.
+
+```json
+{"type":"call.start","version":1,"command_id":"dial-17","payload":{"to":"+34123456789"}}
+{"type":"call.hangup","version":1,"command_id":"stop-17","call_id":"call-..."}
+```
+
+The server sends `command.result` with `accepted` before executing a valid
+command and then `completed`, `rejected`, or `failed`. A repeated command ID
+with identical content returns its previous final in-memory result; reuse with
+different content is rejected. Call-affecting commands are serialized for the
+single line, and a new hang-up command against a terminal call returns
+`error_code: "already_ended"`. Idempotency records and event replay disappear
+on manager restart.
 
 ## Contacts
 

@@ -31,7 +31,7 @@ type callSession struct {
 	traceID            string
 	participants       map[string]callParticipant
 	departed           map[string]callParticipantDeparture
-	pendingDrops       map[string]struct{}
+	pendingDrops       map[string]callParticipant
 	closingOperationID string
 	explicitLeaveSeen  bool
 }
@@ -43,6 +43,8 @@ type callParticipant struct {
 	channel          string
 	admissionChannel string
 	connected        bool
+	logicalAnnounced bool
+	mediaAnnounced   bool
 	updatedAt        time.Time
 	predecessor      *callParticipant
 }
@@ -58,17 +60,28 @@ type callParticipantJoinResult struct {
 	admitted       bool
 }
 
+type callParticipantAbortResult struct {
+	participant       callParticipant
+	logicalRemoved    bool
+	mediaDisconnected bool
+	endCarrier        bool
+}
+
 type callLeaveOperation struct {
-	operationID          string
-	callKey              string
-	traceID              string
-	clientID             string
-	connectionID         string
-	previousConnectionID string
-	matchedConnectionID  string
-	channel              string
-	endCarrier           bool
-	completed            bool
+	operationID           string
+	callKey               string
+	traceID               string
+	clientID              string
+	connectionID          string
+	previousConnectionID  string
+	matchedConnectionID   string
+	channel               string
+	endCarrier            bool
+	completed             bool
+	participantID         string
+	logicalAnnounced      bool
+	mediaAnnounced        bool
+	logicalLeavePublished bool
 }
 
 func newCallSessionRegistry() *callSessionRegistry {
@@ -118,7 +131,7 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		session = &callSession{
 			instance: call.Instance, engineCallID: call.EngineCallID, traceID: call.TraceID,
 			participants: make(map[string]callParticipant), departed: make(map[string]callParticipantDeparture),
-			pendingDrops: make(map[string]struct{}),
+			pendingDrops: make(map[string]callParticipant),
 		}
 		r.sessions[key] = session
 	}
@@ -165,11 +178,14 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 		}
 	}
 	if found && previous.connected && previous.connectionID != connectionID && previous.channel != "" {
-		session.pendingDrops[previous.channel] = struct{}{}
+		session.pendingDrops[previous.channel] = previous
 	}
 	replacement := callParticipant{
 		clientID: clientID, participantID: participantID, connectionID: connectionID,
 		channel: channel, admissionChannel: channel, connected: true, updatedAt: at,
+	}
+	if found {
+		replacement.logicalAnnounced = previous.logicalAnnounced
 	}
 	if found && previous.connectionID != connectionID {
 		// Keep the whole chain until a participant_left proves that a
@@ -184,10 +200,37 @@ func (r *callSessionRegistry) joined(call Call, clientID, participantID, connect
 	return callParticipantJoinResult{channelsToDrop: pendingDropChannels(session), admitted: true}
 }
 
+func (r *callSessionRegistry) completeJoin(call Call, clientID, participantID, connectionID, channel string) (callParticipant, bool, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if clientID == "" {
+		clientID = r.claims[participantClaimKey(call.TraceID, participantID)]
+	}
+	session := r.sessions[callSessionKey(call.Instance, call.EngineCallID)]
+	if session == nil {
+		return callParticipant{}, false, false
+	}
+	key := logicalParticipantKey(clientID, participantID)
+	participant, found := session.participants[key]
+	if !found || !participant.connected || participant.connectionID != connectionID || participant.admissionChannel != channel {
+		return callParticipant{}, false, false
+	}
+	logicalJoined := !participant.logicalAnnounced
+	mediaConnected := !participant.mediaAnnounced
+	participant.logicalAnnounced = true
+	participant.mediaAnnounced = true
+	session.participants[key] = participant
+	return participant, logicalJoined, mediaConnected
+}
+
 // abortJoin revokes a join whose synchronous admission response did not reach
 // the waiting dialplan. The tombstone also fences a delayed copy of that exact
 // request; a genuinely newer connection generation remains free to join.
 func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
+	return r.abortJoinTransition(call, clientID, participantID, connectionID, channel, at).endCarrier
+}
+
+func (r *callSessionRegistry) abortJoinTransition(call Call, clientID, participantID, connectionID, channel string, at time.Time) callParticipantAbortResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if clientID == "" {
@@ -199,15 +242,21 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 		session = &callSession{
 			instance: call.Instance, engineCallID: call.EngineCallID, traceID: call.TraceID,
 			participants: make(map[string]callParticipant), departed: make(map[string]callParticipantDeparture),
-			pendingDrops: make(map[string]struct{}),
+			pendingDrops: make(map[string]callParticipant),
 		}
 		r.sessions[key] = session
 	}
+	pending, pendingFound := session.pendingDrops[channel]
 	delete(session.pendingDrops, channel)
 	logicalKey := logicalParticipantKey(clientID, participantID)
 	departure := session.departed[logicalKey]
 	removed := false
 	participant, found := session.participants[logicalKey]
+	result := callParticipantAbortResult{participant: participant}
+	if pendingFound && pending.mediaAnnounced {
+		result.participant = pending
+		result.mediaDisconnected = true
+	}
 	if found {
 		generation := participantGeneration(&participant, connectionID)
 		if generation != nil && generation.admissionChannel != channel {
@@ -215,7 +264,7 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 			// already admitted connection generation. Even after that valid
 			// generation becomes a predecessor, the rejected channel's abort must
 			// not revoke it or fence the shared connection identifier.
-			return false
+			return result
 		}
 	}
 	if found && participant.connectionID == connectionID {
@@ -239,6 +288,8 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 				delete(session.participants, logicalKey)
 			}
 			removed = true
+			result.logicalRemoved = predecessor == nil && participant.logicalAnnounced
+			result.mediaDisconnected = participant.mediaAnnounced
 		}
 	}
 	if departure.connectionIDs == nil {
@@ -255,13 +306,14 @@ func (r *callSessionRegistry) abortJoin(call Call, clientID, participantID, conn
 	session.departed[logicalKey] = departure
 	abortOperationID := "abort:" + logicalKey + ":" + connectionID
 	if session.closingOperationID == abortOperationID {
-		return true
+		result.endCarrier = true
+		return result
 	}
 	if removed && len(session.participants) == 0 && session.explicitLeaveSeen && session.closingOperationID == "" {
 		session.closingOperationID = abortOperationID
-		return true
+		result.endCarrier = true
 	}
-	return false
+	return result
 }
 
 func pendingDropChannels(session *callSession) []string {
@@ -273,32 +325,38 @@ func pendingDropChannels(session *callSession) []string {
 	return channels
 }
 
-func (r *callSessionRegistry) completeDrop(call Call, channel string) {
+func (r *callSessionRegistry) completeDrop(call Call, channel string) (callParticipant, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if session := r.sessions[callSessionKey(call.Instance, call.EngineCallID)]; session != nil {
+		participant, found := session.pendingDrops[channel]
 		delete(session.pendingDrops, channel)
+		return participant, found && participant.mediaAnnounced
 	}
+	return callParticipant{}, false
 }
 
 func (r *callSessionRegistry) left(call Call, clientID, participantID, connectionID string, at time.Time) {
 	r.leftChannel(call, clientID, participantID, connectionID, "", at)
 }
 
-func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) {
+func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	session := r.sessions[callSessionKey(call.Instance, call.EngineCallID)]
 	if session == nil {
-		return
+		return false
 	}
+	pending, pendingFound := session.pendingDrops[channel]
 	delete(session.pendingDrops, channel)
 	logicalKey := logicalParticipantKey(clientID, participantID)
 	participant, found := session.participants[logicalKey]
-	if !found || participant.connectionID != connectionID || at.Before(participant.updatedAt) {
-		return
+	if !found || participant.connectionID != connectionID || at.Before(participant.updatedAt) || !participant.connected {
+		return pendingFound && pending.mediaAnnounced
 	}
+	mediaDisconnected := participant.mediaAnnounced
 	participant.connected = false
+	participant.mediaAnnounced = false
 	participant.channel = ""
 	participant.admissionChannel = ""
 	// participant_left is only emitted for an admitted channel, so the
@@ -307,6 +365,7 @@ func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, co
 	participant.updatedAt = at
 	session.participants[logicalKey] = participant
 	delete(session.departed, logicalKey)
+	return mediaDisconnected
 }
 
 // claim replaces the provisional Asterisk participant identity used for an
@@ -413,7 +472,9 @@ func (r *callSessionRegistry) beginLeaveWithPrevious(call Call, clientID, connec
 		operationID: operationID, callKey: key, traceID: call.TraceID,
 		clientID: clientID, connectionID: connectionID, previousConnectionID: previousConnectionID,
 		matchedConnectionID: matchedConnectionID, channel: participant.channel,
-		endCarrier: len(session.participants) == 0,
+		endCarrier:       len(session.participants) == 0,
+		participantID:    participant.participantID,
+		logicalAnnounced: participant.logicalAnnounced, mediaAnnounced: participant.mediaAnnounced,
 	}
 	if operation.endCarrier {
 		session.closingOperationID = operationID
@@ -422,12 +483,28 @@ func (r *callSessionRegistry) beginLeaveWithPrevious(call Call, clientID, connec
 	return *operation, nil
 }
 
-func (r *callSessionRegistry) completeLeave(operationID string) {
+func (r *callSessionRegistry) markLogicalLeavePublished(operationID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	operation := r.operations[operationID]
+	if operation == nil || operation.logicalLeavePublished {
+		return false
+	}
+	operation.logicalLeavePublished = true
+	return true
+}
+
+func (r *callSessionRegistry) completeLeave(operationID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if operation := r.operations[operationID]; operation != nil {
+		if operation.completed {
+			return false
+		}
 		operation.completed = true
+		return true
 	}
+	return false
 }
 
 func (r *callSessionRegistry) ended(instance, engineCallID, traceID string) {
