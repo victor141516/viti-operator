@@ -333,7 +333,7 @@ func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
 	_, events, cancel := application.events.Subscribe(streamID, sequence)
 	defer cancel()
 	recorder := httptest.NewRecorder()
-	application.ingestEngineDTMF(recorder, call.Instance, call.EngineCallID, []string{
+	application.ingestEngineDTMF(recorder, call.Instance, "media-source", []string{
 		"UnicastRTP/manager-0001", "media-source", "#", "240",
 	})
 	if recorder.Code != 204 {
@@ -344,6 +344,18 @@ func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
 	if event.Type != "call.dtmf" || event.CallID != call.ID || payload["source_type"] != "service" ||
 		payload["source_name"] != "transcriber" || payload["digit"] != "#" {
 		t.Fatalf("DTMF event = %#v", event)
+	}
+	carrierRecorder := httptest.NewRecorder()
+	application.ingestEngineDTMF(carrierRecorder, call.Instance, "media-source", []string{
+		"PJSIP/volte_ims-00000002", "carrier-unique-id", "5", "160",
+	})
+	if carrierRecorder.Code != 204 {
+		t.Fatalf("carrier DTMF ingest status = %d body=%s", carrierRecorder.Code, carrierRecorder.Body.String())
+	}
+	carrierEvent := <-events
+	carrierPayload := carrierEvent.Payload.(map[string]any)
+	if carrierPayload["source_type"] != "carrier" || carrierPayload["source_name"] != "remote" || carrierPayload["digit"] != "5" {
+		t.Fatalf("carrier DTMF event = %#v", carrierEvent)
 	}
 }
 
@@ -402,10 +414,11 @@ func (f *fakeServiceMediaController) CloseConnection(connectionID, _ string) {
 
 func (*fakeServiceMediaController) CloseCall(string, string) {}
 
-func (f *fakeServiceMediaController) SourceForEngineSession(sessionID, _ string) (string, bool) {
+func (f *fakeServiceMediaController) ResolveEngineSession(sessionID string) (string, string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.resolvedService, sessionID == f.resolvedSession && f.resolvedService != ""
+	found := sessionID == f.resolvedSession && f.resolvedService != ""
+	return f.resolvedService, "call-dtmf", found
 }
 
 func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {

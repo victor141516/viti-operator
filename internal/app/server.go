@@ -1035,7 +1035,19 @@ func (a *App) ingestEngineDTMF(w http.ResponseWriter, instance, engineCallID str
 		writeError(w, http.StatusBadRequest, "DTMF events require channel, unique ID, digit, and duration")
 		return
 	}
+	resolver, _ := a.serviceMedia.(interface {
+		ResolveEngineSession(string) (string, string, bool)
+	})
+	serviceName, serviceCallID, serviceSource := "", "", false
+	if resolver != nil {
+		serviceName, serviceCallID, serviceSource = resolver.ResolveEngineSession(strings.TrimSpace(args[1]))
+	}
 	call, found := a.store.GetCallByEngineID(instance, engineCallID)
+	if !found && resolver != nil {
+		if _, linkedCallID, linked := resolver.ResolveEngineSession(engineCallID); linked {
+			call, found = a.store.GetCall(linkedCallID)
+		}
+	}
 	if !found || call.EndedAt != nil {
 		writeError(w, http.StatusConflict, "active call is not available")
 		return
@@ -1052,13 +1064,9 @@ func (a *App) ingestEngineDTMF(w http.ResponseWriter, instance, engineCallID str
 		"call_id": call.ID, "trace_id": call.TraceID, "digit": digit, "duration_ms": duration,
 		"source_type": "unknown", "source_channel": channel, "source_unique_id": uniqueID,
 	}
-	if resolver, ok := a.serviceMedia.(interface {
-		SourceForEngineSession(string, string) (string, bool)
-	}); ok {
-		if serviceName, resolved := resolver.SourceForEngineSession(uniqueID, call.ID); resolved {
-			payload["source_type"] = "service"
-			payload["source_name"] = serviceName
-		}
+	if serviceSource && serviceCallID == call.ID {
+		payload["source_type"] = "service"
+		payload["source_name"] = serviceName
 	}
 	if payload["source_type"] == "unknown" {
 		if participant, resolved := a.callSessions.participantByChannel(call, channel); resolved {

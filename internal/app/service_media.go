@@ -407,14 +407,14 @@ func (m *serviceMediaManager) authorizedSession(sessionID, serviceName, connecti
 	return session, nil
 }
 
-func (m *serviceMediaManager) SourceForEngineSession(sessionID, callID string) (string, bool) {
+func (m *serviceMediaManager) ResolveEngineSession(sessionID string) (string, string, bool) {
 	m.mu.Lock()
 	source, found := m.sources[sessionID]
 	m.mu.Unlock()
-	if !found || source.callID != callID {
-		return "", false
+	if !found {
+		return "", "", false
 	}
-	return source.serviceName, true
+	return source.serviceName, source.callID, true
 }
 
 func (m *serviceMediaManager) CloseConnection(connectionID, reason string) {
