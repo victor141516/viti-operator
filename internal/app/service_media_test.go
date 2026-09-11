@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -266,6 +267,52 @@ func TestServiceMediaAttachRevalidatesCallAfterBlockingBridgeJoin(t *testing.T) 
 	}
 	if _, sequence := events.StreamState(); sequence != 0 {
 		t.Fatalf("failed attach published %d participant or media events", sequence)
+	}
+}
+
+func TestServiceMediaAttachRejectsCanceledConnectionAfterBlockingBridgeJoin(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{joinStarted: make(chan struct{}), joinRelease: make(chan struct{})}
+	events := NewEventHub()
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, events, slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.iceMux.Close()
+	call := Call{
+		ID: "call-canceled-attach", TraceID: "trace-canceled-attach", EngineCallID: "engine-canceled-attach", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOffer(t)
+	defer client.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, attachErr := manager.Attach(ctx, serviceMediaAttachRequest{
+			ServiceName: "canceled-service", ConnectionID: "canceled-connection", Call: call, OfferSDP: offer, Purpose: "auxiliary",
+		})
+		result <- attachErr
+	}()
+	<-bridge.joinStarted
+	cancel()
+	manager.CloseConnection("canceled-connection", "control_disconnected")
+	close(bridge.joinRelease)
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("attach error = %v, want context canceled", err)
+	}
+	manager.mu.Lock()
+	remaining := len(manager.sessions)
+	manager.mu.Unlock()
+	bridge.mu.Lock()
+	leaves := append([]string(nil), bridge.leaves...)
+	bridge.mu.Unlock()
+	if remaining != 0 || len(leaves) != 1 {
+		t.Fatalf("remaining sessions=%d bridge leaves=%#v", remaining, leaves)
+	}
+	if _, sequence := events.StreamState(); sequence != 0 {
+		t.Fatalf("canceled attach published %d participant or media events", sequence)
 	}
 }
 

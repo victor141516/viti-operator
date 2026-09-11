@@ -293,6 +293,72 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 	}
 }
 
+func TestIntegrationDisconnectClosesMediaBeforeBlockedCommandsFinish(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-blocked-media", TraceID: "trace-blocked-media", EngineCallID: "engine-blocked-media", Instance: "engine-1",
+		Direction: DirectionIncoming, Peer: "+12025550123", State: "active", StartedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "blocked-transcriber",
+		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`)},
+	})
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "initial-attach", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
+	})
+	readCommandResult(t, socket, "initial-attach", "accepted")
+	readIntegrationType(t, socket, "media.session.created")
+	readCommandResult(t, socket, "initial-attach", "completed")
+	media.mu.Lock()
+	connectionID := media.attach.ConnectionID
+	media.attachStarted = make(chan struct{})
+	media.attachRelease = make(chan struct{})
+	media.closed = make(chan string, 1)
+	attachStarted := media.attachStarted
+	attachRelease := media.attachRelease
+	closed := media.closed
+	media.mu.Unlock()
+	defer close(attachRelease)
+
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "media.attach", Version: 1, CommandID: "blocked-attach", CallID: call.ID,
+		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
+	})
+	readCommandResult(t, socket, "blocked-attach", "accepted")
+	<-attachStarted
+	_ = socket.Close()
+	select {
+	case got := <-closed:
+		if got != connectionID {
+			t.Fatalf("closed connection = %q, want %q", got, connectionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("control disconnect waited for the blocked command before closing media")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for len(application.integrations.snapshot()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("control disconnect waited for the blocked command before releasing the service name")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reconnected := dialIntegration(t, server, integrationHello{Type: "service.hello", Version: 1, Name: "blocked-transcriber"})
+	defer reconnected.Close()
+	readIntegrationType(t, reconnected, "service.ready")
+}
+
 func TestIntegrationServiceCallPreparesMediaBeforeDialActivation(t *testing.T) {
 	application, server := newIntegrationTestServer(t)
 	media := &fakeServiceMediaController{}
@@ -394,13 +460,22 @@ type fakeServiceMediaController struct {
 	resolvedSession      string
 	resolvedService      string
 	attachCount          int
+	attachStarted        chan struct{}
+	attachRelease        chan struct{}
+	closed               chan string
 }
 
 func (f *fakeServiceMediaController) Attach(_ context.Context, request serviceMediaAttachRequest) (serviceMediaDescription, error) {
 	f.mu.Lock()
 	f.attach = request
 	f.attachCount++
+	started := f.attachStarted
+	release := f.attachRelease
 	f.mu.Unlock()
+	if started != nil {
+		close(started)
+		<-release
+	}
 	return serviceMediaDescription{SessionID: "media-test", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: request.Purpose}, nil
 }
 
@@ -436,7 +511,14 @@ func (f *fakeServiceMediaController) SendDTMF(_ context.Context, request service
 func (f *fakeServiceMediaController) CloseConnection(connectionID, _ string) {
 	f.mu.Lock()
 	f.closedConnection = connectionID
+	closed := f.closed
 	f.mu.Unlock()
+	if closed != nil {
+		select {
+		case closed <- connectionID:
+		default:
+		}
+	}
 }
 
 func (*fakeServiceMediaController) CloseCall(string, string) {}

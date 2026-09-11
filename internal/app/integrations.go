@@ -268,12 +268,23 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 		a.writeIntegrationClose(socket, websocket.ClosePolicyViolation, "duplicate service name")
 		return
 	}
+	var disconnectOnce sync.Once
+	disconnect := func() {
+		disconnectOnce.Do(func() {
+			if a.serviceMedia != nil {
+				a.serviceMedia.CloseConnection(connection.id, "control_disconnected")
+			}
+			if a.integrations.release(connection.name, connection.id) {
+				a.events.Publish("service.disconnected", a.integrationServicePayload(connection))
+			}
+		})
+	}
+	defer disconnect()
 	defer func() {
 		if a.serviceMedia != nil {
+			// Commands can create resources while they are winding down. This
+			// second pass is safe and closes anything that escaped cancellation.
 			a.serviceMedia.CloseConnection(connection.id, "control_disconnected")
-		}
-		if a.integrations.release(connection.name, connection.id) {
-			a.events.Publish("service.disconnected", a.integrationServicePayload(connection))
 		}
 	}()
 
@@ -312,6 +323,7 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 	cancelCommands()
+	disconnect()
 	commands.Wait()
 	close(done)
 	<-writerDone

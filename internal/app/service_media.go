@@ -286,6 +286,11 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 
 	ownerKey := serviceMediaOwnerKey(request.ServiceName, request.Call.ID)
 	m.mu.Lock()
+	if err := ctx.Err(); err != nil {
+		m.mu.Unlock()
+		session.close("control_disconnected_during_attach")
+		return nil, serviceMediaDescription{}, err
+	}
 	var replaced *serviceMediaSession
 	if previousID := m.byOwner[ownerKey]; previousID != "" {
 		replaced = m.sessions[previousID]
