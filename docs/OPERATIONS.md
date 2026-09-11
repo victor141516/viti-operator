@@ -474,9 +474,11 @@ periods are 30 minutes for the ESP CHILD SA and 45 minutes for the parent IKE SA
 
 The adapter intentionally gives attach and reauthentication VICI operations
 more time than the configured AKA request timeout; ordinary status operations
-retain a short deadline. On shutdown it records `tunnel_down` before attempting
-peer teardown and bounds the remaining VICI/charon cleanup. A container that
-stops within its configured grace period should therefore leave an exact
+retain a short deadline. The entrypoint accepts termination throughout startup,
+including while `IKE_AUTH` is blocked on AKA. On shutdown it records
+`tunnel_down` durably before publishing `DOWN`, waits for the exact adapter
+process, and bounds the remaining VICI/charon cleanup. A container that stops
+within its configured grace period should therefore leave an exact
 `tunnel_start`, `tunnel_up`, `tunnel_down` sequence even if AKA was stalled.
 If charon crashes while the container remains alive, the supervisor starts a
 fresh adapter generation in the same network namespace. The adapter removes all

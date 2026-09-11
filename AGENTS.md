@@ -21,12 +21,15 @@
 - Preserve the public tunnel contract in `engine/tunnel_contract.py`: atomic
   status plus ordered, durable `tunnel_start`, `tunnel_up`, and `tunnel_down`
   events for each generation.
+- Treat published `DOWN` as a completion boundary: its `tunnel_down` event must
+  already be durable, and production PID 1 must also wait for the exact adapter
+  process to exit before leaving the network namespace.
 - Losing an AKA provider must not proactively destroy an established tunnel.
   Recovery must not leave duplicate `charon` processes, stale route rules, or
   a stale `CONNECTED` status.
-- P-CSCF and inner-address reconciliation must be transactional. Do not advance
-  applied markers until rendering, restart/reload, and IMS registration actions
-  have all succeeded.
+- P-CSCF and inner-address reconciliation must be transactional. Commit their
+  applied state together in `tunnel.applied.json`, and do not advance it until
+  rendering, restart/reload, and IMS registration actions have all succeeded.
 
 ## Verification
 
@@ -40,10 +43,11 @@ docker build -t viti-operator-engine:local -f engine/Dockerfile engine
 python test/swu-lab/run_lab.py --backend-image viti-operator-engine:local --no-build
 ```
 
-The packaged laboratory must exercise the real `/entrypoint.sh`, in-process
-`charon` crash recovery, real UDP/TCP transport, route isolation, and terminal
-shutdown state. Keep live carrier tests opt-in; they are user acceptance tests,
-not part of the deterministic laboratory.
+The packaged laboratory must exercise the real `/entrypoint.sh`, cancellation
+during a blocked startup `IKE_AUTH`, in-process `charon` crash recovery, real
+UDP/TCP transport, route isolation, and terminal shutdown state. Keep live
+carrier tests opt-in; they are user acceptance tests, not part of the
+deterministic laboratory.
 
 For unrelated application changes, use the narrower commands documented in
 `README.md` and `docs/OPERATIONS.md`. Update architecture and operations

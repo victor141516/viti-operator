@@ -102,7 +102,8 @@ go build ./cmd/viti-operator
 
 The isolated SWu laboratory exercises authentication faults, real UDP/TCP
 transport, client- and responder-initiated rekeys, reauthentication, crash
-recovery, route isolation, and the production entrypoint lifecycle:
+recovery, route isolation, cancellation during a blocked startup `IKE_AUTH`,
+and the production entrypoint lifecycle:
 
 ```sh
 docker build -t viti-operator-engine:local -f engine/Dockerfile engine

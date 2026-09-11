@@ -438,15 +438,22 @@ binds the new address. Startup clears persisted reconciliation markers, so an
 attach that finishes after Asterisk starts is applied rather than mistaken for
 already-consumed state. When that late first attach changes both values, the
 engine renders the IMS objects first and then performs one Asterisk restart so
-configuration and transport become visible atomically. Neither marker advances
-unless the complete transaction succeeds. Normal SA renewals do neither.
+configuration and transport become visible atomically. The two applied values
+are one canonical observation in `tunnel.applied.json`; a single durable atomic
+replace advances both only after the complete transaction succeeds. Initial
+attach is recorded through the same format only after its P-CSCF render succeeds.
+Normal SA renewals do neither.
 
 VICI control has operation-specific deadlines. Status requests remain short,
 while initiation and reauthentication may outlive the synchronous AKA broker
-timeout. During container shutdown the adapter first persists `tunnel_down`,
-then closes any in-flight VICI request and tears down charon within a bounded
-budget. This keeps the durable lifecycle contract inside Docker's stop grace
-period even when the authentication provider is slow or unavailable.
+timeout. The production entrypoint installs its shutdown trap before starting
+workers or entering PIN, IKE, or P-CSCF waits, and every adapter startup wait is
+cancellation-aware. During container shutdown the adapter first persists
+`tunnel_down`, then publishes `DOWN`, closes any in-flight VICI request, and
+tears down charon within a bounded budget. PID 1 waits for that state and the
+exact adapter process to finish. This keeps the durable lifecycle contract
+inside Docker's stop grace period even when the authentication provider is slow
+or unavailable.
 
 The engine refreshes two independent security-association lifetimes. It renews
 the ESP CHILD SA every 30 minutes and proactively renews the parent IKE SA every
