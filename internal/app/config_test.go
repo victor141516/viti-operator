@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -71,5 +72,29 @@ func TestLoadConfigRequiresExplicitDiagnosticsFlag(t *testing.T) {
 	}
 	if !cfg.Diagnostics.Enabled {
 		t.Fatal("the explicit diagnostics flag should enable unredacted tracing")
+	}
+}
+
+func TestLoadConfigNormalizesScreeningPipeline(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"telephony":{"type":"memory"},"sim_auth":{"type":"disabled"},"screening_pipeline":[" spam-filter ","voice-check"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.ScreeningPipeline) != 2 || cfg.ScreeningPipeline[0] != "spam-filter" || cfg.ScreeningPipeline[1] != "voice-check" {
+		t.Fatalf("screening pipeline = %#v", cfg.ScreeningPipeline)
+	}
+}
+
+func TestLoadConfigRejectsDuplicateScreeningServices(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"telephony":{"type":"memory"},"sim_auth":{"type":"disabled"},"screening_pipeline":["spam-filter","spam-filter"]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(path); err == nil || !strings.Contains(err.Error(), "duplicate service") {
+		t.Fatalf("duplicate pipeline error = %v", err)
 	}
 }

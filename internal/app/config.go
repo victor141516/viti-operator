@@ -85,15 +85,16 @@ type RecordingsConfig struct {
 }
 
 type Config struct {
-	Listen      string            `json:"listen"`
-	ExtraListen []string          `json:"extra_listen,omitempty"`
-	DataFile    string            `json:"data_file"`
-	APIKey      string            `json:"api_key,omitempty"`
-	Telephony   TelephonyConfig   `json:"telephony"`
-	SIMAuth     SIMAuthConfig     `json:"sim_auth"`
-	Voice       VoiceConfig       `json:"voice,omitempty"`
-	Diagnostics DiagnosticsConfig `json:"diagnostics,omitempty"`
-	Recordings  RecordingsConfig  `json:"recordings,omitempty"`
+	Listen            string            `json:"listen"`
+	ExtraListen       []string          `json:"extra_listen,omitempty"`
+	DataFile          string            `json:"data_file"`
+	APIKey            string            `json:"api_key,omitempty"`
+	Telephony         TelephonyConfig   `json:"telephony"`
+	SIMAuth           SIMAuthConfig     `json:"sim_auth"`
+	Voice             VoiceConfig       `json:"voice,omitempty"`
+	ScreeningPipeline []string          `json:"screening_pipeline,omitempty"`
+	Diagnostics       DiagnosticsConfig `json:"diagnostics,omitempty"`
+	Recordings        RecordingsConfig  `json:"recordings,omitempty"`
 }
 
 func LoadConfig(path string) (Config, error) {
@@ -172,6 +173,9 @@ func LoadConfig(path string) (Config, error) {
 	if value := strings.TrimSpace(os.Getenv("VITI_SERVICE_MEDIA_ASTERISK_HOST")); value != "" {
 		cfg.Voice.ServiceMedia.AsteriskRTPHost = value
 	}
+	if value := strings.TrimSpace(os.Getenv("VITI_SCREENING_PIPELINE")); value != "" {
+		cfg.ScreeningPipeline = strings.Split(value, ",")
+	}
 	if value := os.Getenv("VITI_ENGINE_EVENT_TOKEN"); value != "" {
 		cfg.Voice.EngineEventToken = value
 	}
@@ -215,6 +219,18 @@ func LoadConfig(path string) (Config, error) {
 		if strings.TrimSpace(cfg.Voice.ServiceMedia.AsteriskRTPHost) == "" {
 			cfg.Voice.ServiceMedia.AsteriskRTPHost = "manager"
 		}
+	}
+	seenScreeners := make(map[string]struct{}, len(cfg.ScreeningPipeline))
+	for index, service := range cfg.ScreeningPipeline {
+		service = strings.TrimSpace(service)
+		if !integrationNamePattern.MatchString(service) {
+			return Config{}, fmt.Errorf("screening_pipeline[%d] is not a valid service name", index)
+		}
+		if _, duplicate := seenScreeners[service]; duplicate {
+			return Config{}, fmt.Errorf("screening_pipeline contains duplicate service %q", service)
+		}
+		seenScreeners[service] = struct{}{}
+		cfg.ScreeningPipeline[index] = service
 	}
 	return cfg, nil
 }
