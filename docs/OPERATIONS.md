@@ -478,6 +478,10 @@ retain a short deadline. On shutdown it records `tunnel_down` before attempting
 peer teardown and bounds the remaining VICI/charon cleanup. A container that
 stops within its configured grace period should therefore leave an exact
 `tunnel_start`, `tunnel_up`, `tunnel_down` sequence even if AKA was stalled.
+If charon crashes while the container remains alive, the supervisor starts a
+fresh adapter generation in the same network namespace. The adapter removes all
+stale table-220 rules before installing and verifying the single IMS-source
+rule; unrelated IPv6 traffic must never use `ipsec0` during this recovery.
 
 ### Modem was unplugged
 

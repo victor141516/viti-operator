@@ -425,7 +425,10 @@ Only traffic sourced from the assigned inner IPv6 address uses strongSwan's
 route table. The adapter removes any broad `from all` rule created during
 interface setup and installs a source-specific rule, preventing LAN, Docker,
 Tailscale, manager, and WebRTC traffic from being captured by the carrier
-tunnel.
+tunnel. The cleanup drains every duplicate priority/table-220 rule and verifies
+that exactly one source-specific rule remains. This is repeated after an
+in-process charon recovery because that recovery keeps the existing network
+namespace.
 
 The VICI adapter normalizes strongSwan state into the manager's tunnel contract.
 It also reconciles configuration attributes after attach and reauthentication:
@@ -433,7 +436,10 @@ a changed P-CSCF re-renders PJSIP, reloads `res_pjsip`, and restores the desired
 registration; a changed inner address restarts Asterisk so its `ipsec0` transport
 binds the new address. Startup clears persisted reconciliation markers, so an
 attach that finishes after Asterisk starts is applied rather than mistaken for
-already-consumed state. Normal SA renewals do neither.
+already-consumed state. When that late first attach changes both values, the
+engine renders the IMS objects first and then performs one Asterisk restart so
+configuration and transport become visible atomically. Neither marker advances
+unless the complete transaction succeeds. Normal SA renewals do neither.
 
 VICI control has operation-specific deadlines. Status requests remain short,
 while initiation and reauthentication may outlive the synchronous AKA broker
