@@ -43,18 +43,30 @@ type SIMAuthConfig struct {
 }
 
 type VoiceConfig struct {
-	Enabled             bool              `json:"enabled"`
-	WebSocketURL        string            `json:"websocket_url,omitempty"`
-	BackendWebSocketURL string            `json:"backend_websocket_url,omitempty"`
-	Domain              string            `json:"domain,omitempty"`
-	Username            string            `json:"username,omitempty"`
-	Password            string            `json:"password,omitempty"`
-	RTPListenAddress    string            `json:"rtp_listen_address,omitempty"`
-	RTPBackendAddress   string            `json:"rtp_backend_address,omitempty"`
-	RTPStart            int               `json:"rtp_start,omitempty"`
-	RTPEnd              int               `json:"rtp_end,omitempty"`
-	ICEServers          []ICEServerConfig `json:"ice_servers,omitempty"`
-	EngineEventToken    string            `json:"engine_event_token,omitempty"`
+	Enabled             bool               `json:"enabled"`
+	WebSocketURL        string             `json:"websocket_url,omitempty"`
+	BackendWebSocketURL string             `json:"backend_websocket_url,omitempty"`
+	Domain              string             `json:"domain,omitempty"`
+	Username            string             `json:"username,omitempty"`
+	Password            string             `json:"password,omitempty"`
+	RTPListenAddress    string             `json:"rtp_listen_address,omitempty"`
+	RTPBackendAddress   string             `json:"rtp_backend_address,omitempty"`
+	RTPStart            int                `json:"rtp_start,omitempty"`
+	RTPEnd              int                `json:"rtp_end,omitempty"`
+	ICEServers          []ICEServerConfig  `json:"ice_servers,omitempty"`
+	EngineEventToken    string             `json:"engine_event_token,omitempty"`
+	ServiceMedia        ServiceMediaConfig `json:"service_media,omitempty"`
+}
+
+// ServiceMediaConfig exposes a manager-owned WebRTC endpoint for trusted
+// integrations. The fixed ICE port keeps container and host firewall rules
+// predictable while each Asterisk bridge receives a separate ephemeral RTP
+// socket on the private Docker network.
+type ServiceMediaConfig struct {
+	Enabled          bool   `json:"enabled"`
+	ListenAddress    string `json:"listen_address,omitempty"`
+	AdvertiseAddress string `json:"advertise_address,omitempty"`
+	AsteriskRTPHost  string `json:"asterisk_rtp_host,omitempty"`
 }
 
 type ICEServerConfig struct {
@@ -148,6 +160,18 @@ func LoadConfig(path string) (Config, error) {
 			Credential: os.Getenv("VITI_VOICE_ICE_CREDENTIAL"),
 		}}
 	}
+	if value := strings.TrimSpace(os.Getenv("VITI_SERVICE_MEDIA_ENABLED")); value != "" {
+		cfg.Voice.ServiceMedia.Enabled = envBool(value)
+	}
+	if value := strings.TrimSpace(os.Getenv("VITI_SERVICE_MEDIA_LISTEN")); value != "" {
+		cfg.Voice.ServiceMedia.ListenAddress = value
+	}
+	if value := strings.TrimSpace(os.Getenv("VITI_SERVICE_MEDIA_ADVERTISE")); value != "" {
+		cfg.Voice.ServiceMedia.AdvertiseAddress = value
+	}
+	if value := strings.TrimSpace(os.Getenv("VITI_SERVICE_MEDIA_ASTERISK_HOST")); value != "" {
+		cfg.Voice.ServiceMedia.AsteriskRTPHost = value
+	}
 	if value := os.Getenv("VITI_ENGINE_EVENT_TOKEN"); value != "" {
 		cfg.Voice.EngineEventToken = value
 	}
@@ -183,6 +207,14 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if cfg.SIMAuth.RemoteTimeout <= 0 {
 		cfg.SIMAuth.RemoteTimeout = 35
+	}
+	if cfg.Voice.ServiceMedia.Enabled {
+		if strings.TrimSpace(cfg.Voice.ServiceMedia.ListenAddress) == "" {
+			return Config{}, errors.New("voice.service_media.listen_address is required when service media is enabled")
+		}
+		if strings.TrimSpace(cfg.Voice.ServiceMedia.AsteriskRTPHost) == "" {
+			cfg.Voice.ServiceMedia.AsteriskRTPHost = "manager"
+		}
 	}
 	return cfg, nil
 }

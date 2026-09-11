@@ -47,6 +47,7 @@ type App struct {
 	simAuthAssignment SIMAuthAssignment
 	callSessions      *callSessionRegistry
 	integrations      *integrationRegistry
+	serviceMedia      serviceMediaController
 }
 
 func New(cfg Config, logger *slog.Logger) (*App, error) {
@@ -117,6 +118,17 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry(), integrations: newIntegrationRegistry()}
+	if cfg.Voice.ServiceMedia.Enabled {
+		bridge, ok := gateway.(serviceMediaBridge)
+		if !ok {
+			return nil, errors.New("service media requires a telephony provider with an external media bridge")
+		}
+		media, err := newServiceMediaManager(cfg.Voice.ServiceMedia, cfg.Voice.ICEServers, bridge, events, logger)
+		if err != nil {
+			return nil, fmt.Errorf("start service media: %w", err)
+		}
+		a.serviceMedia = media
+	}
 	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
 		a.tunnel = engineTunnelState{
 			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
@@ -417,6 +429,9 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	if request.Event == "call_result" {
 		a.callSessions.ended(call.Instance, call.EngineCallID, call.TraceID)
+		if a.serviceMedia != nil {
+			a.serviceMedia.CloseCall(call.ID, "call_ended")
+		}
 	}
 	a.diag.RecordTrace("manager.call", "event.completed", call.TraceID, map[string]any{"engine_event": request, "call": call})
 	writeJSON(w, http.StatusOK, call)
@@ -871,6 +886,9 @@ func (a *App) hangupCallOperation(ctx context.Context, id string) (Call, int, er
 		return call, http.StatusInternalServerError, errors.New("could not persist ended call")
 	}
 	a.events.Publish("call.updated", call)
+	if a.serviceMedia != nil {
+		a.serviceMedia.CloseCall(call.ID, "call_ended")
+	}
 	a.diag.RecordTrace("manager.call", "api.hangup.completed", call.TraceID, call)
 	return call, http.StatusOK, nil
 }

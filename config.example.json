@@ -10,5 +10,13 @@
     "type": "remote",
     "android_agent": "my-phone",
     "remote_timeout_seconds": 35
+  },
+  "voice": {
+    "service_media": {
+      "enabled": false,
+      "listen_address": "0.0.0.0:8790",
+      "advertise_address": "100.64.0.10",
+      "asterisk_rtp_host": "manager"
+    }
   }
 }

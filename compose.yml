@@ -22,6 +22,13 @@ services:
       VITI_VOICE_ICE_URLS: turn:${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}:3479?transport=udp
       VITI_VOICE_ICE_USERNAME: viti
       VITI_VOICE_ICE_CREDENTIAL: ${VITI_VOICE_PASSWORD}
+      # Trusted integrations terminate WebRTC in the manager. A single UDP
+      # mux port serves every peer connection; RTP to Asterisk stays private
+      # to the Docker network on per-session ephemeral ports.
+      VITI_SERVICE_MEDIA_ENABLED: ${VITI_SERVICE_MEDIA_ENABLED:-1}
+      VITI_SERVICE_MEDIA_LISTEN: 0.0.0.0:8790
+      VITI_SERVICE_MEDIA_ADVERTISE: ${VITI_BIND_IP}
+      VITI_SERVICE_MEDIA_ASTERISK_HOST: manager
       VITI_ENGINE_EVENT_TOKEN: ${VITI_ENGINE_EVENT_TOKEN:?Set VITI_ENGINE_EVENT_TOKEN in .env}
       VITI_SIM_AUTH_TYPE: ${VITI_SIM_AUTH_TYPE:-auto}
       VITI_ADB: /usr/bin/adb
@@ -43,6 +50,7 @@ services:
       # Services listen on all container interfaces. Exposure is restricted
       # here to the explicitly selected Tailscale address.
       - ${VITI_BIND_IP:?Set VITI_BIND_IP to this host's Tailscale IP}:${VITI_HTTP_PORT:-18787}:8787/tcp
+      - ${VITI_BIND_IP}:8790:8790/udp
     networks: [viti]
 
   loopback-proxy:

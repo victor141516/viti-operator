@@ -69,8 +69,8 @@ type integrationCommandResult struct {
 	Payload     any    `json:"payload,omitempty"`
 }
 
-type integrationResultDelivery struct {
-	result  integrationCommandResult
+type integrationDelivery struct {
+	value   any
 	written chan bool
 }
 
@@ -259,6 +259,9 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
+		if a.serviceMedia != nil {
+			a.serviceMedia.CloseConnection(connection.id, "control_disconnected")
+		}
 		if a.integrations.release(connection.name, connection.id) {
 			a.events.Publish("service.disconnected", a.integrationServicePayload(connection))
 		}
@@ -270,7 +273,7 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	replay, events, cancel := a.events.Subscribe(resume.StreamID, resume.Sequence)
 	defer cancel()
-	results := make(chan integrationResultDelivery, integrationResultBuffer)
+	results := make(chan integrationDelivery, integrationResultBuffer)
 	done := make(chan struct{})
 	writerDone := make(chan struct{})
 	go func() {
@@ -283,15 +286,23 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 	socket.SetPongHandler(func(string) error {
 		return socket.SetReadDeadline(time.Now().Add(integrationPongTimeout))
 	})
+	commandCtx, cancelCommands := context.WithCancel(r.Context())
+	var commands sync.WaitGroup
 	for {
 		var command integrationCommand
 		if err := socket.ReadJSON(&command); err != nil {
 			break
 		}
-		if !a.handleIntegrationCommand(r.Context(), connection, command, results) {
-			break
-		}
+		commands.Add(1)
+		go func() {
+			defer commands.Done()
+			if !a.handleIntegrationCommand(commandCtx, connection, command, results) {
+				_ = socket.Close()
+			}
+		}()
 	}
+	cancelCommands()
+	commands.Wait()
 	close(done)
 	<-writerDone
 }
@@ -317,7 +328,7 @@ func validateIntegrationHello(hello integrationHello) error {
 	return nil
 }
 
-func (a *App) integrationWriter(socket *websocket.Conn, connection *integrationConnection, replay EventReplay, events <-chan Event, results <-chan integrationResultDelivery, done <-chan struct{}) {
+func (a *App) integrationWriter(socket *websocket.Conn, connection *integrationConnection, replay EventReplay, events <-chan Event, results <-chan integrationDelivery, done <-chan struct{}) {
 	defer socket.Close()
 	ready := map[string]any{
 		"type": "service.ready", "version": integrationProtocolVersion,
@@ -351,7 +362,7 @@ func (a *App) integrationWriter(socket *websocket.Conn, connection *integrationC
 				return
 			}
 		case delivery := <-results:
-			written := writeIntegrationJSON(socket, delivery.result)
+			written := writeIntegrationJSON(socket, delivery.value)
 			if delivery.written != nil {
 				delivery.written <- written
 				close(delivery.written)
@@ -407,7 +418,7 @@ func (a *App) integrationSnapshot(replay EventReplay) map[string]any {
 	}
 }
 
-func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrationConnection, command integrationCommand, results chan<- integrationResultDelivery) bool {
+func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrationConnection, command integrationCommand, results chan<- integrationDelivery) bool {
 	base := integrationCommandResult{
 		Type: "command.result", Version: integrationProtocolVersion,
 		CommandID: command.CommandID, CommandType: command.Type,
@@ -428,7 +439,7 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 	if replayed {
 		return queueIntegrationResult(results, previous)
 	}
-	if _, granted := connection.capabilities[command.Type]; !granted {
+	if _, granted := connection.capabilities[integrationCommandCapability(command.Type)]; !granted {
 		base.Status = "rejected"
 		base.ErrorCode = "capability_not_granted"
 		base.Message = "the service did not advertise the required capability"
@@ -449,11 +460,38 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		return false
 	}
 
-	a.integrations.callMu.Lock()
-	result := a.executeIntegrationCommand(ctx, command, base)
-	a.integrations.callMu.Unlock()
+	if integrationCommandAffectsCallLifecycle(command.Type) {
+		a.integrations.callMu.Lock()
+		defer a.integrations.callMu.Unlock()
+	}
+	result := a.executeIntegrationCommand(ctx, connection, command, base)
 	a.integrations.finishCommand(connection.name, result)
+	if result.Status == "completed" && command.Type == "media.attach" {
+		created := map[string]any{"type": "media.session.created", "version": integrationProtocolVersion}
+		if description, ok := result.Payload.(serviceMediaDescription); ok {
+			created["session_id"] = description.SessionID
+			created["call_id"] = description.CallID
+			created["sdp_answer"] = description.AnswerSDP
+			created["purpose"] = description.Purpose
+		}
+		if !queueIntegrationValue(results, created) {
+			return false
+		}
+	}
 	return queueIntegrationResult(results, result)
+}
+
+func integrationCommandCapability(commandType string) string {
+	switch commandType {
+	case "media.attach", "media.ice":
+		return "call.media"
+	default:
+		return commandType
+	}
+}
+
+func integrationCommandAffectsCallLifecycle(commandType string) bool {
+	return commandType == "call.start" || commandType == "call.hangup"
 }
 
 func validateIntegrationCommand(command integrationCommand) (string, string) {
@@ -470,27 +508,70 @@ func validateIntegrationCommand(command integrationCommand) (string, string) {
 		if integrationHangupCallID(command) == "" {
 			return "invalid_payload", "call_id is required"
 		}
+	case "media.attach":
+		if strings.TrimSpace(command.CallID) == "" {
+			return "invalid_payload", "call_id is required"
+		}
+		var payload integrationMediaAttachPayload
+		if err := decodeIntegrationPayload(command.Payload, &payload); err != nil {
+			return "invalid_payload", err.Error()
+		}
+		if strings.TrimSpace(payload.OfferSDP) == "" {
+			return "invalid_payload", "sdp_offer is required"
+		}
+		if payload.Purpose != "" && payload.Purpose != "auxiliary" && payload.Purpose != "controller" {
+			return "invalid_payload", "purpose must be auxiliary or controller"
+		}
+	case "media.ice":
+		var payload integrationMediaICEPayload
+		if err := decodeIntegrationPayload(command.Payload, &payload); err != nil {
+			return "invalid_payload", err.Error()
+		}
+		if strings.TrimSpace(payload.SessionID) == "" {
+			return "invalid_payload", "session_id is required"
+		}
+	case "call.dtmf":
+		if strings.TrimSpace(command.CallID) == "" {
+			return "invalid_payload", "call_id is required"
+		}
+		var payload integrationDTMFPayload
+		if err := decodeIntegrationPayload(command.Payload, &payload); err != nil {
+			return "invalid_payload", err.Error()
+		}
+		if !strings.Contains("0123456789*#ABCD", strings.ToUpper(strings.TrimSpace(payload.Digit))) || len(strings.TrimSpace(payload.Digit)) != 1 {
+			return "invalid_payload", "digit must be one of 0-9, *, #, or A-D"
+		}
+		if payload.Duration != 0 && (payload.Duration < 40 || payload.Duration > 6000) {
+			return "invalid_payload", "duration_ms must be between 40 and 6000"
+		}
 	default:
 		return "unsupported_command", "this capability does not define a command in protocol version 1"
 	}
 	return "", ""
 }
 
-func queueIntegrationResult(results chan<- integrationResultDelivery, result integrationCommandResult) bool {
+func queueIntegrationResult(results chan<- integrationDelivery, result integrationCommandResult) bool {
+	return queueIntegrationValue(results, result)
+}
+
+func queueIntegrationValue(results chan<- integrationDelivery, value any) bool {
 	select {
-	case results <- integrationResultDelivery{result: result}:
+	case results <- integrationDelivery{value: value}:
 		return true
 	default:
 		return false
 	}
 }
 
-func writeAcceptedIntegrationResult(ctx context.Context, results chan<- integrationResultDelivery, result integrationCommandResult) bool {
+func writeAcceptedIntegrationResult(ctx context.Context, results chan<- integrationDelivery, result integrationCommandResult) bool {
+	if ctx.Err() != nil {
+		return false
+	}
 	written := make(chan bool, 1)
 	timer := time.NewTimer(integrationWriteTimeout)
 	defer timer.Stop()
 	select {
-	case results <- integrationResultDelivery{result: result, written: written}:
+	case results <- integrationDelivery{value: result, written: written}:
 	case <-ctx.Done():
 		return false
 	case <-timer.C:
@@ -506,18 +587,103 @@ func writeAcceptedIntegrationResult(ctx context.Context, results chan<- integrat
 	}
 }
 
-func (a *App) executeIntegrationCommand(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+func (a *App) executeIntegrationCommand(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
 	switch command.Type {
 	case "call.start":
 		return a.executeIntegrationStart(ctx, command, result)
 	case "call.hangup":
 		return a.executeIntegrationHangup(ctx, command, result)
+	case "media.attach":
+		return a.executeIntegrationMediaAttach(ctx, connection, command, result)
+	case "media.ice":
+		return a.executeIntegrationMediaICE(ctx, connection, command, result)
+	case "call.dtmf":
+		return a.executeIntegrationDTMF(ctx, connection, command, result)
 	default:
 		result.Status = "rejected"
 		result.ErrorCode = "unsupported_command"
 		result.Message = "this capability does not define a command in protocol version 1"
 		return result
 	}
+}
+
+func (a *App) executeIntegrationMediaAttach(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+	if a.serviceMedia == nil {
+		result.Status, result.ErrorCode, result.Message = "failed", "service_media_unavailable", "service media is not enabled"
+		return result
+	}
+	call, found := a.store.GetCall(strings.TrimSpace(command.CallID))
+	if !found {
+		result.Status, result.ErrorCode, result.Message = "rejected", "call_not_found", "call not found"
+		return result
+	}
+	if call.EndedAt != nil {
+		result.Status, result.ErrorCode, result.Message = "rejected", "already_ended", "call has already ended"
+		return result
+	}
+	var payload integrationMediaAttachPayload
+	_ = decodeIntegrationPayload(command.Payload, &payload)
+	purpose := strings.TrimSpace(payload.Purpose)
+	if purpose == "" {
+		purpose = "auxiliary"
+	}
+	description, err := a.serviceMedia.Attach(ctx, serviceMediaAttachRequest{
+		ServiceName: connection.name, ConnectionID: connection.id, Call: call,
+		OfferSDP: payload.OfferSDP, Purpose: purpose,
+	})
+	if err != nil {
+		result.Status, result.ErrorCode, result.Message = "failed", "media_attach_failed", err.Error()
+		return result
+	}
+	result.Status, result.Payload = "completed", description
+	return result
+}
+
+func (a *App) executeIntegrationMediaICE(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+	if a.serviceMedia == nil {
+		result.Status, result.ErrorCode, result.Message = "failed", "service_media_unavailable", "service media is not enabled"
+		return result
+	}
+	var payload integrationMediaICEPayload
+	_ = decodeIntegrationPayload(command.Payload, &payload)
+	err := a.serviceMedia.AddICECandidate(ctx, serviceMediaICERequest{
+		ServiceName: connection.name, ConnectionID: connection.id, SessionID: strings.TrimSpace(payload.SessionID),
+		Candidate: payload.Candidate, SDPMid: payload.SDPMid, SDPMLine: payload.SDPMLine,
+	})
+	if err != nil {
+		result.Status, result.ErrorCode, result.Message = "rejected", "media_session_invalid", err.Error()
+		return result
+	}
+	result.Status = "completed"
+	return result
+}
+
+func (a *App) executeIntegrationDTMF(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+	if a.serviceMedia == nil {
+		result.Status, result.ErrorCode, result.Message = "failed", "service_media_unavailable", "service media is not enabled"
+		return result
+	}
+	var payload integrationDTMFPayload
+	_ = decodeIntegrationPayload(command.Payload, &payload)
+	duration := payload.Duration
+	if duration == 0 {
+		duration = 250
+	}
+	digit := strings.ToUpper(strings.TrimSpace(payload.Digit))
+	err := a.serviceMedia.SendDTMF(ctx, serviceMediaDTMFRequest{
+		ServiceName: connection.name, ConnectionID: connection.id, CallID: strings.TrimSpace(command.CallID),
+		SessionID: strings.TrimSpace(payload.SessionID), Digit: digit, DurationMS: duration,
+	})
+	if err != nil {
+		result.Status, result.ErrorCode, result.Message = "rejected", "dtmf_failed", err.Error()
+		return result
+	}
+	a.events.Publish("call.dtmf", map[string]any{
+		"call_id": strings.TrimSpace(command.CallID), "source_type": "service", "source_name": connection.name,
+		"session_id": strings.TrimSpace(payload.SessionID), "digit": digit, "duration_ms": duration,
+	})
+	result.Status = "completed"
+	return result
 }
 
 func (a *App) executeIntegrationStart(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {

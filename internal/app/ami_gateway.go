@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -110,6 +111,78 @@ func (g *AMIGateway) DropConferenceLeg(ctx context.Context, channel string) erro
 	return nil
 }
 
+func (g *AMIGateway) JoinServiceMedia(ctx context.Context, request serviceMediaBridgeRequest) error {
+	if request.EngineCallID == "" {
+		return errors.New("call does not have an active Asterisk conference")
+	}
+	if !validCallControlID(request.SessionID) || !validCallControlID(request.EngineCallID) ||
+		!integrationNamePattern.MatchString(request.ServiceName) || !validCallControlID(request.ConnectionID) ||
+		(request.TraceID != "" && !validCallControlID(request.TraceID)) {
+		return errors.New("invalid service media bridge identifiers")
+	}
+	if request.RTPPort < 1 || request.RTPPort > 65535 || strings.TrimSpace(request.RTPHost) == "" {
+		return errors.New("invalid service media RTP destination")
+	}
+	variables := strings.Join([]string{
+		"VITI_CALL_ID=" + request.EngineCallID,
+		"VITI_TRACE_ID=" + request.TraceID,
+		"VITI_CLIENT_ID=" + request.ServiceName,
+		"VITI_PARTICIPANT_ID=" + request.SessionID,
+		"VITI_CONNECTION_ID=" + request.ConnectionID,
+		"VITI_RECORDING_FILE_ID=" + request.SessionID,
+		"VITI_PARTICIPANT_ROLE=service",
+	}, ",")
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Originate", "Channel": "UnicastRTP/" + net.JoinHostPort(request.RTPHost, strconv.Itoa(request.RTPPort)) + "/c(opus)",
+		"Context": "viti-service-conference", "Exten": "s", "Priority": "1", "Timeout": "5000",
+		"Async": "false", "Codecs": "opus", "ChannelId": request.SessionID, "Variable": variables,
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		return fmt.Errorf("Asterisk rejected service media bridge: %s", first(response, "Message"))
+	}
+	return nil
+}
+
+func (g *AMIGateway) LeaveServiceMedia(ctx context.Context, sessionID string) error {
+	if !validCallControlID(sessionID) {
+		return errors.New("invalid service media session ID")
+	}
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Hangup", "Channel": sessionID, "Cause": "16",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		message := first(response, "Message")
+		if amiTargetAlreadyGone(message) {
+			return nil
+		}
+		return fmt.Errorf("Asterisk rejected service media hangup: %s", message)
+	}
+	return nil
+}
+
+func (g *AMIGateway) SendServiceDTMF(ctx context.Context, sessionID, digit string, durationMS int) error {
+	if !validCallControlID(sessionID) || len(digit) != 1 || !strings.Contains("0123456789*#ABCD", digit) {
+		return errors.New("invalid service DTMF request")
+	}
+	response, err := g.action(ctx, map[string]string{
+		"Action": "PlayDTMF", "Channel": sessionID, "Digit": digit,
+		"Duration": strconv.Itoa(durationMS), "Receive": "true",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		return fmt.Errorf("Asterisk rejected service DTMF: %s", first(response, "Message"))
+	}
+	return nil
+}
+
 func (g *AMIGateway) EndConference(ctx context.Context, conference string) error {
 	response, err := g.action(ctx, map[string]string{
 		"Action": "ConfbridgeKick", "Conference": conference, "Channel": "all",
@@ -200,7 +273,7 @@ func (g *AMIGateway) action(ctx context.Context, fields map[string]string) (map[
 }
 
 func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]string) (map[string][]string, error) {
-	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference"} {
+	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
 		value, ok := fields[key]
 		if !ok {
 			continue

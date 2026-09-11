@@ -114,6 +114,25 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("participant_join_aborted", client_context[join_guard:])
         self.assertIn('${VITI_JOIN_ADMITTED}" != "1', client_context[conference:])
 
+    def test_service_media_uses_non_owning_conference_context_and_service_recording_role(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        service_context = template[
+            template.index("[viti-service-conference]"):
+            template.index("[viti-carrier-conference]")
+        ]
+
+        self.assertIn("ConfBridge(${VITI_CALL_ID},viti_bridge,viti_client)", service_context)
+        self.assertIn("viti-start-client-recording", service_context)
+        self.assertNotIn("participant_joined", service_context)
+        self.assertNotIn("participant_left", service_context)
+        recording_context = template[template.index("[viti-start-client-recording]"):]
+        self.assertIn("VITI_PARTICIPANT_ROLE", recording_context)
+        self.assertIn("?service:client", recording_context)
+
     def test_participant_event_keeps_call_and_trace_identity(self):
         response = mock.Mock(status_code=204, text="")
         with mock.patch.dict(os.environ, {}, clear=True), \

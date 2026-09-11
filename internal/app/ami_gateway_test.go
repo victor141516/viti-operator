@@ -59,12 +59,28 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err := gateway.EndConference(ctx, "asterisk-call-42"); err != nil {
 		t.Fatal(err)
 	}
+	mediaRequest := serviceMediaBridgeRequest{
+		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
+		ServiceName: "transcriber", ConnectionID: "integration-42", RTPHost: "manager", RTPPort: 32000,
+	}
+	if err := gateway.JoinServiceMedia(ctx, mediaRequest); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.SendServiceDTMF(ctx, "media-42", "#", 300); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.LeaveServiceMedia(ctx, "media-42"); err != nil {
+		t.Fatal(err)
+	}
 	var sawMessage bool
 	var sawUnregister bool
 	var sawRegister bool
 	var sawDirectedHangup bool
 	var sawConferenceEnd bool
-	for range 18 {
+	var sawMediaJoin bool
+	var sawMediaDTMF bool
+	var sawMediaLeave bool
+	for range 27 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -79,11 +95,23 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 				sawRegister = true
 			}
 		}
-		if first(request, "Action") == "Hangup" {
-			sawDirectedHangup = first(request, "Channel") == "PJSIP/webrtc-0000002a"
+		if first(request, "Action") == "Hangup" && first(request, "Channel") == "PJSIP/webrtc-0000002a" {
+			sawDirectedHangup = true
 		}
 		if first(request, "Action") == "ConfbridgeKick" {
 			sawConferenceEnd = first(request, "Conference") == "asterisk-call-42" && first(request, "Channel") == "all"
+		}
+		if first(request, "Action") == "Originate" {
+			sawMediaJoin = first(request, "Channel") == "UnicastRTP/manager:32000/c(opus)" &&
+				first(request, "Context") == "viti-service-conference" && first(request, "ChannelId") == "media-42" &&
+				strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ROLE=service")
+		}
+		if first(request, "Action") == "PlayDTMF" {
+			sawMediaDTMF = first(request, "Channel") == "media-42" && first(request, "Digit") == "#" &&
+				first(request, "Duration") == "300" && first(request, "Receive") == "true"
+		}
+		if first(request, "Action") == "Hangup" && first(request, "Channel") == "media-42" {
+			sawMediaLeave = true
 		}
 	}
 	if !sawMessage {
@@ -94,6 +122,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	}
 	if !sawDirectedHangup || !sawConferenceEnd {
 		t.Fatalf("conference controls missing: directed=%t end=%t", sawDirectedHangup, sawConferenceEnd)
+	}
+	if !sawMediaJoin || !sawMediaDTMF || !sawMediaLeave {
+		t.Fatalf("service media actions missing: join=%t dtmf=%t leave=%t", sawMediaJoin, sawMediaDTMF, sawMediaLeave)
 	}
 }
 
