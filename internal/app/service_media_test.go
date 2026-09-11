@@ -16,14 +16,16 @@ import (
 )
 
 type fakeServiceMediaBridge struct {
-	mu          sync.Mutex
-	joins       []serviceMediaBridgeRequest
-	leaves      []string
-	dtmf        []string
-	starts      []string
-	ends        []string
-	joinStarted chan struct{}
-	joinRelease chan struct{}
+	mu           sync.Mutex
+	joins        []serviceMediaBridgeRequest
+	leaves       []string
+	dtmf         []string
+	starts       []string
+	ends         []string
+	joinStarted  chan struct{}
+	joinRelease  chan struct{}
+	startStarted chan struct{}
+	startRelease chan struct{}
 }
 
 func (b *fakeServiceMediaBridge) EndServiceCall(_ context.Context, engineCallID string) error {
@@ -49,6 +51,10 @@ func (b *fakeServiceMediaBridge) StartServiceCall(_ context.Context, request ser
 	b.joins = append(b.joins, request)
 	b.starts = append(b.starts, destination)
 	b.mu.Unlock()
+	if b.startStarted != nil {
+		close(b.startStarted)
+		<-b.startRelease
+	}
 	return nil
 }
 
@@ -91,15 +97,78 @@ func TestServiceMediaOutgoingActivationWaitsForWebRTC(t *testing.T) {
 		t.Fatal(err)
 	}
 	bridge.mu.Lock()
-	defer bridge.mu.Unlock()
 	if len(bridge.starts) != 1 || bridge.starts[0] != "+12025550123" || len(bridge.joins) != 1 {
 		t.Fatalf("service call activation: starts=%#v joins=%#v", bridge.starts, bridge.joins)
 	}
 	bridge.mu.Unlock()
 	manager.CloseConnection("connection-out", "control_disconnected")
-	bridge.mu.Lock()
-	if len(bridge.ends) != 1 || bridge.ends[0] != call.EngineCallID {
-		t.Fatalf("abandoned service call ends = %#v", bridge.ends)
+	waitForServiceBridgeCleanup(t, bridge, 1, 1)
+}
+
+func TestServiceMediaDisconnectDoesNotWaitForBlockedOutgoingActivation(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{startStarted: make(chan struct{}), startRelease: make(chan struct{})}
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, NewEventHub(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.iceMux.Close()
+	call := Call{
+		ID: "call-blocked-out", TraceID: "trace-blocked-out", EngineCallID: "engine-blocked-out",
+		Direction: DirectionOutgoing, State: "dialing", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOffer(t)
+	defer client.Close()
+	preparation, err := manager.PrepareOutgoing(context.Background(), serviceMediaAttachRequest{
+		ServiceName: "blocked-dialer", ConnectionID: "blocked-connection", Call: call, OfferSDP: offer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: preparation.Description.AnswerSDP}); err != nil {
+		t.Fatal(err)
+	}
+	session := manager.sessions[preparation.Description.SessionID]
+	waitForPeerConnected(t, client, session.peer)
+	activation := make(chan error, 1)
+	go func() { activation <- preparation.Activate(context.Background(), "+12025550123") }()
+	<-bridge.startStarted
+	closed := make(chan struct{})
+	go func() {
+		manager.CloseConnection("blocked-connection", "control_disconnected")
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("connection close blocked behind outgoing AMI activation")
+	}
+	if state := session.peer.ConnectionState(); state != webrtc.PeerConnectionStateClosed {
+		t.Fatalf("peer state after immediate close = %s", state)
+	}
+	close(bridge.startRelease)
+	if err := <-activation; err == nil || !strings.Contains(err.Error(), "closed while") {
+		t.Fatalf("activation error = %v", err)
+	}
+	waitForServiceBridgeCleanup(t, bridge, 1, 1)
+}
+
+func waitForServiceBridgeCleanup(t *testing.T, bridge *fakeServiceMediaBridge, leaves, ends int) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		bridge.mu.Lock()
+		gotLeaves, gotEnds := len(bridge.leaves), len(bridge.ends)
+		bridge.mu.Unlock()
+		if gotLeaves == leaves && gotEnds == ends {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bridge cleanup: leaves=%d/%d ends=%d/%d", gotLeaves, leaves, gotEnds, ends)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -259,6 +328,7 @@ func TestServiceMediaAttachRevalidatesCallAfterBlockingBridgeJoin(t *testing.T) 
 	manager.mu.Lock()
 	remaining := len(manager.sessions)
 	manager.mu.Unlock()
+	waitForServiceBridgeCleanup(t, bridge, 1, 0)
 	bridge.mu.Lock()
 	leaves := append([]string(nil), bridge.leaves...)
 	bridge.mu.Unlock()
@@ -305,6 +375,7 @@ func TestServiceMediaAttachRejectsCanceledConnectionAfterBlockingBridgeJoin(t *t
 	manager.mu.Lock()
 	remaining := len(manager.sessions)
 	manager.mu.Unlock()
+	waitForServiceBridgeCleanup(t, bridge, 1, 0)
 	bridge.mu.Lock()
 	leaves := append([]string(nil), bridge.leaves...)
 	bridge.mu.Unlock()
@@ -406,6 +477,7 @@ func TestServiceMediaBindsSessionToConnectionAndReplacesOwnerGeneration(t *testi
 		t.Fatalf("delayed DTMF source was lost after replacement: service=%q call=%q found=%t", serviceName, callID, found)
 	}
 
+	waitForServiceBridgeCleanup(t, bridge, 1, 0)
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
 	if len(bridge.joins) != 2 || bridge.joins[0].RTPPort == 0 || bridge.joins[0].SessionID != first.SessionID ||

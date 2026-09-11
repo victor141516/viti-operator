@@ -69,31 +69,32 @@ type serviceMediaCallbacks struct {
 }
 
 type serviceMediaSession struct {
-	manager        *serviceMediaManager
-	id             string
-	call           Call
-	serviceName    string
-	connectionID   string
-	recordingID    string
-	purpose        string
-	codec          serviceMediaCodec
-	peer           *webrtc.PeerConnection
-	asteriskRTP    *net.UDPConn
-	localTrack     *webrtc.TrackLocalStaticRTP
-	remoteMu       sync.RWMutex
-	asteriskAddr   *net.UDPAddr
-	asteriskPT     uint8
-	closeOnce      sync.Once
-	stateMu        sync.Mutex
-	mediaConnected bool
-	connectedOnce  sync.Once
-	connected      chan struct{}
-	terminated     chan struct{}
-	bridgeMu       sync.Mutex
-	bridged        bool
-	closed         bool
-	activated      bool
-	announced      bool
+	manager         *serviceMediaManager
+	id              string
+	call            Call
+	serviceName     string
+	connectionID    string
+	recordingID     string
+	purpose         string
+	codec           serviceMediaCodec
+	peer            *webrtc.PeerConnection
+	asteriskRTP     *net.UDPConn
+	localTrack      *webrtc.TrackLocalStaticRTP
+	remoteMu        sync.RWMutex
+	asteriskAddr    *net.UDPAddr
+	asteriskPT      uint8
+	closeOnce       sync.Once
+	bridgeCloseOnce sync.Once
+	stateMu         sync.Mutex
+	mediaConnected  bool
+	connectedOnce   sync.Once
+	connected       chan struct{}
+	terminated      chan struct{}
+	bridgeMu        sync.Mutex
+	bridged         bool
+	closed          bool
+	activated       bool
+	announced       bool
 }
 
 func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger, callbacks ...serviceMediaCallbacks) (*serviceMediaManager, error) {
@@ -334,11 +335,12 @@ func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination 
 		return ctx.Err()
 	}
 	s.bridgeMu.Lock()
-	defer s.bridgeMu.Unlock()
 	if s.closed {
+		s.bridgeMu.Unlock()
 		return errors.New("media session is closed")
 	}
 	if s.activated {
+		s.bridgeMu.Unlock()
 		return errors.New("media session was already activated")
 	}
 	s.activated = true
@@ -348,10 +350,18 @@ func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination 
 		ServiceName: s.serviceName, ConnectionID: s.connectionID,
 		RecordingID: s.recordingID, RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: s.codec.asteriskName,
 	}
+	s.bridgeMu.Unlock()
 	if err := s.manager.bridge.StartServiceCall(ctx, request, destination); err != nil {
 		return fmt.Errorf("start service call through Asterisk: %w", err)
 	}
+	s.bridgeMu.Lock()
 	s.bridged = true
+	closed := s.closed
+	s.bridgeMu.Unlock()
+	if closed {
+		go s.cleanupBridge()
+		return errors.New("media session closed while the service call was starting")
+	}
 	return nil
 }
 
@@ -599,21 +609,27 @@ func (s *serviceMediaSession) close(reason string) {
 		_ = s.peer.Close()
 		_ = s.asteriskRTP.Close()
 		if bridged {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			if err := s.manager.bridge.LeaveServiceMedia(ctx, s.id); err != nil {
-				s.manager.logger.Warn("leave service media bridge", "session_id", s.id, "error", err)
-			}
-			cancel()
+			go s.cleanupBridge()
 		}
-		if bridged && s.purpose == "originator" && !s.manager.originatorOrHumanRemains(s.call) {
+		if announced {
+			s.manager.publishParticipant("left", s, reason)
+		}
+	})
+}
+
+func (s *serviceMediaSession) cleanupBridge() {
+	s.bridgeCloseOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := s.manager.bridge.LeaveServiceMedia(ctx, s.id); err != nil {
+			s.manager.logger.Warn("leave service media bridge", "session_id", s.id, "error", err)
+		}
+		cancel()
+		if s.purpose == "originator" && !s.manager.originatorOrHumanRemains(s.call) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if err := s.manager.bridge.EndServiceCall(ctx, s.call.EngineCallID); err != nil {
 				s.manager.logger.Warn("end abandoned service call", "session_id", s.id, "call_id", s.call.ID, "error", err)
 			}
 			cancel()
-		}
-		if announced {
-			s.manager.publishParticipant("left", s, reason)
 		}
 	})
 }
