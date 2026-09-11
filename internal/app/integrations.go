@@ -446,6 +446,15 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		a.integrations.finishCommand(connection.name, base)
 		return queueIntegrationResult(results, base)
 	}
+	if command.Type == "call.start" && a.serviceMedia != nil {
+		if _, granted := connection.capabilities["call.media"]; !granted {
+			base.Status = "rejected"
+			base.ErrorCode = "capability_not_granted"
+			base.Message = "service-originated calls also require the call.media capability"
+			a.integrations.finishCommand(connection.name, base)
+			return queueIntegrationResult(results, base)
+		}
+	}
 	if code, message := validateIntegrationCommand(command); code != "" {
 		base.Status = "rejected"
 		base.ErrorCode = code
@@ -640,6 +649,10 @@ func (a *App) executeIntegrationMediaAttach(ctx context.Context, connection *int
 	}
 	if call.EndedAt != nil {
 		result.Status, result.ErrorCode, result.Message = "rejected", "already_ended", "call has already ended"
+		return result
+	}
+	if call.State != "active" {
+		result.Status, result.ErrorCode, result.Message = "rejected", "call_not_active", "media can only attach after the carrier call is active"
 		return result
 	}
 	var payload integrationMediaAttachPayload

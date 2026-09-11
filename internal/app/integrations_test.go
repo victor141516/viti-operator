@@ -297,6 +297,26 @@ func TestIntegrationServiceCallPreparesMediaBeforeDialActivation(t *testing.T) {
 	}
 }
 
+func TestIntegrationServiceCallRequiresMediaCapability(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	application.serviceMedia = &fakeServiceMediaController{}
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "control-only-dialer",
+		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`)},
+	})
+	defer socket.Close()
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "missing-media", Payload: json.RawMessage(`{"to":"+12025550123","sdp_offer":"v=0\\r\\n"}`),
+	})
+	result := readCommandResult(t, socket, "missing-media", "rejected")
+	if result["error_code"] != "capability_not_granted" || len(application.store.Calls()) != 0 {
+		t.Fatalf("result=%#v calls=%#v", result, application.store.Calls())
+	}
+}
+
 func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)
 	media := &fakeServiceMediaController{resolvedSession: "media-source", resolvedService: "transcriber"}

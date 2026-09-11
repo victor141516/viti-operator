@@ -123,7 +123,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		if !ok {
 			return nil, errors.New("service media requires a telephony provider with an external media bridge")
 		}
-		media, err := newServiceMediaManager(cfg.Voice.ServiceMedia, cfg.Voice.ICEServers, bridge, events, logger)
+		media, err := newServiceMediaManager(cfg.Voice.ServiceMedia, cfg.Voice.ICEServers, bridge, events, logger, a.callSessions.hasParticipants)
 		if err != nil {
 			return nil, fmt.Errorf("start service media: %w", err)
 		}

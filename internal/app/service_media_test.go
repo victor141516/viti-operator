@@ -19,6 +19,14 @@ type fakeServiceMediaBridge struct {
 	leaves []string
 	dtmf   []string
 	starts []string
+	ends   []string
+}
+
+func (b *fakeServiceMediaBridge) EndServiceCall(_ context.Context, engineCallID string) error {
+	b.mu.Lock()
+	b.ends = append(b.ends, engineCallID)
+	b.mu.Unlock()
+	return nil
 }
 
 func (b *fakeServiceMediaBridge) JoinServiceMedia(_ context.Context, request serviceMediaBridgeRequest) error {
@@ -78,6 +86,87 @@ func TestServiceMediaOutgoingActivationWaitsForWebRTC(t *testing.T) {
 	defer bridge.mu.Unlock()
 	if len(bridge.starts) != 1 || bridge.starts[0] != "+12025550123" || len(bridge.joins) != 1 {
 		t.Fatalf("service call activation: starts=%#v joins=%#v", bridge.starts, bridge.joins)
+	}
+	bridge.mu.Unlock()
+	manager.CloseConnection("connection-out", "control_disconnected")
+	bridge.mu.Lock()
+	if len(bridge.ends) != 1 || bridge.ends[0] != call.EngineCallID {
+		t.Fatalf("abandoned service call ends = %#v", bridge.ends)
+	}
+}
+
+func TestServiceMediaCodecSelectionFollowsFullDuplexOffer(t *testing.T) {
+	offer := "v=0\r\n" +
+		"o=- 1 1 IN IP4 127.0.0.1\r\n" +
+		"s=-\r\n" +
+		"t=0 0\r\n" +
+		"m=audio 9 UDP/TLS/RTP/SAVPF 0 111\r\n" +
+		"c=IN IP4 0.0.0.0\r\n" +
+		"a=sendrecv\r\n" +
+		"a=rtpmap:0 PCMU/8000\r\n" +
+		"a=rtpmap:111 opus/48000/2\r\n"
+	codec, err := selectServiceMediaCodec(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if codec.asteriskName != "ulaw" || codec.parameters.MimeType != webrtc.MimeTypePCMU {
+		t.Fatalf("selected codec = %#v", codec)
+	}
+
+	recvOnly := strings.Replace(offer, "a=sendrecv", "a=recvonly", 1)
+	if _, err := selectServiceMediaCodec(recvOnly); err == nil {
+		t.Fatal("receive-only offer was accepted as full duplex")
+	}
+}
+
+func TestServiceMediaNegotiatesPCMUWithAsteriskBridge(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{}
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, NewEventHub(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := Call{
+		ID: "call-pcmu", TraceID: "trace-pcmu", EngineCallID: "engine-pcmu", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOfferWithCodecs(t, []webrtc.RTPCodecParameters{{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypePCMU, ClockRate: 8000},
+		PayloadType:        0,
+	}})
+	defer client.Close()
+	description, err := manager.Attach(context.Background(), serviceMediaAttachRequest{
+		ServiceName: "legacy-audio", ConnectionID: "connection-pcmu", Call: call, OfferSDP: offer, Purpose: "auxiliary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		manager.CloseCall(call.ID, "test_complete")
+		_ = manager.iceMux.Close()
+	})
+	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: description.AnswerSDP}); err != nil {
+		t.Fatal(err)
+	}
+	waitForPeerConnected(t, client, manager.sessions[description.SessionID].peer)
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.joins) != 1 || bridge.joins[0].Codec != "ulaw" {
+		t.Fatalf("PCMU bridge request = %#v", bridge.joins)
+	}
+}
+
+func TestServiceMediaOriginatorRemainsWhenHumanIsPresent(t *testing.T) {
+	manager := &serviceMediaManager{
+		sessions: make(map[string]*serviceMediaSession),
+		hasHumans: func(call Call) bool {
+			return call.ID == "call-human"
+		},
+	}
+	if !manager.originatorOrHumanRemains(Call{ID: "call-human", EngineCallID: "engine-human"}) {
+		t.Fatal("human participant did not retain the service-originated call")
 	}
 }
 
@@ -203,10 +292,25 @@ func waitForPeerConnected(t *testing.T, peers ...*webrtc.PeerConnection) {
 
 func serviceMediaOffer(t *testing.T) (*webrtc.PeerConnection, string) {
 	t.Helper()
+	return serviceMediaOfferWithCodecs(t, nil)
+}
+
+func serviceMediaOfferWithCodecs(t *testing.T, codecs []webrtc.RTPCodecParameters) (*webrtc.PeerConnection, string) {
+	t.Helper()
 	settings := webrtc.SettingEngine{}
 	settings.SetICEMulticastDNSMode(ice.MulticastDNSModeDisabled)
 	settings.SetIncludeLoopbackCandidate(true)
-	peer, err := webrtc.NewAPI(webrtc.WithSettingEngine(settings)).NewPeerConnection(webrtc.Configuration{})
+	options := []func(*webrtc.API){webrtc.WithSettingEngine(settings)}
+	if len(codecs) != 0 {
+		mediaEngine := &webrtc.MediaEngine{}
+		for _, codec := range codecs {
+			if err := mediaEngine.RegisterCodec(codec, webrtc.RTPCodecTypeAudio); err != nil {
+				t.Fatal(err)
+			}
+		}
+		options = append(options, webrtc.WithMediaEngine(mediaEngine))
+	}
+	peer, err := webrtc.NewAPI(options...).NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
 		t.Fatal(err)
 	}

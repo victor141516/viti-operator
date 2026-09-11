@@ -125,6 +125,10 @@ func (g *AMIGateway) StartServiceCall(ctx context.Context, request serviceMediaB
 	return g.originateServiceMedia(ctx, request, "from-local", destination)
 }
 
+func (g *AMIGateway) EndServiceCall(ctx context.Context, engineCallID string) error {
+	return g.EndConference(ctx, engineCallID)
+}
+
 func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceMediaBridgeRequest, dialplanContext, extension string) error {
 	if request.EngineCallID == "" {
 		return errors.New("call does not have an active Asterisk conference")
@@ -137,6 +141,9 @@ func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceM
 	if request.RTPPort < 1 || request.RTPPort > 65535 || strings.TrimSpace(request.RTPHost) == "" {
 		return errors.New("invalid service media RTP destination")
 	}
+	if request.Codec != "opus" && request.Codec != "g722" && request.Codec != "ulaw" && request.Codec != "alaw" {
+		return errors.New("invalid service media codec")
+	}
 	variables := strings.Join([]string{
 		"VITI_CALL_ID=" + request.EngineCallID,
 		"VITI_TRACE_ID=" + request.TraceID,
@@ -146,10 +153,12 @@ func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceM
 		"VITI_RECORDING_FILE_ID=" + request.SessionID,
 		"VITI_PARTICIPANT_ROLE=service",
 	}, ",")
-	channel, err := g.originateAndAwaitChannel(ctx, map[string]string{
-		"Action": "Originate", "Channel": "UnicastRTP/" + net.JoinHostPort(request.RTPHost, strconv.Itoa(request.RTPPort)) + "/c(opus)",
+	originateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	channel, err := g.originateAndAwaitChannel(originateCtx, map[string]string{
+		"Action": "Originate", "Channel": "UnicastRTP/" + net.JoinHostPort(request.RTPHost, strconv.Itoa(request.RTPPort)) + "/c(" + request.Codec + ")",
 		"Context": dialplanContext, "Exten": extension, "Priority": "1", "Timeout": "5000",
-		"Async": "true", "Codecs": "opus", "ChannelId": request.SessionID, "Variable": variables,
+		"Async": "true", "Codecs": request.Codec, "ChannelId": request.SessionID, "Variable": variables,
 	})
 	if err != nil {
 		return err
@@ -176,10 +185,9 @@ func (g *AMIGateway) LeaveServiceMedia(ctx context.Context, sessionID string) er
 	}
 	if first(response, "Response") != "Success" {
 		message := first(response, "Message")
-		if amiTargetAlreadyGone(message) {
-			return nil
+		if !amiTargetAlreadyGone(message) {
+			return fmt.Errorf("Asterisk rejected service media hangup: %s", message)
 		}
-		return fmt.Errorf("Asterisk rejected service media hangup: %s", message)
 	}
 	g.mediaMu.Lock()
 	delete(g.mediaChannels, sessionID)

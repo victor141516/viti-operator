@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -14,8 +15,29 @@ import (
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 	"github.com/pion/webrtc/v4"
 )
+
+type serviceMediaCodec struct {
+	parameters   webrtc.RTPCodecParameters
+	asteriskName string
+}
+
+var serviceMediaCodecs = []serviceMediaCodec{
+	{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1",
+	}, PayloadType: 111}, "opus"},
+	{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypeG722, ClockRate: 8000,
+	}, PayloadType: rtp.PayloadTypeG722}, "g722"},
+	{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypePCMU, ClockRate: 8000,
+	}, PayloadType: rtp.PayloadTypePCMU}, "ulaw"},
+	{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
+		MimeType: webrtc.MimeTypePCMA, ClockRate: 8000,
+	}, PayloadType: rtp.PayloadTypePCMA}, "alaw"},
+}
 
 type serviceMediaManager struct {
 	mu         sync.Mutex
@@ -26,6 +48,7 @@ type serviceMediaManager struct {
 	bridge     serviceMediaBridge
 	events     *EventHub
 	logger     *slog.Logger
+	hasHumans  func(Call) bool
 	sessions   map[string]*serviceMediaSession
 	byOwner    map[string]string
 }
@@ -37,6 +60,7 @@ type serviceMediaSession struct {
 	serviceName    string
 	connectionID   string
 	purpose        string
+	codec          serviceMediaCodec
 	peer           *webrtc.PeerConnection
 	asteriskRTP    *net.UDPConn
 	localTrack     *webrtc.TrackLocalStaticRTP
@@ -55,7 +79,7 @@ type serviceMediaSession struct {
 	activated      bool
 }
 
-func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger) (*serviceMediaManager, error) {
+func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger, hasHumans ...func(Call) bool) (*serviceMediaManager, error) {
 	listenAddress, err := net.ResolveUDPAddr("udp", cfg.ListenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ICE listen address: %w", err)
@@ -80,15 +104,11 @@ func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerCon
 	}
 
 	mediaEngine := &webrtc.MediaEngine{}
-	if err := mediaEngine.RegisterCodec(webrtc.RTPCodecParameters{
-		RTPCodecCapability: webrtc.RTPCodecCapability{
-			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-			SDPFmtpLine: "minptime=10;useinbandfec=1",
-		},
-		PayloadType: 111,
-	}, webrtc.RTPCodecTypeAudio); err != nil {
-		_ = udpMux.Close()
-		return nil, fmt.Errorf("register Opus codec: %w", err)
+	for _, codec := range serviceMediaCodecs {
+		if err := mediaEngine.RegisterCodec(codec.parameters, webrtc.RTPCodecTypeAudio); err != nil {
+			_ = udpMux.Close()
+			return nil, fmt.Errorf("register service media codec %s: %w", codec.parameters.MimeType, err)
+		}
 	}
 	interceptors := &interceptor.Registry{}
 	if err := webrtc.RegisterDefaultInterceptors(mediaEngine, interceptors); err != nil {
@@ -104,13 +124,17 @@ func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerCon
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &serviceMediaManager{
+	manager := &serviceMediaManager{
 		cfg: cfg, iceMux: udpMux, api: webrtc.NewAPI(
 			webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(interceptors), webrtc.WithSettingEngine(settingEngine),
 		),
 		iceServers: iceServers, bridge: bridge, events: events, logger: logger,
 		sessions: make(map[string]*serviceMediaSession), byOwner: make(map[string]string),
-	}, nil
+	}
+	if len(hasHumans) != 0 {
+		manager.hasHumans = hasHumans[0]
+	}
+	return manager, nil
 }
 
 func serviceMediaOwnerKey(serviceName, callID string) string {
@@ -140,6 +164,10 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	if request.ServiceName == "" || request.ConnectionID == "" || request.Call.ID == "" {
 		return nil, serviceMediaDescription{}, errors.New("service, connection, and call are required")
 	}
+	codec, err := selectServiceMediaCodec(request.OfferSDP)
+	if err != nil {
+		return nil, serviceMediaDescription{}, err
+	}
 	sessionID, err := randomID("media")
 	if err != nil {
 		return nil, serviceMediaDescription{}, errors.New("could not allocate media session")
@@ -153,23 +181,27 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 		rtpSocket.Close()
 		return nil, serviceMediaDescription{}, fmt.Errorf("create peer connection: %w", err)
 	}
-	localTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
-		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
-	}, "conference", "viti-"+request.Call.ID)
+	localTrack, err := webrtc.NewTrackLocalStaticRTP(codec.parameters.RTPCodecCapability, "conference", "viti-"+request.Call.ID)
 	if err != nil {
 		peer.Close()
 		rtpSocket.Close()
 		return nil, serviceMediaDescription{}, fmt.Errorf("create outbound audio track: %w", err)
 	}
-	sender, err := peer.AddTrack(localTrack)
+	transceiver, err := peer.AddTransceiverFromTrack(localTrack, webrtc.RTPTransceiverInit{Direction: webrtc.RTPTransceiverDirectionSendrecv})
 	if err != nil {
 		peer.Close()
 		rtpSocket.Close()
 		return nil, serviceMediaDescription{}, fmt.Errorf("add outbound audio track: %w", err)
 	}
+	if err := transceiver.SetCodecPreferences([]webrtc.RTPCodecParameters{codec.parameters}); err != nil {
+		peer.Close()
+		rtpSocket.Close()
+		return nil, serviceMediaDescription{}, fmt.Errorf("select service media codec: %w", err)
+	}
+	sender := transceiver.Sender()
 	session := &serviceMediaSession{
 		manager: m, id: sessionID, call: request.Call, serviceName: request.ServiceName,
-		connectionID: request.ConnectionID, purpose: request.Purpose, peer: peer,
+		connectionID: request.ConnectionID, purpose: request.Purpose, codec: codec, peer: peer,
 		asteriskRTP: rtpSocket, localTrack: localTrack,
 		connected: make(chan struct{}), terminated: make(chan struct{}),
 	}
@@ -219,7 +251,7 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	bridgeRequest := serviceMediaBridgeRequest{
 		SessionID: sessionID, CallID: request.Call.ID, EngineCallID: request.Call.EngineCallID,
 		TraceID: request.Call.TraceID, ServiceName: request.ServiceName, ConnectionID: request.ConnectionID,
-		RTPHost: m.cfg.AsteriskRTPHost, RTPPort: rtpPort,
+		RTPHost: m.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: codec.asteriskName,
 	}
 	if joinExisting {
 		if err := m.bridge.JoinServiceMedia(ctx, bridgeRequest); err != nil {
@@ -240,12 +272,15 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	m.byOwner[ownerKey] = sessionID
 	m.mu.Unlock()
 	if replaced != nil {
+		if replaced.purpose == "originator" && replaced.connectionID == session.connectionID {
+			session.purpose = "originator"
+		}
 		replaced.close("replaced")
 	}
 	m.publishParticipant("joined", session, "attached")
 	go session.forwardAsteriskAudio()
 	session.peerStateChanged(peer.ConnectionState())
-	return session, serviceMediaDescription{SessionID: sessionID, CallID: request.Call.ID, AnswerSDP: local.SDP, Purpose: request.Purpose}, nil
+	return session, serviceMediaDescription{SessionID: sessionID, CallID: request.Call.ID, AnswerSDP: local.SDP, Purpose: session.purpose}, nil
 }
 
 func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination string) error {
@@ -269,13 +304,55 @@ func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination 
 	request := serviceMediaBridgeRequest{
 		SessionID: s.id, CallID: s.call.ID, EngineCallID: s.call.EngineCallID, TraceID: s.call.TraceID,
 		ServiceName: s.serviceName, ConnectionID: s.connectionID,
-		RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort,
+		RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: s.codec.asteriskName,
 	}
 	if err := s.manager.bridge.StartServiceCall(ctx, request, destination); err != nil {
 		return fmt.Errorf("start service call through Asterisk: %w", err)
 	}
 	s.bridged = true
 	return nil
+}
+
+func selectServiceMediaCodec(offer string) (serviceMediaCodec, error) {
+	var description sdp.SessionDescription
+	if err := description.UnmarshalString(offer); err != nil {
+		return serviceMediaCodec{}, fmt.Errorf("parse SDP offer: %w", err)
+	}
+	sessionDirection := sdpMediaDirection(description.Attributes, "sendrecv")
+	for _, media := range description.MediaDescriptions {
+		if !strings.EqualFold(media.MediaName.Media, "audio") || media.MediaName.Port.Value == 0 {
+			continue
+		}
+		if sdpMediaDirection(media.Attributes, sessionDirection) != "sendrecv" {
+			continue
+		}
+		for _, rawPayloadType := range media.MediaName.Formats {
+			value, err := strconv.ParseUint(rawPayloadType, 10, 8)
+			if err != nil {
+				continue
+			}
+			offered, err := description.GetCodecForPayloadType(uint8(value))
+			if err != nil {
+				continue
+			}
+			for _, supported := range serviceMediaCodecs {
+				if strings.EqualFold(offered.Name, strings.TrimPrefix(supported.parameters.MimeType, "audio/")) {
+					return supported, nil
+				}
+			}
+		}
+	}
+	return serviceMediaCodec{}, errors.New("SDP offer does not include full-duplex audio using Opus, G.722, PCMU, or PCMA")
+}
+
+func sdpMediaDirection(attributes []sdp.Attribute, fallback string) string {
+	for _, attribute := range attributes {
+		switch strings.ToLower(attribute.Key) {
+		case "sendrecv", "sendonly", "recvonly", "inactive":
+			return strings.ToLower(attribute.Key)
+		}
+	}
+	return fallback
 }
 
 func (m *serviceMediaManager) AddICECandidate(_ context.Context, request serviceMediaICERequest) error {
@@ -461,8 +538,26 @@ func (s *serviceMediaSession) close(reason string) {
 			}
 			cancel()
 		}
+		if bridged && s.purpose == "originator" && !s.manager.originatorOrHumanRemains(s.call) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := s.manager.bridge.EndServiceCall(ctx, s.call.EngineCallID); err != nil {
+				s.manager.logger.Warn("end abandoned service call", "session_id", s.id, "call_id", s.call.ID, "error", err)
+			}
+			cancel()
+		}
 		s.manager.publishParticipant("left", s, reason)
 	})
+}
+
+func (m *serviceMediaManager) originatorOrHumanRemains(call Call) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, session := range m.sessions {
+		if session.call.ID == call.ID && session.purpose == "originator" {
+			return true
+		}
+	}
+	return m.hasHumans != nil && m.hasHumans(call)
 }
 
 func (m *serviceMediaManager) publishParticipant(state string, session *serviceMediaSession, reason string) {

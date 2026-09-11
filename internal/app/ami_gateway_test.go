@@ -61,7 +61,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	}
 	mediaRequest := serviceMediaBridgeRequest{
 		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
-		ServiceName: "transcriber", ConnectionID: "integration-42", RTPHost: "manager", RTPPort: 32000,
+		ServiceName: "transcriber", ConnectionID: "integration-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
 	}
 	if err := gateway.JoinServiceMedia(ctx, mediaRequest); err != nil {
 		t.Fatal(err)

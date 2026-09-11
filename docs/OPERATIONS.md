@@ -104,10 +104,23 @@ must be allowed on that trusted path.
 ### Trusted service media
 
 Open `/api/v1/integrations/ws`, register a stable name with `call.media`, and
-send `media.attach` with the target `call_id`, an Opus-capable `sdp_offer`, and
+send `media.attach` with the target `call_id`, an audio `sdp_offer`, and
 `purpose` set to `auxiliary` or `controller`. Apply the `sdp_answer` returned in
 `media.session.created`; send subsequent candidates with `media.ice`. The full
 answer already contains the manager candidates gathered before the response.
+The offer must provide full-duplex audio. Viti selects the first mutually
+supported format in the offer from Opus, G.722, PCMU, and PCMA, and asks
+Asterisk to use that same format for the session's private RTP bridge.
+
+To originate a call from a service, advertise both `call.start` and
+`call.media`, then include `sdp_offer` with the E.164 destination in the
+`call.start` payload. Viti sends `media.session.created` first and does not dial
+the carrier until the service has applied that answer and WebRTC reaches the
+connected state. ICE candidates can be sent concurrently while the start
+command remains accepted. If media cannot connect within 15 seconds, the call
+record is failed without dialing. Closing the control WebSocket closes the
+originating media leg; Asterisk keeps the carrier call only when another human
+conference participant is present.
 
 Use `call.dtmf` with the call and optional session ID to inject one RFC 4733
 digit. The resulting source-attributed `call.dtmf` event is broadcast to every

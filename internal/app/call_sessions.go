@@ -357,6 +357,17 @@ func (r *callSessionRegistry) participantByChannel(call Call, channel string) (c
 	return callParticipant{}, false
 }
 
+func (r *callSessionRegistry) hasParticipants(call Call) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, session := range r.sessions {
+		if session.engineCallID == call.EngineCallID && len(session.participants) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

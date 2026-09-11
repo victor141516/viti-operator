@@ -61,11 +61,13 @@ type serviceMediaBridgeRequest struct {
 	ConnectionID string
 	RTPHost      string
 	RTPPort      int
+	Codec        string
 }
 
 type serviceMediaBridge interface {
 	JoinServiceMedia(context.Context, serviceMediaBridgeRequest) error
 	StartServiceCall(context.Context, serviceMediaBridgeRequest, string) error
+	EndServiceCall(context.Context, string) error
 	LeaveServiceMedia(context.Context, string) error
 	SendServiceDTMF(context.Context, string, string, int) error
 }
