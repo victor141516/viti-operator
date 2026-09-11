@@ -1,9 +1,13 @@
 package app
 
 import (
+	"context"
 	"net/http"
 	"strings"
+	"time"
 )
+
+const screeningEnginePollWait = 2 * time.Second
 
 func (a *App) engineScreen(w http.ResponseWriter, r *http.Request) {
 	if !a.engineRequestAuthorized(r) {
@@ -29,6 +33,11 @@ func (a *App) engineScreen(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "incoming call is not available yet")
 		return
 	}
-	action := a.screening.WaitInitial(r.Context(), call.ID)
+	ctx, cancel := context.WithTimeout(r.Context(), screeningEnginePollWait)
+	defer cancel()
+	action, ready := a.screening.pollInitial(ctx, call.ID)
+	if !ready {
+		action = "pending"
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"action": action})
 }

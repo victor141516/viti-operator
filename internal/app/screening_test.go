@@ -172,6 +172,48 @@ func TestScreeningDisconnectFailsOpen(t *testing.T) {
 	}
 }
 
+func TestScreeningMediaReconnectPreservesProcessingDeadline(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	claimScreeningService(t, application.integrations, "voice", "voice-connection", screeningCapabilityOptions{
+		ProcessingTimeoutMS: 120, MediaTimeoutMS: 500,
+	})
+	ringCalls := make(chan Call, 1)
+	manager := newScreeningManager([]string{"voice"}, application.store, application.events, application.integrations, screeningCallbacks{
+		ringClients: func(_ context.Context, call Call) error {
+			ringCalls <- call
+			return nil
+		},
+	})
+	call := saveIncomingScreeningCall(t, application, "call-processing-deadline")
+	manager.StartIncoming(call)
+	if _, err := manager.Decide("voice", "voice-connection", "control", call.ID, screeningDecisionPayload{
+		Revision: 1, Action: "take_control",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	manager.MediaState(call.ID, "voice", "voice-connection", "media-one", "controller", "connected")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if action := manager.WaitInitial(ctx, call.ID); action != "take_control" {
+		t.Fatalf("initial action = %q", action)
+	}
+	answeredAt := time.Now().UTC()
+	call.State, call.AnsweredAt = "active", &answeredAt
+	manager.CallActive(call)
+	time.Sleep(80 * time.Millisecond)
+	manager.MediaState(call.ID, "voice", "voice-connection", "media-one", "controller", "disconnected")
+	manager.MediaState(call.ID, "voice", "voice-connection", "media-two", "controller", "connected")
+	select {
+	case <-ringCalls:
+	case <-time.After(90 * time.Millisecond):
+		t.Fatal("media reconnect reset the processing deadline")
+	}
+	stored, _ := application.store.GetCall(call.ID)
+	if stored.Screening.Stages[0].Outcome != "processing_timeout" {
+		t.Fatalf("processing outcome = %#v", stored.Screening.Stages[0])
+	}
+}
+
 func TestScreeningEmptyPipelineDoesNotCreateRuntimeState(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)
 	manager := newScreeningManager(nil, application.store, application.events, application.integrations, screeningCallbacks{})
@@ -191,12 +233,18 @@ func TestScreeningEmptyPipelineDoesNotCreateRuntimeState(t *testing.T) {
 func TestScreeningActiveCallAfterRestartFailsOpenOnce(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)
 	ringCalls := make(chan Call, 2)
+	hangups := make(chan Call, 1)
 	manager := newScreeningManager([]string{"voice"}, application.store, application.events, application.integrations, screeningCallbacks{
 		ringClients: func(_ context.Context, call Call) error {
 			ringCalls <- call
 			return nil
 		},
+		hangup: func(_ context.Context, call Call) error {
+			hangups <- call
+			return nil
+		},
 	})
+	manager.ringTimeout = 75 * time.Millisecond
 	call := saveIncomingScreeningCall(t, application, "call-restart")
 	now := time.Now().UTC()
 	call.State, call.AnsweredAt = "active", &now
@@ -227,6 +275,47 @@ func TestScreeningActiveCallAfterRestartFailsOpenOnce(t *testing.T) {
 		stored.Screening.Reason != "manager_restart_fail_open" {
 		t.Fatalf("restart recovery record = %#v", stored.Screening)
 	}
+	select {
+	case hungUp := <-hangups:
+		if hungUp.ID != call.ID {
+			t.Fatalf("restart recovery hangup = %#v", hungUp)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("restart recovery did not enforce the human ring timeout")
+	}
+}
+
+func TestNewRecoversPersistedActiveScreeningCall(t *testing.T) {
+	path := t.TempDir() + "/state.json"
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-startup-recovery", TraceID: "trace-startup-recovery", EngineCallID: "engine-startup-recovery",
+		Instance: "engine-1", Direction: DirectionIncoming, Peer: "+12025550123", State: "active",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, AnsweredAt: &now,
+		Screening: &CallScreeningRecord{
+			Pipeline: []string{"voice"}, StartedAt: now.Add(-time.Minute), ContextRevision: 1,
+			CurrentStage: 0, State: "controlled", Answered: true,
+		},
+	}
+	if err := store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	application, err := New(Config{
+		DataFile: path, Telephony: TelephonyConfig{Type: "memory"}, SIMAuth: SIMAuthConfig{Type: "disabled"},
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, _ := application.store.GetCall(call.ID)
+	if stored.Screening == nil || stored.Screening.State != "ringing_clients" ||
+		stored.Screening.Reason != "manager_restart_fail_open" {
+		t.Fatalf("startup recovery record = %#v", stored.Screening)
+	}
+	application.screening.HumanJoined(call)
 }
 
 func claimScreeningService(t *testing.T, registry *integrationRegistry, name, connectionID string, options screeningCapabilityOptions) {

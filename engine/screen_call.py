@@ -14,6 +14,7 @@ from notify import load_env
 
 
 VALID_ACTIONS = {"ring_clients", "take_control", "hangup"}
+REQUEST_TIMEOUT_SECONDS = 5
 
 
 def post_json(url, payload, headers):
@@ -23,9 +24,10 @@ def post_json(url, payload, headers):
         headers={"Content-Type": "application/json", **headers},
         method="POST",
     )
-    # Deliberately omit urlopen's timeout. The services own their advertised
-    # deadlines, including an unlimited processing phase after carrier answer.
-    with urllib.request.urlopen(request) as response:
+    # The endpoint long-polls for at most two seconds and returns ``pending``.
+    # This socket deadline detects a wedged manager path without imposing an
+    # aggregate deadline on the services' independently advertised timeouts.
+    with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:
         return response.status, json.load(response)
 
 
@@ -38,15 +40,18 @@ def screening_action(call_id, post=post_json):
         return "ring_clients"
     headers = {"X-Viti-Engine-Token": manager_token} if manager_token else {}
     try:
-        status, response = post(
-            manager_url + "/api/engine/screen",
-            {"instance": instance, "call_id": call_id},
-            headers,
-        )
-        if status != 200:
-            return "ring_clients"
-        action = str(response.get("action", "")).strip().lower()
-        return action if action in VALID_ACTIONS else "ring_clients"
+        while True:
+            status, response = post(
+                manager_url + "/api/engine/screen",
+                {"instance": instance, "call_id": call_id},
+                headers,
+            )
+            if status != 200:
+                return "ring_clients"
+            action = str(response.get("action", "")).strip().lower()
+            if action == "pending":
+                continue
+            return action if action in VALID_ACTIONS else "ring_clients"
     except Exception:
         return "ring_clients"
 

@@ -750,6 +750,13 @@ func (a *App) executeIntegrationMediaAttach(ctx context.Context, connection *int
 		result.Status, result.ErrorCode, result.Message = "failed", "media_attach_failed", err.Error()
 		return result
 	}
+	if purpose == "controller" {
+		if err := a.screening.ControllerAttachAllowed(connection.name, connection.id, call.ID); err != nil {
+			a.serviceMedia.CloseServiceCall(connection.name, call.ID, "screening_reservation_lost")
+			result.Status, result.ErrorCode, result.Message = "rejected", screeningErrorCode(err), err.Error()
+			return result
+		}
+	}
 	result.Status, result.Payload = "completed", description
 	return result
 }

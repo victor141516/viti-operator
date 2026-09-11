@@ -99,8 +99,13 @@ type screeningManager struct {
 	services    *integrationRegistry
 	callbacks   screeningCallbacks
 	sessions    map[string]*screeningSession
-	recovered   map[string]struct{}
+	recovered   map[string]*screeningRecovery
 	ringTimeout time.Duration
+}
+
+type screeningRecovery struct {
+	call  Call
+	timer *time.Timer
 }
 
 type screeningSession struct {
@@ -116,10 +121,12 @@ type screeningSession struct {
 	decisionTimer          *time.Timer
 	mediaTimer             *time.Timer
 	processingTimer        *time.Timer
+	processingDeadline     time.Time
 	ringTimer              *time.Timer
 	cached                 map[string]cachedScreeningDecision
 	decisionsClosed        bool
 	terminal               bool
+	initialAction          string
 }
 
 type cachedScreeningDecision struct {
@@ -133,7 +140,7 @@ type cachedScreeningDecision struct {
 func newScreeningManager(pipeline []string, store *Store, events *EventHub, services *integrationRegistry, callbacks screeningCallbacks) *screeningManager {
 	return &screeningManager{
 		pipeline: append([]string(nil), pipeline...), store: store, events: events, services: services,
-		callbacks: callbacks, sessions: make(map[string]*screeningSession), recovered: make(map[string]struct{}),
+		callbacks: callbacks, sessions: make(map[string]*screeningSession), recovered: make(map[string]*screeningRecovery),
 		ringTimeout: screeningHumanRingTimeout,
 	}
 }
@@ -176,23 +183,39 @@ func screeningCallPayload(call Call) map[string]any {
 }
 
 func (m *screeningManager) WaitInitial(ctx context.Context, callID string) string {
+	action, ready := m.pollInitial(ctx, callID)
+	if ready {
+		return action
+	}
+	m.failOpen(callID, "engine_wait_lost")
+	return "ring_clients"
+}
+
+func (m *screeningManager) pollInitial(ctx context.Context, callID string) (string, bool) {
 	m.mu.Lock()
 	session := m.sessions[callID]
 	if session == nil {
 		m.mu.Unlock()
 		if call, found := m.store.GetCall(callID); found && call.EndedAt != nil {
-			return "hangup"
+			return "hangup", true
 		}
-		return "ring_clients"
+		return "ring_clients", true
 	}
 	initial := session.initial
+	if session.initialAction != "" {
+		action := session.initialAction
+		m.mu.Unlock()
+		return action, true
+	}
 	m.mu.Unlock()
 	select {
-	case action := <-initial:
-		return action
+	case <-initial:
+		m.mu.Lock()
+		action := session.initialAction
+		m.mu.Unlock()
+		return action, action != ""
 	case <-ctx.Done():
-		m.failOpen(callID, "engine_wait_lost")
-		return "ring_clients"
+		return "", false
 	}
 }
 
@@ -324,6 +347,7 @@ func (m *screeningManager) applyCurrentDecisionLocked(session *screeningSession,
 		session.record.State = "waiting_media"
 		stage := m.currentStageLocked(session)
 		stage.Outcome = "waiting_media"
+		session.processingDeadline = time.Time{}
 		duration := screeningTimeout(stage.MediaTimeoutMS)
 		callID, stageIndex, revision := session.call.ID, session.current, session.record.ContextRevision
 		session.mediaTimer = time.AfterFunc(duration, func() { m.mediaTimeout(callID, stageIndex, revision) })
@@ -461,6 +485,7 @@ func (m *screeningManager) completeCurrentStageLocked(session *screeningSession,
 	}
 	m.stopTimer(&session.mediaTimer)
 	m.stopTimer(&session.processingTimer)
+	session.processingDeadline = time.Time{}
 	session.current++
 	session.record.CurrentStage = session.current
 	session.targetConnectionID = ""
@@ -498,7 +523,8 @@ func (m *screeningManager) processingTimeout(callID string, stageIndex int, revi
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session := m.sessions[callID]
-	if session == nil || session.terminal || session.current != stageIndex || session.record.ContextRevision != revision || session.phase != "controlling" {
+	if session == nil || session.terminal || session.current != stageIndex || session.record.ContextRevision != revision ||
+		(session.phase != "controlling" && session.phase != "waiting_media") {
 		return
 	}
 	now := time.Now().UTC()
@@ -561,7 +587,6 @@ func (m *screeningManager) MediaState(callID, serviceName, connectionID, session
 		session.controllerSessionID = ""
 		session.phase = "waiting_media"
 		session.record.State = "waiting_media"
-		m.stopTimer(&session.processingTimer)
 		stage := m.currentStageLocked(session)
 		duration := screeningTimeout(stage.MediaTimeoutMS)
 		stageIndex, revision := session.current, session.record.ContextRevision
@@ -574,32 +599,8 @@ func (m *screeningManager) CallActive(call Call) {
 	m.mu.Lock()
 	session := m.sessions[call.ID]
 	if session == nil {
-		if call.Direction != DirectionIncoming || call.EndedAt != nil || call.Screening == nil {
-			m.mu.Unlock()
-			return
-		}
-		if _, alreadyRecovered := m.recovered[call.ID]; alreadyRecovered {
-			m.mu.Unlock()
-			return
-		}
-		m.recovered[call.ID] = struct{}{}
-		now := time.Now().UTC()
-		call.Screening = cloneCallScreening(call.Screening)
-		call.Screening.Answered = true
-		call.Screening.State = "ringing_clients"
-		call.Screening.Outcome = "ring_clients"
-		call.Screening.TerminatedBy = "viti"
-		call.Screening.Reason = "manager_restart_fail_open"
-		call.Screening.CompletedAt = &now
-		if err := m.store.SaveCall(call); err != nil {
-			m.events.Publish("screening.persistence.failed", map[string]any{
-				"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
-			})
-		}
 		m.mu.Unlock()
-		if m.callbacks.ringClients != nil {
-			go m.runCallAction("restart_fail_open", call, m.callbacks.ringClients)
-		}
+		m.recoverActive(call)
 		return
 	}
 	if session.terminal {
@@ -617,13 +618,93 @@ func (m *screeningManager) CallActive(call Call) {
 	m.mu.Unlock()
 }
 
+func (m *screeningManager) RecoverPersisted() {
+	for _, call := range m.store.Calls() {
+		if call.Direction == DirectionIncoming && call.EndedAt == nil && call.AnsweredAt != nil && call.Screening != nil {
+			m.recoverActive(call)
+		}
+	}
+}
+
+func (m *screeningManager) recoverActive(call Call) {
+	if call.Direction != DirectionIncoming || call.EndedAt != nil || call.AnsweredAt == nil || call.Screening == nil {
+		return
+	}
+	m.mu.Lock()
+	if _, active := m.sessions[call.ID]; active {
+		m.mu.Unlock()
+		return
+	}
+	if _, alreadyRecovered := m.recovered[call.ID]; alreadyRecovered {
+		m.mu.Unlock()
+		return
+	}
+	now := time.Now().UTC()
+	call.Screening = cloneCallScreening(call.Screening)
+	call.Screening.Answered = true
+	call.Screening.State = "ringing_clients"
+	call.Screening.Outcome = "ring_clients"
+	call.Screening.TerminatedBy = "viti"
+	call.Screening.Reason = "manager_restart_fail_open"
+	call.Screening.CompletedAt = &now
+	if err := m.store.SaveCall(call); err != nil {
+		m.events.Publish("screening.persistence.failed", map[string]any{
+			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
+		})
+	}
+	recovery := &screeningRecovery{call: call}
+	recovery.timer = time.AfterFunc(m.ringTimeout, func() { m.recoveryExpired(call.ID, recovery) })
+	m.recovered[call.ID] = recovery
+	m.mu.Unlock()
+	if m.callbacks.ringClients != nil {
+		go m.runCallAction("restart_fail_open", call, m.callbacks.ringClients)
+	}
+}
+
+func (m *screeningManager) recoveryExpired(callID string, expected *screeningRecovery) {
+	m.mu.Lock()
+	recovery := m.recovered[callID]
+	if recovery == nil || recovery != expected {
+		m.mu.Unlock()
+		return
+	}
+	delete(m.recovered, callID)
+	call := recovery.call
+	now := time.Now().UTC()
+	call.Screening = cloneCallScreening(call.Screening)
+	call.Screening.State = "ending"
+	call.Screening.Outcome = "no_human_answer"
+	call.Screening.TerminatedBy = "viti"
+	call.Screening.Reason = "ring_timeout"
+	call.Screening.CompletedAt = &now
+	if err := m.store.SaveCall(call); err != nil {
+		m.events.Publish("screening.persistence.failed", map[string]any{
+			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
+		})
+	}
+	m.mu.Unlock()
+	if m.callbacks.hangup != nil {
+		m.runCallAction("restart_ring_timeout_hangup", call, m.callbacks.hangup)
+	}
+}
+
 func (m *screeningManager) startProcessingTimerLocked(session *screeningSession) {
 	stage := m.currentStageLocked(session)
 	if stage.ProcessingTimeoutMS == -1 {
 		return
 	}
+	if session.processingTimer != nil {
+		return
+	}
+	if session.processingDeadline.IsZero() {
+		session.processingDeadline = time.Now().Add(screeningTimeout(stage.ProcessingTimeoutMS))
+	}
 	callID, stageIndex, revision := session.call.ID, session.current, session.record.ContextRevision
-	session.processingTimer = time.AfterFunc(screeningTimeout(stage.ProcessingTimeoutMS), func() {
+	remaining := time.Until(session.processingDeadline)
+	if remaining < 0 {
+		remaining = 0
+	}
+	session.processingTimer = time.AfterFunc(remaining, func() {
 		m.processingTimeout(callID, stageIndex, revision)
 	})
 }
@@ -655,7 +736,27 @@ func (m *screeningManager) HumanJoined(call Call) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	session := m.sessions[call.ID]
-	if session == nil || session.terminal {
+	if session == nil {
+		if recovery := m.recovered[call.ID]; recovery != nil {
+			recovery.timer.Stop()
+			delete(m.recovered, call.ID)
+			stored, found := m.store.GetCall(call.ID)
+			if found && stored.Screening != nil {
+				now := time.Now().UTC()
+				stored.Screening = cloneCallScreening(stored.Screening)
+				stored.Screening.State = "human_connected"
+				stored.Screening.Outcome = "human_answered"
+				stored.Screening.CompletedAt = &now
+				if err := m.store.SaveCall(stored); err != nil {
+					m.events.Publish("screening.persistence.failed", map[string]any{
+						"call_id": stored.ID, "trace_id": stored.TraceID, "error": err.Error(),
+					})
+				}
+			}
+		}
+		return
+	}
+	if session.terminal {
 		return
 	}
 	m.stopTimer(&session.ringTimer)
@@ -670,7 +771,10 @@ func (m *screeningManager) HumanJoined(call Call) {
 func (m *screeningManager) CallEnded(call Call, actor, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	delete(m.recovered, call.ID)
+	if recovery := m.recovered[call.ID]; recovery != nil {
+		recovery.timer.Stop()
+		delete(m.recovered, call.ID)
+	}
 	session := m.sessions[call.ID]
 	if session == nil {
 		return
@@ -770,7 +874,10 @@ func (m *screeningManager) runCallAction(name string, call Call, action func(con
 }
 
 func (session *screeningSession) signalInitial(action string) {
-	session.initialOnce.Do(func() { session.initial <- action })
+	session.initialOnce.Do(func() {
+		session.initialAction = action
+		close(session.initial)
+	})
 }
 
 func (m *screeningManager) stopTimer(timer **time.Timer) {

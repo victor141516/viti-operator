@@ -578,6 +578,15 @@ predecessor history so delayed abort/leave events cannot revoke a newer leg.
 `410` rejects a terminal, reused, colliding, or otherwise stale admission; an
 exact replay of the still-current generation remains idempotent.
 
+### `POST /api/engine/screen`
+
+Engine-only long-poll authenticated with `X-Viti-Engine-Token`. The engine sends
+its `instance` and carrier `call_id`; the manager returns `ring_clients`,
+`take_control`, `hangup`, or `pending`. A pending response is a two-second
+liveness heartbeat, not a pipeline timeout. The engine repeats the request with
+a five-second socket deadline, allowing arbitrarily long aggregate service
+deadlines while a wedged manager path still fails open to human ringing.
+
 ### `GET /api/engine/recording`
 
 Engine-only endpoint authenticated with `X-Viti-Engine-Token`. Asterisk checks

@@ -154,6 +154,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 		a.serviceMedia = media
 	}
+	a.screening.RecoverPersisted()
 	if checkpoint, ok := store.LatestEngineTunnelCheckpoint(); ok {
 		a.tunnel = engineTunnelState{
 			Seen: true, Ready: checkpoint.Ready, UpdatedAt: checkpoint.UpdatedAt,
