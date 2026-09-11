@@ -368,12 +368,21 @@ func (a *App) integrationServicePayload(connection *integrationConnection) map[s
 }
 
 func (a *App) integrationSnapshot(replay EventReplay) map[string]any {
+	contacts, contactsVersion := a.store.ContactsSnapshot("")
+	statusCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	status, _ := a.runtimeStatus(statusCtx)
+	cancel()
 	return map[string]any{
 		"type": "system.snapshot", "version": integrationProtocolVersion,
 		"stream_id": replay.StreamID, "sequence": replay.LatestSequence, "occurred_at": time.Now().UTC(),
 		"payload": map[string]any{
 			"calls": a.store.Calls(), "messages": a.store.Messages(),
 			"known_clients": a.store.KnownClients(), "services": a.integrations.snapshot(),
+			"contacts":            map[string]any{"contacts": contacts, "version": contactsVersion},
+			"recording":           RecordingSettings{Enabled: a.store.CallRecordingEnabled()},
+			"sim_auth_assignment": a.store.SIMAuthAssignment(),
+			"ims_registration":    map[string]any{"enabled": a.store.IMSRegistrationEnabled(), "registered": status.IMSReady},
+			"runtime_status":      status,
 		},
 	}
 }
@@ -406,6 +415,13 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		a.integrations.finishCommand(connection.name, base)
 		return queueIntegrationResult(results, base)
 	}
+	if code, message := validateIntegrationCommand(command); code != "" {
+		base.Status = "rejected"
+		base.ErrorCode = code
+		base.Message = message
+		a.integrations.finishCommand(connection.name, base)
+		return queueIntegrationResult(results, base)
+	}
 	accepted := base
 	accepted.Status = "accepted"
 	if !writeAcceptedIntegrationResult(ctx, results, accepted) {
@@ -417,6 +433,26 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 	a.integrations.callMu.Unlock()
 	a.integrations.finishCommand(connection.name, result)
 	return queueIntegrationResult(results, result)
+}
+
+func validateIntegrationCommand(command integrationCommand) (string, string) {
+	switch command.Type {
+	case "call.start":
+		payload, err := integrationStartPayload(command.Payload)
+		if err != nil {
+			return "invalid_payload", err.Error()
+		}
+		if _, err := normalizeDialDestination(payload.To, payload.Country); err != nil {
+			return "invalid_payload", err.Error()
+		}
+	case "call.hangup":
+		if integrationHangupCallID(command) == "" {
+			return "invalid_payload", "call_id is required"
+		}
+	default:
+		return "unsupported_command", "this capability does not define a command in protocol version 1"
+	}
+	return "", ""
 }
 
 func queueIntegrationResult(results chan<- integrationResultDelivery, result integrationCommandResult) bool {
@@ -464,14 +500,7 @@ func (a *App) executeIntegrationCommand(ctx context.Context, command integration
 }
 
 func (a *App) executeIntegrationStart(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {
-	var payload struct {
-		To      string `json:"to"`
-		Country string `json:"country,omitempty"`
-	}
-	if err := json.Unmarshal(command.Payload, &payload); err != nil {
-		result.Status, result.ErrorCode, result.Message = "rejected", "invalid_payload", err.Error()
-		return result
-	}
+	payload, _ := integrationStartPayload(command.Payload)
 	call, status, err := a.startCallOperation(ctx, payload.To, payload.Country, command.CommandID)
 	result.Payload = call
 	if err == nil {
@@ -487,15 +516,21 @@ func (a *App) executeIntegrationStart(ctx context.Context, command integrationCo
 	return result
 }
 
-func (a *App) executeIntegrationHangup(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {
-	callID := strings.TrimSpace(command.CallID)
-	if callID == "" {
-		var payload struct {
-			CallID string `json:"call_id"`
-		}
-		_ = json.Unmarshal(command.Payload, &payload)
-		callID = strings.TrimSpace(payload.CallID)
+type integrationCallStartPayload struct {
+	To      string `json:"to"`
+	Country string `json:"country,omitempty"`
+}
+
+func integrationStartPayload(raw json.RawMessage) (integrationCallStartPayload, error) {
+	var payload integrationCallStartPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return integrationCallStartPayload{}, err
 	}
+	return payload, nil
+}
+
+func (a *App) executeIntegrationHangup(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+	callID := integrationHangupCallID(command)
 	call, found := a.store.GetCall(callID)
 	if !found {
 		result.Status, result.ErrorCode, result.Message = "rejected", "call_not_found", "call not found"
@@ -519,4 +554,18 @@ func (a *App) executeIntegrationHangup(ctx context.Context, command integrationC
 		result.Status, result.ErrorCode = "rejected", "call_hangup_rejected"
 	}
 	return result
+}
+
+func integrationHangupCallID(command integrationCommand) string {
+	callID := strings.TrimSpace(command.CallID)
+	if callID != "" {
+		return callID
+	}
+	var payload struct {
+		CallID string `json:"call_id"`
+	}
+	if err := json.Unmarshal(command.Payload, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.CallID)
 }

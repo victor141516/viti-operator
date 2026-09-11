@@ -194,7 +194,9 @@ recognizes `call.screen`, `call.media`, `call.hangup`, `call.dtmf`, and
 The server first sends `service.ready`. If `resume` names the current process
 generation and its gap remains in the 256-event buffer, retained events follow
 in sequence. Otherwise, the server sends `system.snapshot` containing current
-calls, messages, known clients, and connected services. Live events then use:
+calls, messages, known clients, connected services, contacts and their version,
+recording settings, SIM-auth assignment, IMS registration, and complete runtime
+status. Live events then use:
 
 ```json
 {

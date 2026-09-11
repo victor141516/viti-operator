@@ -904,9 +904,14 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 		return
 	}
 	if event == "participant_join_aborted" {
-		removed := a.callSessions.abortJoin(call, clientID, participantID, connectionID, channel, at)
-		if removed {
-			a.publishCallParticipantEvents("left", "disconnected", call, clientID, participantID, connectionID, channel, at)
+		transition := a.callSessions.abortJoinTransition(call, clientID, participantID, connectionID, channel, at)
+		if transition.logicalRemoved {
+			a.publishCallParticipantEvent("left", call, transition.participant.clientID, transition.participant.participantID, transition.participant.connectionID, at)
+		}
+		if transition.mediaDisconnected {
+			a.publishCallMediaEvent("disconnected", call, transition.participant.clientID, transition.participant.participantID, transition.participant.connectionID, channel, at)
+		}
+		if transition.endCarrier {
 			controller, ok := a.gateway.(ConferenceCallController)
 			if !ok {
 				writeError(w, http.StatusNotImplemented, "the telephony provider cannot end an abandoned conference")
@@ -926,7 +931,7 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 	}
 	if event == "participant_left" {
 		if a.callSessions.leftChannel(call, clientID, participantID, connectionID, channel, at) {
-			a.publishCallParticipantEvents("left", "disconnected", call, clientID, participantID, connectionID, channel, at)
+			a.publishCallMediaEvent("disconnected", call, clientID, participantID, connectionID, channel, at)
 		}
 		w.WriteHeader(http.StatusNoContent)
 		return
@@ -947,26 +952,39 @@ func (a *App) ingestCallParticipantEvent(w http.ResponseWriter, event, instance,
 				writeError(w, http.StatusBadGateway, err.Error())
 				return
 			}
-			a.callSessions.completeDrop(call, channelToDrop)
+			if dropped, publish := a.callSessions.completeDrop(call, channelToDrop); publish {
+				a.publishCallMediaEvent("disconnected", call, dropped.clientID, dropped.participantID, dropped.connectionID, channelToDrop, at)
+			}
 		}
 	}
 	if !joinResult.admitted {
 		writeError(w, http.StatusGone, "participant admission was rejected")
 		return
 	}
-	if joinResult.changed {
-		a.publishCallParticipantEvents("joined", "connected", call, clientID, participantID, connectionID, channel, at)
+	participant, logicalJoined, mediaConnected := a.callSessions.completeJoin(call, clientID, participantID, connectionID, channel)
+	if logicalJoined {
+		a.publishCallParticipantEvent("joined", call, participant.clientID, participant.participantID, participant.connectionID, at)
+	}
+	if mediaConnected {
+		a.publishCallMediaEvent("connected", call, participant.clientID, participant.participantID, participant.connectionID, channel, at)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (a *App) publishCallParticipantEvents(participantState, mediaState string, call Call, clientID, participantID, connectionID, channel string, at time.Time) {
+func (a *App) publishCallParticipantEvent(state string, call Call, clientID, participantID, connectionID string, at time.Time) {
+	payload := map[string]any{
+		"call_id": call.ID, "trace_id": call.TraceID, "client_id": clientID,
+		"participant_id": participantID, "connection_id": connectionID, "occurred_at": at,
+	}
+	a.events.Publish("call.participant."+state, payload)
+}
+
+func (a *App) publishCallMediaEvent(state string, call Call, clientID, participantID, connectionID, channel string, at time.Time) {
 	payload := map[string]any{
 		"call_id": call.ID, "trace_id": call.TraceID, "client_id": clientID,
 		"participant_id": participantID, "connection_id": connectionID, "channel": channel, "occurred_at": at,
 	}
-	a.events.Publish("call.participant."+participantState, payload)
-	a.events.Publish("call.media."+mediaState, payload)
+	a.events.Publish("call.media."+state, payload)
 }
 
 func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
@@ -1016,6 +1034,9 @@ func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if operation.logicalAnnounced && a.callSessions.markLogicalLeavePublished(operation.operationID) {
+		a.publishCallParticipantEvent("left", call, operation.clientID, operation.participantID, operation.matchedConnectionID, time.Now().UTC())
+	}
 	if !operation.completed {
 		controller, ok := a.gateway.(ConferenceCallController)
 		if !ok {
@@ -1034,7 +1055,9 @@ func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadGateway, err.Error())
 			return
 		}
-		a.callSessions.completeLeave(operation.operationID)
+		if a.callSessions.completeLeave(operation.operationID) && operation.mediaAnnounced && operation.channel != "" {
+			a.publishCallMediaEvent("disconnected", call, operation.clientID, operation.participantID, operation.matchedConnectionID, operation.channel, time.Now().UTC())
+		}
 	}
 	a.diag.RecordTrace("manager.call", "participant.leave.completed", call.TraceID, map[string]any{"operation_id": operation.operationID, "connection_id": operation.connectionID, "end_carrier": operation.endCarrier})
 	writeJSON(w, http.StatusOK, map[string]any{"operation_id": operation.operationID, "carrier_ended": operation.endCarrier})

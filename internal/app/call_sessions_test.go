@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -581,6 +582,81 @@ func TestParticipantControlAPISeparatesOutageFromExplicitLeave(t *testing.T) {
 	if len(gateway.conferences) != 1 || gateway.conferences[0] != call.EngineCallID {
 		t.Fatalf("conference endings = %#v", gateway.conferences)
 	}
+}
+
+func TestParticipantAndMediaLifecycleEventsAreIndependent(t *testing.T) {
+	application, err := New(Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory"},
+		SIMAuth: SIMAuthConfig{Type: "disabled"}, Voice: VoiceConfig{EngineEventToken: "engine-secret"},
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	application.gateway = &conferenceControlFixture{MemoryGateway: MemoryGateway{}}
+	call := sessionTestCall()
+	call.StartedAt, call.UpdatedAt = time.Now().UTC(), time.Now().UTC()
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+	_, sequence := application.events.StreamState()
+	now := time.Now().UTC()
+
+	participantEvent := func(event, client, connection, channel string, offset time.Duration) {
+		postEngineEvent(t, server.URL, "engine-secret", map[string]any{
+			"instance": call.Instance, "event": event, "call_id": call.EngineCallID, "trace_id": call.TraceID,
+			"recorded_at_ns": now.Add(offset).UnixNano(),
+			"args":           []string{client, client, connection, channel},
+		}, http.StatusNoContent)
+	}
+	assertEvents := func(want ...string) {
+		t.Helper()
+		application.events.mu.Lock()
+		events := application.events.afterLocked(sequence)
+		application.events.mu.Unlock()
+		got := make([]string, len(events))
+		for index, event := range events {
+			got[index] = event.Type
+			sequence = event.Sequence
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("lifecycle events = %v, want %v", got, want)
+		}
+	}
+
+	participantEvent("participant_joined", "web-a", "leg-1", "PJSIP/1", time.Second)
+	assertEvents("call.participant.joined", "call.media.connected")
+
+	participantEvent("participant_joined", "web-a", "leg-2", "PJSIP/2", 2*time.Second)
+	assertEvents("call.media.disconnected", "call.media.connected")
+	participantEvent("participant_left", "web-a", "leg-1", "PJSIP/1", 3*time.Second)
+	assertEvents()
+
+	participantEvent("participant_left", "web-a", "leg-2", "PJSIP/2", 4*time.Second)
+	assertEvents("call.media.disconnected")
+	participantEvent("participant_joined", "web-a", "leg-3", "PJSIP/3", 5*time.Second)
+	assertEvents("call.media.connected")
+
+	participantEvent("participant_joined", "bot-b", "leg-b", "PJSIP/b", 6*time.Second)
+	assertEvents("call.participant.joined", "call.media.connected")
+	participantEvent("participant_join_aborted", "bot-b", "leg-b", "PJSIP/b", 7*time.Second)
+	assertEvents("call.participant.left", "call.media.disconnected")
+	participantEvent("participant_join_aborted", "bot-b", "leg-b", "PJSIP/b", 7*time.Second)
+	assertEvents()
+
+	body, _ := json.Marshal(map[string]string{
+		"trace_id": call.TraceID, "client_id": "web-a", "connection_id": "leg-3", "operation_id": "leave-a",
+	})
+	response, err := http.Post(server.URL+"/api/v1/calls/participants/leave", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("leave status = %d", response.StatusCode)
+	}
+	assertEvents("call.participant.left", "call.media.disconnected")
 }
 
 func TestParticipantLeaveRetryRepeatsTheSameExternalAction(t *testing.T) {

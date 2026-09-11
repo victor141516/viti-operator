@@ -29,6 +29,12 @@ func TestIntegrationReceivesSnapshotAndBroadcastEvents(t *testing.T) {
 	if snapshot["stream_id"] != streamID {
 		t.Fatalf("snapshot stream_id = %#v, want %q", snapshot["stream_id"], streamID)
 	}
+	payload := snapshot["payload"].(map[string]any)
+	for _, field := range []string{"calls", "messages", "known_clients", "services", "contacts", "recording", "sim_auth_assignment", "ims_registration", "runtime_status"} {
+		if _, found := payload[field]; !found {
+			t.Fatalf("snapshot omitted %s: %#v", field, payload)
+		}
+	}
 	connected := readIntegrationType(t, socket, "service.connected")
 	assertEventEnvelope(t, connected, streamID)
 
@@ -93,11 +99,25 @@ func TestIntegrationCommandsEnforceCapabilitiesAndIdempotency(t *testing.T) {
 
 	controller := dialIntegration(t, server, integrationHello{
 		Type: "service.hello", Version: 1, Name: "controller",
-		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`), "call.hangup": json.RawMessage(`{}`)},
+		Capabilities: map[string]json.RawMessage{
+			"call.start": json.RawMessage(`{}`), "call.hangup": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`),
+		},
 	})
 	readIntegrationType(t, controller, "service.ready")
 	readIntegrationType(t, controller, "system.snapshot")
 	readIntegrationType(t, controller, "service.connected")
+	writeIntegrationCommand(t, controller, integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "invalid-start", Payload: json.RawMessage(`{"to":12}`),
+	})
+	invalid := readNextCommandResult(t, controller, "invalid-start")
+	if invalid["status"] != "rejected" || invalid["error_code"] != "invalid_payload" {
+		t.Fatalf("invalid command result = %#v", invalid)
+	}
+	writeIntegrationCommand(t, controller, integrationCommand{Type: "call.media", Version: 1, CommandID: "unsupported-media", Payload: json.RawMessage(`{}`)})
+	unsupported := readNextCommandResult(t, controller, "unsupported-media")
+	if unsupported["status"] != "rejected" || unsupported["error_code"] != "unsupported_command" {
+		t.Fatalf("unsupported command result = %#v", unsupported)
+	}
 	start := integrationCommand{
 		Type: "call.start", Version: 1, CommandID: "start-1", Payload: json.RawMessage(`{"to":"+12025550123"}`),
 	}
@@ -163,7 +183,8 @@ func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {
 	defer cancel()
 	call := Call{ID: "call-1", TraceID: "trace-1"}
 	now := time.Now().UTC()
-	application.publishCallParticipantEvents("joined", "connected", call, "phone-1", "participant-1", "connection-1", "PJSIP/1", now)
+	application.publishCallParticipantEvent("joined", call, "phone-1", "participant-1", "connection-1", now)
+	application.publishCallMediaEvent("connected", call, "phone-1", "participant-1", "connection-1", "PJSIP/1", now)
 
 	logical := <-events
 	transport := <-events
@@ -237,6 +258,18 @@ func readCommandResult(t *testing.T, socket *websocket.Conn, commandID, status s
 		}
 	}
 	t.Fatalf("did not receive %s result for %q", status, commandID)
+	return nil
+}
+
+func readNextCommandResult(t *testing.T, socket *websocket.Conn, commandID string) map[string]any {
+	t.Helper()
+	for attempts := 0; attempts < 30; attempts++ {
+		message := readIntegrationMessage(t, socket)
+		if message["type"] == "command.result" && message["command_id"] == commandID {
+			return message
+		}
+	}
+	t.Fatalf("did not receive a result for %q", commandID)
 	return nil
 }
 
