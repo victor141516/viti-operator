@@ -243,7 +243,6 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 		Payload: json.RawMessage(`{"session_id":"media-test","digit":"#","duration_ms":300}`),
 	})
 	readCommandResult(t, socket, "dtmf-1", "accepted")
-	readIntegrationType(t, socket, "call.dtmf")
 	readCommandResult(t, socket, "dtmf-1", "completed")
 
 	media.mu.Lock()
@@ -269,12 +268,74 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 	}
 }
 
+func TestIntegrationServiceCallPreparesMediaBeforeDialActivation(t *testing.T) {
+	application, server := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{}
+	application.serviceMedia = media
+	socket := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "dialer",
+		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`)},
+	})
+	defer socket.Close()
+	readIntegrationType(t, socket, "service.ready")
+	readIntegrationType(t, socket, "system.snapshot")
+	readIntegrationType(t, socket, "service.connected")
+	writeIntegrationCommand(t, socket, integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "service-start", Payload: json.RawMessage(`{"to":"+12025550123","sdp_offer":"v=0\\r\\n"}`),
+	})
+	readCommandResult(t, socket, "service-start", "accepted")
+	created := readIntegrationType(t, socket, "media.session.created")
+	completed := readCommandResult(t, socket, "service-start", "completed")
+	call := commandResultCall(t, completed)
+	if created["call_id"] != call.ID || created["purpose"] != "originator" || call.EngineCallID != call.ID {
+		t.Fatalf("created=%#v call=%#v", created, call)
+	}
+	media.mu.Lock()
+	defer media.mu.Unlock()
+	if media.attach.ServiceName != "dialer" || media.attach.Call.ID != call.ID || media.attach.Purpose != "originator" || media.activatedDestination != call.Peer {
+		t.Fatalf("outgoing media preparation=%#v destination=%q", media.attach, media.activatedDestination)
+	}
+}
+
+func TestEngineDTMFPublishesResolvedServiceSource(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	media := &fakeServiceMediaController{resolvedSession: "media-source", resolvedService: "transcriber"}
+	application.serviceMedia = media
+	now := time.Now().UTC()
+	call := Call{
+		ID: "call-dtmf", TraceID: "trace-dtmf", EngineCallID: "engine-dtmf", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: now, UpdatedAt: now,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	streamID, sequence := application.events.StreamState()
+	_, events, cancel := application.events.Subscribe(streamID, sequence)
+	defer cancel()
+	recorder := httptest.NewRecorder()
+	application.ingestEngineDTMF(recorder, call.Instance, call.EngineCallID, []string{
+		"UnicastRTP/manager-0001", "media-source", "#", "240",
+	})
+	if recorder.Code != 204 {
+		t.Fatalf("DTMF ingest status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	event := <-events
+	payload := event.Payload.(map[string]any)
+	if event.Type != "call.dtmf" || event.CallID != call.ID || payload["source_type"] != "service" ||
+		payload["source_name"] != "transcriber" || payload["digit"] != "#" {
+		t.Fatalf("DTMF event = %#v", event)
+	}
+}
+
 type fakeServiceMediaController struct {
-	mu               sync.Mutex
-	attach           serviceMediaAttachRequest
-	ice              serviceMediaICERequest
-	dtmf             serviceMediaDTMFRequest
-	closedConnection string
+	mu                   sync.Mutex
+	attach               serviceMediaAttachRequest
+	ice                  serviceMediaICERequest
+	dtmf                 serviceMediaDTMFRequest
+	closedConnection     string
+	activatedDestination string
+	resolvedSession      string
+	resolvedService      string
 }
 
 func (f *fakeServiceMediaController) Attach(_ context.Context, request serviceMediaAttachRequest) (serviceMediaDescription, error) {
@@ -282,6 +343,21 @@ func (f *fakeServiceMediaController) Attach(_ context.Context, request serviceMe
 	f.attach = request
 	f.mu.Unlock()
 	return serviceMediaDescription{SessionID: "media-test", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: request.Purpose}, nil
+}
+
+func (f *fakeServiceMediaController) PrepareOutgoing(_ context.Context, request serviceMediaAttachRequest) (serviceMediaOutgoingPreparation, error) {
+	f.mu.Lock()
+	f.attach = request
+	f.mu.Unlock()
+	return serviceMediaOutgoingPreparation{
+		Description: serviceMediaDescription{SessionID: "media-outgoing", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: "originator"},
+		Activate: func(_ context.Context, destination string) error {
+			f.mu.Lock()
+			f.activatedDestination = destination
+			f.mu.Unlock()
+			return nil
+		},
+	}, nil
 }
 
 func (f *fakeServiceMediaController) AddICECandidate(_ context.Context, request serviceMediaICERequest) error {
@@ -305,6 +381,12 @@ func (f *fakeServiceMediaController) CloseConnection(connectionID, _ string) {
 }
 
 func (*fakeServiceMediaController) CloseCall(string, string) {}
+
+func (f *fakeServiceMediaController) SourceForEngineSession(sessionID, _ string) (string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.resolvedService, sessionID == f.resolvedSession && f.resolvedService != ""
+}
 
 func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)

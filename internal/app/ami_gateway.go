@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,8 +17,10 @@ import (
 // in Go makes the manager image portable and avoids placing SMS text or AKA
 // material in process arguments.
 type AMIGateway struct {
-	cfg  AMIConfig
-	diag *DiagnosticRecorder
+	cfg           AMIConfig
+	diag          *DiagnosticRecorder
+	mediaMu       sync.Mutex
+	mediaChannels map[string]string
 }
 
 func (g *AMIGateway) SetDiagnostics(diagnostics *DiagnosticRecorder) {
@@ -34,7 +37,7 @@ func NewAMIGateway(cfg AMIConfig) (*AMIGateway, error) {
 	if strings.TrimSpace(cfg.Realm) == "" {
 		return nil, errors.New("asterisk_ami requires realm")
 	}
-	return &AMIGateway{cfg: cfg}, nil
+	return &AMIGateway{cfg: cfg, mediaChannels: make(map[string]string)}, nil
 }
 
 func (g *AMIGateway) Status(ctx context.Context) (RuntimeStatus, error) {
@@ -112,6 +115,17 @@ func (g *AMIGateway) DropConferenceLeg(ctx context.Context, channel string) erro
 }
 
 func (g *AMIGateway) JoinServiceMedia(ctx context.Context, request serviceMediaBridgeRequest) error {
+	return g.originateServiceMedia(ctx, request, "viti-service-conference", "s")
+}
+
+func (g *AMIGateway) StartServiceCall(ctx context.Context, request serviceMediaBridgeRequest, destination string) error {
+	if !e164Pattern.MatchString(destination) {
+		return errors.New("service call destination must use E.164")
+	}
+	return g.originateServiceMedia(ctx, request, "from-local", destination)
+}
+
+func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceMediaBridgeRequest, dialplanContext, extension string) error {
 	if request.EngineCallID == "" {
 		return errors.New("call does not have an active Asterisk conference")
 	}
@@ -132,17 +146,17 @@ func (g *AMIGateway) JoinServiceMedia(ctx context.Context, request serviceMediaB
 		"VITI_RECORDING_FILE_ID=" + request.SessionID,
 		"VITI_PARTICIPANT_ROLE=service",
 	}, ",")
-	response, err := g.action(ctx, map[string]string{
+	channel, err := g.originateAndAwaitChannel(ctx, map[string]string{
 		"Action": "Originate", "Channel": "UnicastRTP/" + net.JoinHostPort(request.RTPHost, strconv.Itoa(request.RTPPort)) + "/c(opus)",
-		"Context": "viti-service-conference", "Exten": "s", "Priority": "1", "Timeout": "5000",
-		"Async": "false", "Codecs": "opus", "ChannelId": request.SessionID, "Variable": variables,
+		"Context": dialplanContext, "Exten": extension, "Priority": "1", "Timeout": "5000",
+		"Async": "true", "Codecs": "opus", "ChannelId": request.SessionID, "Variable": variables,
 	})
 	if err != nil {
 		return err
 	}
-	if first(response, "Response") != "Success" {
-		return fmt.Errorf("Asterisk rejected service media bridge: %s", first(response, "Message"))
-	}
+	g.mediaMu.Lock()
+	g.mediaChannels[request.SessionID] = channel
+	g.mediaMu.Unlock()
 	return nil
 }
 
@@ -150,8 +164,12 @@ func (g *AMIGateway) LeaveServiceMedia(ctx context.Context, sessionID string) er
 	if !validCallControlID(sessionID) {
 		return errors.New("invalid service media session ID")
 	}
+	channel, ok := g.serviceMediaChannel(sessionID)
+	if !ok {
+		return nil
+	}
 	response, err := g.action(ctx, map[string]string{
-		"Action": "Hangup", "Channel": sessionID, "Cause": "16",
+		"Action": "Hangup", "Channel": channel, "Cause": "16",
 	})
 	if err != nil {
 		return err
@@ -163,6 +181,9 @@ func (g *AMIGateway) LeaveServiceMedia(ctx context.Context, sessionID string) er
 		}
 		return fmt.Errorf("Asterisk rejected service media hangup: %s", message)
 	}
+	g.mediaMu.Lock()
+	delete(g.mediaChannels, sessionID)
+	g.mediaMu.Unlock()
 	return nil
 }
 
@@ -170,8 +191,12 @@ func (g *AMIGateway) SendServiceDTMF(ctx context.Context, sessionID, digit strin
 	if !validCallControlID(sessionID) || len(digit) != 1 || !strings.Contains("0123456789*#ABCD", digit) {
 		return errors.New("invalid service DTMF request")
 	}
+	channel, ok := g.serviceMediaChannel(sessionID)
+	if !ok {
+		return errors.New("service media channel is not active")
+	}
 	response, err := g.action(ctx, map[string]string{
-		"Action": "PlayDTMF", "Channel": sessionID, "Digit": digit,
+		"Action": "PlayDTMF", "Channel": channel, "Digit": digit,
 		"Duration": strconv.Itoa(durationMS), "Receive": "true",
 	})
 	if err != nil {
@@ -181,6 +206,13 @@ func (g *AMIGateway) SendServiceDTMF(ctx context.Context, sessionID, digit strin
 		return fmt.Errorf("Asterisk rejected service DTMF: %s", first(response, "Message"))
 	}
 	return nil
+}
+
+func (g *AMIGateway) serviceMediaChannel(sessionID string) (string, bool) {
+	g.mediaMu.Lock()
+	defer g.mediaMu.Unlock()
+	channel, ok := g.mediaChannels[sessionID]
+	return channel, ok
 }
 
 func (g *AMIGateway) EndConference(ctx context.Context, conference string) error {
@@ -272,8 +304,64 @@ func (g *AMIGateway) action(ctx context.Context, fields map[string]string) (map[
 	return response, err
 }
 
+func (g *AMIGateway) originateAndAwaitChannel(ctx context.Context, fields map[string]string) (string, error) {
+	started := time.Now()
+	actionID := fmt.Sprintf("ami-originate-%d", started.UnixNano())
+	fields["ActionID"] = actionID
+	g.diag.RecordEvent("manager.ami", "originate.started", map[string]any{"action_id": actionID, "address": g.cfg.Address, "fields": fields})
+	dialer := net.Dialer{Timeout: 5 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", g.cfg.Address)
+	if err != nil {
+		return "", fmt.Errorf("connect Asterisk AMI: %w", err)
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	reader := bufio.NewReader(conn)
+	if _, err := reader.ReadString('\n'); err != nil {
+		return "", fmt.Errorf("read Asterisk AMI banner: %w", err)
+	}
+	login, err := writeAMIAction(conn, reader, map[string]string{
+		"Action": "Login", "Username": g.cfg.Username, "Secret": g.cfg.Secret, "Events": "on",
+	})
+	if err != nil {
+		return "", err
+	}
+	if first(login, "Response") != "Success" {
+		return "", errors.New("Asterisk AMI login failed")
+	}
+	response, err := writeAMIAction(conn, reader, fields)
+	if err != nil {
+		return "", err
+	}
+	if first(response, "Response") != "Success" {
+		return "", fmt.Errorf("Asterisk rejected service media bridge: %s", first(response, "Message"))
+	}
+	for {
+		event, err := readAMIFrame(reader)
+		if err != nil {
+			return "", fmt.Errorf("await Asterisk service media channel: %w", err)
+		}
+		if first(event, "Event") != "OriginateResponse" || first(event, "ActionID") != actionID {
+			continue
+		}
+		if first(event, "Response") != "Success" {
+			return "", fmt.Errorf("Asterisk failed to originate service media: %s", first(event, "Reason"))
+		}
+		channel := strings.TrimSpace(first(event, "Channel"))
+		if channel == "" {
+			return "", errors.New("Asterisk did not report the service media channel")
+		}
+		g.diag.RecordEvent("manager.ami", "originate.completed", map[string]any{
+			"action_id": actionID, "duration_ns": time.Since(started).Nanoseconds(), "channel": channel,
+		})
+		return channel, nil
+	}
+}
+
 func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]string) (map[string][]string, error) {
-	for _, key := range []string{"Action", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
+	for _, key := range []string{"Action", "ActionID", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
 		value, ok := fields[key]
 		if !ok {
 			continue

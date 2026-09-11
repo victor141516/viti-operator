@@ -76,6 +76,27 @@ class HTTPAKAProviderTest(unittest.TestCase):
             self.module.forward_sms_protocol_event(SimpleNamespace(Phase="bogus"))
         enqueue.assert_not_called()
 
+    def test_received_dtmf_is_forwarded_with_source_identity(self):
+        event = SimpleNamespace(
+            Direction="Received", Linkedid="call-42", Channel="UnicastRTP/manager-0001",
+            Uniqueid="media-42", Digit="#", DurationMs=240,
+        )
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
+            self.module.forward_dtmf_event(event)
+        enqueue.assert_called_once_with(
+            "dtmf", ["UnicastRTP/manager-0001", "media-42", "#", "240"],
+            extra={"call_id": "call-42"},
+        )
+
+    def test_sent_dtmf_is_not_rebroadcast_as_a_new_source_event(self):
+        event = SimpleNamespace(
+            Direction="Sent", Linkedid="call-42", Channel="PJSIP/client-0001",
+            Uniqueid="client-42", Digit="5", DurationMs=240,
+        )
+        with mock.patch.object(self.module.event_outbox, "enqueue_event") as enqueue:
+            self.module.forward_dtmf_event(event)
+        enqueue.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

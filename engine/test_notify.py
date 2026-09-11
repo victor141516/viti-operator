@@ -133,6 +133,19 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("VITI_PARTICIPANT_ROLE", recording_context)
         self.assertIn("?service:client", recording_context)
 
+    def test_service_originated_call_preserves_manager_media_identity(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        public_call = template[template.index("exten => _[+0-9].,1"):template.index("; Report the outcome", template.index("exten => _[+0-9].,1"))]
+
+        self.assertIn('${VITI_CALL_ID}" = ""]?Set(VITI_CALL_ID=${CHANNEL(linkedid)})', public_call)
+        self.assertIn('${VITI_TRACE_ID}" = ""]?Set(VITI_TRACE_ID=${PJSIP_HEADER', public_call)
+        self.assertIn('${VITI_CLIENT_ID}" = ""]?Set(__VITI_CLIENT_ID=', public_call)
+        self.assertIn('${VITI_PARTICIPANT_ID}" = ""]?Set(__VITI_PARTICIPANT_ID=', public_call)
+
     def test_participant_event_keeps_call_and_trace_identity(self):
         response = mock.Mock(status_code=204, text="")
         with mock.patch.dict(os.environ, {}, clear=True), \

@@ -464,7 +464,7 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		a.integrations.callMu.Lock()
 		defer a.integrations.callMu.Unlock()
 	}
-	result := a.executeIntegrationCommand(ctx, connection, command, base)
+	result := a.executeIntegrationCommand(ctx, connection, command, base, results)
 	a.integrations.finishCommand(connection.name, result)
 	if result.Status == "completed" && command.Type == "media.attach" {
 		created := map[string]any{"type": "media.session.created", "version": integrationProtocolVersion}
@@ -587,10 +587,31 @@ func writeAcceptedIntegrationResult(ctx context.Context, results chan<- integrat
 	}
 }
 
-func (a *App) executeIntegrationCommand(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+func writeIntegrationValue(ctx context.Context, results chan<- integrationDelivery, value any) bool {
+	written := make(chan bool, 1)
+	timer := time.NewTimer(integrationWriteTimeout)
+	defer timer.Stop()
+	select {
+	case results <- integrationDelivery{value: value, written: written}:
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+	select {
+	case ok := <-written:
+		return ok
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
+}
+
+func (a *App) executeIntegrationCommand(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult, results chan<- integrationDelivery) integrationCommandResult {
 	switch command.Type {
 	case "call.start":
-		return a.executeIntegrationStart(ctx, command, result)
+		return a.executeIntegrationStart(ctx, connection, command, result, results)
 	case "call.hangup":
 		return a.executeIntegrationHangup(ctx, command, result)
 	case "media.attach":
@@ -678,16 +699,60 @@ func (a *App) executeIntegrationDTMF(ctx context.Context, connection *integratio
 		result.Status, result.ErrorCode, result.Message = "rejected", "dtmf_failed", err.Error()
 		return result
 	}
-	a.events.Publish("call.dtmf", map[string]any{
-		"call_id": strings.TrimSpace(command.CallID), "source_type": "service", "source_name": connection.name,
-		"session_id": strings.TrimSpace(payload.SessionID), "digit": digit, "duration_ms": duration,
-	})
 	result.Status = "completed"
 	return result
 }
 
-func (a *App) executeIntegrationStart(ctx context.Context, command integrationCommand, result integrationCommandResult) integrationCommandResult {
+func (a *App) executeIntegrationStart(ctx context.Context, connection *integrationConnection, command integrationCommand, result integrationCommandResult, results chan<- integrationDelivery) integrationCommandResult {
 	payload, _ := integrationStartPayload(command.Payload)
+	if a.serviceMedia != nil {
+		if strings.TrimSpace(payload.OfferSDP) == "" {
+			result.Status, result.ErrorCode, result.Message = "rejected", "invalid_payload", "sdp_offer is required when service media is enabled"
+			return result
+		}
+		call, status, err := a.prepareOutgoingCall(ctx, payload.To, payload.Country, command.CommandID, true)
+		result.Payload = call
+		if err != nil {
+			result.Message = err.Error()
+			if status >= http.StatusInternalServerError {
+				result.Status, result.ErrorCode = "failed", "call_start_failed"
+			} else {
+				result.Status, result.ErrorCode = "rejected", "call_start_rejected"
+			}
+			return result
+		}
+		preparation, err := a.serviceMedia.PrepareOutgoing(ctx, serviceMediaAttachRequest{
+			ServiceName: connection.name, ConnectionID: connection.id, Call: call, OfferSDP: payload.OfferSDP, Purpose: "originator",
+		})
+		if err != nil {
+			failed, _, failure := a.failOutgoingCallStart(call, err)
+			result.Payload, result.Status, result.ErrorCode, result.Message = failed, "failed", "media_prepare_failed", failure.Error()
+			return result
+		}
+		created := map[string]any{
+			"type": "media.session.created", "version": integrationProtocolVersion,
+			"session_id": preparation.Description.SessionID, "call_id": preparation.Description.CallID,
+			"sdp_answer": preparation.Description.AnswerSDP, "purpose": preparation.Description.Purpose,
+		}
+		if !writeIntegrationValue(ctx, results, created) {
+			a.serviceMedia.CloseCall(call.ID, "control_delivery_failed")
+			failed, _, failure := a.failOutgoingCallStart(call, errors.New("could not deliver media session answer"))
+			result.Payload, result.Status, result.ErrorCode, result.Message = failed, "failed", "media_answer_delivery_failed", failure.Error()
+			return result
+		}
+		activateCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		err = preparation.Activate(activateCtx, call.Peer)
+		cancel()
+		if err != nil {
+			a.serviceMedia.CloseCall(call.ID, "call_start_failed")
+			failed, _, failure := a.failOutgoingCallStart(call, err)
+			result.Payload, result.Status, result.ErrorCode, result.Message = failed, "failed", "call_start_failed", failure.Error()
+			return result
+		}
+		a.diag.RecordTrace("manager.call", "service.start.completed", call.TraceID, map[string]any{"call": call, "service": connection.name})
+		result.Status, result.Payload = "completed", call
+		return result
+	}
 	call, status, err := a.startCallOperation(ctx, payload.To, payload.Country, command.CommandID)
 	result.Payload = call
 	if err == nil {
@@ -704,8 +769,9 @@ func (a *App) executeIntegrationStart(ctx context.Context, command integrationCo
 }
 
 type integrationCallStartPayload struct {
-	To      string `json:"to"`
-	Country string `json:"country,omitempty"`
+	To       string `json:"to"`
+	Country  string `json:"country,omitempty"`
+	OfferSDP string `json:"sdp_offer,omitempty"`
 }
 
 func integrationStartPayload(raw json.RawMessage) (integrationCallStartPayload, error) {

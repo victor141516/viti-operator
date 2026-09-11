@@ -301,6 +301,10 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		a.ingestCallParticipantEvent(w, request.Event, request.Instance, request.CallID, request.Args, eventAt)
 		return
 	}
+	if request.Event == "dtmf" {
+		a.ingestEngineDTMF(w, request.Instance, request.CallID, request.Args)
+		return
+	}
 	if request.Event == "sms_protocol" {
 		a.ingestSMSProtocolEvent(w, request.Instance, request.Args, request.RecordedAtNS)
 		return
@@ -792,6 +796,20 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) startCallOperation(ctx context.Context, to, country, traceID string) (Call, int, error) {
+	call, status, err := a.prepareOutgoingCall(ctx, to, country, traceID, false)
+	if err != nil {
+		return call, status, err
+	}
+	gatewayCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := a.gateway.StartCall(gatewayCtx, call.ID, call.Peer); err != nil {
+		return a.failOutgoingCallStart(call, err)
+	}
+	a.diag.RecordTrace("manager.call", "gateway.start.completed", call.TraceID, call)
+	return call, http.StatusCreated, nil
+}
+
+func (a *App) prepareOutgoingCall(ctx context.Context, to, country, traceID string, managerOwnsEngineID bool) (Call, int, error) {
 	destination, err := normalizeDialDestination(to, country)
 	if err != nil {
 		return Call{}, http.StatusBadRequest, err
@@ -816,24 +834,31 @@ func (a *App) startCallOperation(ctx context.Context, to, country, traceID strin
 	if traceID == "" {
 		traceID = id
 	}
-	call := Call{ID: id, TraceID: traceID, Direction: DirectionOutgoing, Peer: destination, State: "dialing", StartedAt: now, UpdatedAt: now}
+	engineCallID := ""
+	if managerOwnsEngineID {
+		engineCallID = id
+	}
+	call := Call{ID: id, TraceID: traceID, EngineCallID: engineCallID, Direction: DirectionOutgoing, Peer: destination, State: "dialing", StartedAt: now, UpdatedAt: now}
 	a.diag.RecordTrace("manager.call", "api.start.accepted", traceID, call)
 	if err := a.store.SaveCall(call); err != nil {
 		return Call{}, http.StatusInternalServerError, errors.New("could not persist call")
 	}
 	a.events.Publish("call.updated", call)
-	gatewayCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
-	if err := a.gateway.StartCall(gatewayCtx, call.ID, call.Peer); err != nil {
-		a.diag.RecordTrace("manager.call", "gateway.start.failed", traceID, map[string]any{"call": call, "error": err.Error()})
-		call.State = "failed"
-		call.UpdatedAt = time.Now().UTC()
-		_ = a.store.SaveCall(call)
-		a.events.Publish("call.updated", call)
-		return call, http.StatusBadGateway, err
-	}
-	a.diag.RecordTrace("manager.call", "gateway.start.completed", traceID, call)
 	return call, http.StatusCreated, nil
+}
+
+func (a *App) failOutgoingCallStart(call Call, failure error) (Call, int, error) {
+	a.diag.RecordTrace("manager.call", "gateway.start.failed", call.TraceID, map[string]any{"call": call, "error": failure.Error()})
+	now := time.Now().UTC()
+	call.State = "failed"
+	call.UpdatedAt = now
+	call.EndedAt = &now
+	_ = a.store.SaveCall(call)
+	a.events.Publish("call.updated", call)
+	if a.serviceMedia != nil {
+		a.serviceMedia.CloseCall(call.ID, "call_start_failed")
+	}
+	return call, http.StatusBadGateway, failure
 }
 
 func (a *App) normalizeCallDestination(w http.ResponseWriter, r *http.Request) {
@@ -1003,6 +1028,50 @@ func (a *App) publishCallMediaEvent(state string, call Call, clientID, participa
 		"participant_id": participantID, "connection_id": connectionID, "channel": channel, "occurred_at": at,
 	}
 	a.events.Publish("call.media."+state, payload)
+}
+
+func (a *App) ingestEngineDTMF(w http.ResponseWriter, instance, engineCallID string, args []string) {
+	if instance == "" || engineCallID == "" || len(args) < 4 {
+		writeError(w, http.StatusBadRequest, "DTMF events require channel, unique ID, digit, and duration")
+		return
+	}
+	call, found := a.store.GetCallByEngineID(instance, engineCallID)
+	if !found || call.EndedAt != nil {
+		writeError(w, http.StatusConflict, "active call is not available")
+		return
+	}
+	channel := strings.TrimSpace(args[0])
+	uniqueID := strings.TrimSpace(args[1])
+	digit := strings.ToUpper(strings.TrimSpace(args[2]))
+	duration, err := strconv.Atoi(strings.TrimSpace(args[3]))
+	if channel == "" || uniqueID == "" || len(digit) != 1 || !strings.Contains("0123456789*#ABCD", digit) || err != nil || duration < 0 || duration > 6000 {
+		writeError(w, http.StatusBadRequest, "invalid DTMF event")
+		return
+	}
+	payload := map[string]any{
+		"call_id": call.ID, "trace_id": call.TraceID, "digit": digit, "duration_ms": duration,
+		"source_type": "unknown", "source_channel": channel, "source_unique_id": uniqueID,
+	}
+	if resolver, ok := a.serviceMedia.(interface {
+		SourceForEngineSession(string, string) (string, bool)
+	}); ok {
+		if serviceName, resolved := resolver.SourceForEngineSession(uniqueID, call.ID); resolved {
+			payload["source_type"] = "service"
+			payload["source_name"] = serviceName
+		}
+	}
+	if payload["source_type"] == "unknown" {
+		if participant, resolved := a.callSessions.participantByChannel(call, channel); resolved {
+			payload["source_type"] = "client"
+			payload["source_name"] = participant.clientID
+			payload["participant_id"] = participant.participantID
+		} else if strings.Contains(strings.ToLower(channel), "volte_ims") {
+			payload["source_type"] = "carrier"
+			payload["source_name"] = "remote"
+		}
+	}
+	a.events.Publish("call.dtmf", payload)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (a *App) leaveCallParticipant(w http.ResponseWriter, r *http.Request) {

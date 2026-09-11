@@ -17,8 +17,6 @@ import (
 	"github.com/pion/webrtc/v4"
 )
 
-const asteriskOpusPayloadType = 107
-
 type serviceMediaManager struct {
 	mu         sync.Mutex
 	cfg        ServiceMediaConfig
@@ -44,9 +42,17 @@ type serviceMediaSession struct {
 	localTrack     *webrtc.TrackLocalStaticRTP
 	remoteMu       sync.RWMutex
 	asteriskAddr   *net.UDPAddr
+	asteriskPT     uint8
 	closeOnce      sync.Once
 	stateMu        sync.Mutex
 	mediaConnected bool
+	connectedOnce  sync.Once
+	connected      chan struct{}
+	terminated     chan struct{}
+	bridgeMu       sync.Mutex
+	bridged        bool
+	closed         bool
+	activated      bool
 }
 
 func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger) (*serviceMediaManager, error) {
@@ -112,21 +118,40 @@ func serviceMediaOwnerKey(serviceName, callID string) string {
 }
 
 func (m *serviceMediaManager) Attach(ctx context.Context, request serviceMediaAttachRequest) (serviceMediaDescription, error) {
+	_, description, err := m.prepareSession(ctx, request, true)
+	return description, err
+}
+
+func (m *serviceMediaManager) PrepareOutgoing(ctx context.Context, request serviceMediaAttachRequest) (serviceMediaOutgoingPreparation, error) {
+	request.Purpose = "originator"
+	session, description, err := m.prepareSession(ctx, request, false)
+	if err != nil {
+		return serviceMediaOutgoingPreparation{}, err
+	}
+	return serviceMediaOutgoingPreparation{
+		Description: description,
+		Activate: func(activateCtx context.Context, destination string) error {
+			return session.activateOutgoing(activateCtx, destination)
+		},
+	}, nil
+}
+
+func (m *serviceMediaManager) prepareSession(ctx context.Context, request serviceMediaAttachRequest, joinExisting bool) (*serviceMediaSession, serviceMediaDescription, error) {
 	if request.ServiceName == "" || request.ConnectionID == "" || request.Call.ID == "" {
-		return serviceMediaDescription{}, errors.New("service, connection, and call are required")
+		return nil, serviceMediaDescription{}, errors.New("service, connection, and call are required")
 	}
 	sessionID, err := randomID("media")
 	if err != nil {
-		return serviceMediaDescription{}, errors.New("could not allocate media session")
+		return nil, serviceMediaDescription{}, errors.New("could not allocate media session")
 	}
 	rtpSocket, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
-		return serviceMediaDescription{}, fmt.Errorf("open Asterisk RTP bridge: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("open Asterisk RTP bridge: %w", err)
 	}
 	peer, err := m.api.NewPeerConnection(webrtc.Configuration{ICEServers: m.iceServers})
 	if err != nil {
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("create peer connection: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("create peer connection: %w", err)
 	}
 	localTrack, err := webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
@@ -134,18 +159,19 @@ func (m *serviceMediaManager) Attach(ctx context.Context, request serviceMediaAt
 	if err != nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("create outbound audio track: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("create outbound audio track: %w", err)
 	}
 	sender, err := peer.AddTrack(localTrack)
 	if err != nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("add outbound audio track: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("add outbound audio track: %w", err)
 	}
 	session := &serviceMediaSession{
 		manager: m, id: sessionID, call: request.Call, serviceName: request.ServiceName,
 		connectionID: request.ConnectionID, purpose: request.Purpose, peer: peer,
 		asteriskRTP: rtpSocket, localTrack: localTrack,
+		connected: make(chan struct{}), terminated: make(chan struct{}),
 	}
 	go func() {
 		buffer := make([]byte, 1500)
@@ -162,32 +188,32 @@ func (m *serviceMediaManager) Attach(ctx context.Context, request serviceMediaAt
 	if err := peer.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeOffer, SDP: request.OfferSDP}); err != nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("apply SDP offer: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("apply SDP offer: %w", err)
 	}
 	answer, err := peer.CreateAnswer(nil)
 	if err != nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("create SDP answer: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("create SDP answer: %w", err)
 	}
 	gatherComplete := webrtc.GatheringCompletePromise(peer)
 	if err := peer.SetLocalDescription(answer); err != nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("apply SDP answer: %w", err)
+		return nil, serviceMediaDescription{}, fmt.Errorf("apply SDP answer: %w", err)
 	}
 	select {
 	case <-gatherComplete:
 	case <-ctx.Done():
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, ctx.Err()
+		return nil, serviceMediaDescription{}, ctx.Err()
 	}
 	local := peer.LocalDescription()
 	if local == nil {
 		peer.Close()
 		rtpSocket.Close()
-		return serviceMediaDescription{}, errors.New("SDP answer was not created")
+		return nil, serviceMediaDescription{}, errors.New("SDP answer was not created")
 	}
 	rtpPort := rtpSocket.LocalAddr().(*net.UDPAddr).Port
 	bridgeRequest := serviceMediaBridgeRequest{
@@ -195,10 +221,13 @@ func (m *serviceMediaManager) Attach(ctx context.Context, request serviceMediaAt
 		TraceID: request.Call.TraceID, ServiceName: request.ServiceName, ConnectionID: request.ConnectionID,
 		RTPHost: m.cfg.AsteriskRTPHost, RTPPort: rtpPort,
 	}
-	if err := m.bridge.JoinServiceMedia(ctx, bridgeRequest); err != nil {
-		peer.Close()
-		rtpSocket.Close()
-		return serviceMediaDescription{}, fmt.Errorf("join Asterisk conference: %w", err)
+	if joinExisting {
+		if err := m.bridge.JoinServiceMedia(ctx, bridgeRequest); err != nil {
+			peer.Close()
+			rtpSocket.Close()
+			return nil, serviceMediaDescription{}, fmt.Errorf("join Asterisk conference: %w", err)
+		}
+		session.bridged = true
 	}
 
 	ownerKey := serviceMediaOwnerKey(request.ServiceName, request.Call.ID)
@@ -215,7 +244,38 @@ func (m *serviceMediaManager) Attach(ctx context.Context, request serviceMediaAt
 	}
 	m.publishParticipant("joined", session, "attached")
 	go session.forwardAsteriskAudio()
-	return serviceMediaDescription{SessionID: sessionID, CallID: request.Call.ID, AnswerSDP: local.SDP, Purpose: request.Purpose}, nil
+	session.peerStateChanged(peer.ConnectionState())
+	return session, serviceMediaDescription{SessionID: sessionID, CallID: request.Call.ID, AnswerSDP: local.SDP, Purpose: request.Purpose}, nil
+}
+
+func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination string) error {
+	select {
+	case <-s.connected:
+	case <-s.terminated:
+		return errors.New("media session ended before WebRTC became ready")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	s.bridgeMu.Lock()
+	defer s.bridgeMu.Unlock()
+	if s.closed {
+		return errors.New("media session is closed")
+	}
+	if s.activated {
+		return errors.New("media session was already activated")
+	}
+	s.activated = true
+	rtpPort := s.asteriskRTP.LocalAddr().(*net.UDPAddr).Port
+	request := serviceMediaBridgeRequest{
+		SessionID: s.id, CallID: s.call.ID, EngineCallID: s.call.EngineCallID, TraceID: s.call.TraceID,
+		ServiceName: s.serviceName, ConnectionID: s.connectionID,
+		RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort,
+	}
+	if err := s.manager.bridge.StartServiceCall(ctx, request, destination); err != nil {
+		return fmt.Errorf("start service call through Asterisk: %w", err)
+	}
+	s.bridged = true
+	return nil
 }
 
 func (m *serviceMediaManager) AddICECandidate(_ context.Context, request serviceMediaICERequest) error {
@@ -258,6 +318,16 @@ func (m *serviceMediaManager) authorizedSession(sessionID, serviceName, connecti
 	return session, nil
 }
 
+func (m *serviceMediaManager) SourceForEngineSession(sessionID, callID string) (string, bool) {
+	m.mu.Lock()
+	session := m.sessions[sessionID]
+	m.mu.Unlock()
+	if session == nil || session.call.ID != callID {
+		return "", false
+	}
+	return session.serviceName, true
+}
+
 func (m *serviceMediaManager) CloseConnection(connectionID, reason string) {
 	m.closeMatching(func(session *serviceMediaSession) bool { return session.connectionID == connectionID }, reason)
 }
@@ -288,12 +358,13 @@ func (s *serviceMediaSession) forwardServiceAudio(track *webrtc.TrackRemote) {
 		}
 		s.remoteMu.RLock()
 		destination := s.asteriskAddr
+		payloadType := s.asteriskPT
 		s.remoteMu.RUnlock()
 		if destination == nil {
 			continue
 		}
 		copyPacket := *packet
-		copyPacket.PayloadType = asteriskOpusPayloadType
+		copyPacket.PayloadType = payloadType
 		encoded, err := copyPacket.Marshal()
 		if err == nil {
 			_, _ = s.asteriskRTP.WriteToUDP(encoded, destination)
@@ -311,17 +382,18 @@ func (s *serviceMediaSession) forwardAsteriskAudio() {
 			}
 			return
 		}
+		var packet rtp.Packet
+		if err := packet.Unmarshal(buffer[:count]); err != nil {
+			continue
+		}
 		s.remoteMu.Lock()
 		if s.asteriskAddr == nil {
 			s.asteriskAddr = source
+			s.asteriskPT = packet.PayloadType
 		}
 		allowed := s.asteriskAddr.IP.Equal(source.IP) && s.asteriskAddr.Port == source.Port
 		s.remoteMu.Unlock()
 		if !allowed {
-			continue
-		}
-		var packet rtp.Packet
-		if err := packet.Unmarshal(buffer[:count]); err != nil {
 			continue
 		}
 		if err := s.localTrack.WriteRTP(&packet); err != nil && !errors.Is(err, io.ErrClosedPipe) {
@@ -360,6 +432,7 @@ func (s *serviceMediaSession) setMediaConnected(connected bool, reason string) {
 	state := "disconnected"
 	if connected {
 		state = "connected"
+		s.connectedOnce.Do(func() { close(s.connected) })
 	}
 	s.manager.publishMedia(state, s, reason)
 }
@@ -374,13 +447,20 @@ func (s *serviceMediaSession) close(reason string) {
 		}
 		s.manager.mu.Unlock()
 		s.setMediaConnected(false, reason)
+		s.bridgeMu.Lock()
+		s.closed = true
+		bridged := s.bridged
+		s.bridgeMu.Unlock()
+		close(s.terminated)
 		_ = s.peer.Close()
 		_ = s.asteriskRTP.Close()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := s.manager.bridge.LeaveServiceMedia(ctx, s.id); err != nil {
-			s.manager.logger.Warn("leave service media bridge", "session_id", s.id, "error", err)
+		if bridged {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if err := s.manager.bridge.LeaveServiceMedia(ctx, s.id); err != nil {
+				s.manager.logger.Warn("leave service media bridge", "session_id", s.id, "error", err)
+			}
+			cancel()
 		}
-		cancel()
 		s.manager.publishParticipant("left", s, reason)
 	})
 }

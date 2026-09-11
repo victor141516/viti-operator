@@ -340,6 +340,23 @@ func (r *callSessionRegistry) left(call Call, clientID, participantID, connectio
 	r.leftChannel(call, clientID, participantID, connectionID, "", at)
 }
 
+func (r *callSessionRegistry) participantByChannel(call Call, channel string) (callParticipant, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	session := r.sessions[callSessionKey(call.Instance, call.EngineCallID)]
+	if session == nil {
+		return callParticipant{}, false
+	}
+	for _, participant := range session.participants {
+		for generation := &participant; generation != nil; generation = generation.predecessor {
+			if generation.channel == channel || generation.admissionChannel == channel {
+				return *generation, true
+			}
+		}
+	}
+	return callParticipant{}, false
+}
+
 func (r *callSessionRegistry) leftChannel(call Call, clientID, participantID, connectionID, channel string, at time.Time) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()

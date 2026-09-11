@@ -18,6 +18,7 @@ type fakeServiceMediaBridge struct {
 	joins  []serviceMediaBridgeRequest
 	leaves []string
 	dtmf   []string
+	starts []string
 }
 
 func (b *fakeServiceMediaBridge) JoinServiceMedia(_ context.Context, request serviceMediaBridgeRequest) error {
@@ -25,6 +26,59 @@ func (b *fakeServiceMediaBridge) JoinServiceMedia(_ context.Context, request ser
 	b.joins = append(b.joins, request)
 	b.mu.Unlock()
 	return nil
+}
+
+func (b *fakeServiceMediaBridge) StartServiceCall(_ context.Context, request serviceMediaBridgeRequest, destination string) error {
+	b.mu.Lock()
+	b.joins = append(b.joins, request)
+	b.starts = append(b.starts, destination)
+	b.mu.Unlock()
+	return nil
+}
+
+func TestServiceMediaOutgoingActivationWaitsForWebRTC(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{}
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, NewEventHub(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		manager.CloseCall("call-out", "test_complete")
+		_ = manager.iceMux.Close()
+	})
+	call := Call{
+		ID: "call-out", TraceID: "trace-out", EngineCallID: "call-out",
+		Direction: DirectionOutgoing, State: "dialing", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOffer(t)
+	defer client.Close()
+	preparation, err := manager.PrepareOutgoing(context.Background(), serviceMediaAttachRequest{
+		ServiceName: "dialer", ConnectionID: "connection-out", Call: call, OfferSDP: offer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bridge.mu.Lock()
+	if len(bridge.joins) != 0 {
+		t.Fatal("carrier dialing started before the service applied the SDP answer")
+	}
+	bridge.mu.Unlock()
+	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: preparation.Description.AnswerSDP}); err != nil {
+		t.Fatal(err)
+	}
+	activateCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := preparation.Activate(activateCtx, "+12025550123"); err != nil {
+		t.Fatal(err)
+	}
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.starts) != 1 || bridge.starts[0] != "+12025550123" || len(bridge.joins) != 1 {
+		t.Fatalf("service call activation: starts=%#v joins=%#v", bridge.starts, bridge.joins)
+	}
 }
 
 func (b *fakeServiceMediaBridge) LeaveServiceMedia(_ context.Context, sessionID string) error {

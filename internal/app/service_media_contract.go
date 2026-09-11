@@ -40,10 +40,16 @@ type serviceMediaDTMFRequest struct {
 
 type serviceMediaController interface {
 	Attach(context.Context, serviceMediaAttachRequest) (serviceMediaDescription, error)
+	PrepareOutgoing(context.Context, serviceMediaAttachRequest) (serviceMediaOutgoingPreparation, error)
 	AddICECandidate(context.Context, serviceMediaICERequest) error
 	SendDTMF(context.Context, serviceMediaDTMFRequest) error
 	CloseConnection(connectionID, reason string)
 	CloseCall(callID, reason string)
+}
+
+type serviceMediaOutgoingPreparation struct {
+	Description serviceMediaDescription
+	Activate    func(context.Context, string) error
 }
 
 type serviceMediaBridgeRequest struct {
@@ -59,6 +65,7 @@ type serviceMediaBridgeRequest struct {
 
 type serviceMediaBridge interface {
 	JoinServiceMedia(context.Context, serviceMediaBridgeRequest) error
+	StartServiceCall(context.Context, serviceMediaBridgeRequest, string) error
 	LeaveServiceMedia(context.Context, string) error
 	SendServiceDTMF(context.Context, string, string, int) error
 }
