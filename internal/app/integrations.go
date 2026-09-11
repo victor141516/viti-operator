@@ -29,6 +29,8 @@ const (
 
 var integrationNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
+var errIntegrationCommandStaleGeneration = errors.New("ephemeral command belongs to a previous service connection")
+
 var supportedIntegrationCapabilities = map[string]struct{}{
 	"call.screen": {},
 	"call.media":  {},
@@ -83,6 +85,7 @@ type integrationConnection struct {
 
 type integrationCommandRecord struct {
 	fingerprint [sha256.Size]byte
+	connection  string
 	result      integrationCommandResult
 	completed   bool
 }
@@ -137,7 +140,7 @@ func (r *integrationRegistry) snapshot() []map[string]any {
 	return services
 }
 
-func (r *integrationRegistry) beginCommand(service string, command integrationCommand) (integrationCommandResult, bool, error) {
+func (r *integrationRegistry) beginCommand(service, connectionID string, command integrationCommand) (integrationCommandResult, bool, error) {
 	fingerprint, err := commandFingerprint(command)
 	if err != nil {
 		return integrationCommandResult{}, false, err
@@ -152,11 +155,18 @@ func (r *integrationRegistry) beginCommand(service string, command integrationCo
 		if !previous.completed {
 			return integrationCommandResult{}, false, errors.New("command is already in progress")
 		}
+		if integrationCommandIsEphemeral(command.Type) && previous.connection != connectionID {
+			return integrationCommandResult{}, false, errIntegrationCommandStaleGeneration
+		}
 		return previous.result, true, nil
 	}
-	r.commands[key] = &integrationCommandRecord{fingerprint: fingerprint}
+	r.commands[key] = &integrationCommandRecord{fingerprint: fingerprint, connection: connectionID}
 	r.commandKeys = append(r.commandKeys, key)
 	return integrationCommandResult{}, false, nil
+}
+
+func integrationCommandIsEphemeral(commandType string) bool {
+	return commandType == "media.attach" || commandType == "media.ice"
 }
 
 func (r *integrationRegistry) finishCommand(service string, result integrationCommandResult) {
@@ -429,10 +439,13 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		base.Message = "version 1 and a non-empty command_id are required"
 		return queueIntegrationResult(results, base)
 	}
-	previous, replayed, err := a.integrations.beginCommand(connection.name, command)
+	previous, replayed, err := a.integrations.beginCommand(connection.name, connection.id, command)
 	if err != nil {
 		base.Status = "rejected"
 		base.ErrorCode = "command_id_conflict"
+		if errors.Is(err, errIntegrationCommandStaleGeneration) {
+			base.ErrorCode = "stale_connection_generation"
+		}
 		base.Message = err.Error()
 		return queueIntegrationResult(results, base)
 	}

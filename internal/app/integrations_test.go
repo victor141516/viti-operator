@@ -192,7 +192,7 @@ func TestIntegrationCommandCanRetryWhenAcceptedWasNotDelivered(t *testing.T) {
 	if application.handleIntegrationCommand(ctx, connection, command, results) {
 		t.Fatal("command continued after accepted delivery failed")
 	}
-	if _, replayed, err := application.integrations.beginCommand(connection.name, command); err != nil || replayed {
+	if _, replayed, err := application.integrations.beginCommand(connection.name, "retry-connection", command); err != nil || replayed {
 		t.Fatalf("exact retry remained reserved: replayed=%v err=%v", replayed, err)
 	}
 }
@@ -217,10 +217,11 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 	readIntegrationType(t, socket, "system.snapshot")
 	readIntegrationType(t, socket, "service.connected")
 
-	writeIntegrationCommand(t, socket, integrationCommand{
+	attachCommand := integrationCommand{
 		Type: "media.attach", Version: 1, CommandID: "attach-1", CallID: call.ID,
 		Payload: json.RawMessage(`{"sdp_offer":"v=0\\r\\n","purpose":"auxiliary"}`),
-	})
+	}
+	writeIntegrationCommand(t, socket, attachCommand)
 	readCommandResult(t, socket, "attach-1", "accepted")
 	created := readIntegrationType(t, socket, "media.session.created")
 	if created["session_id"] != "media-test" || created["call_id"] != call.ID || created["sdp_answer"] != "answer" {
@@ -265,6 +266,30 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 			t.Fatal("control disconnect did not close owned media sessions")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	for len(application.integrations.snapshot()) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("disconnected service name was not released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	reconnected := dialIntegration(t, server, integrationHello{
+		Type: "service.hello", Version: 1, Name: "transcriber",
+		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`), "call.dtmf": json.RawMessage(`{}`)},
+	})
+	defer reconnected.Close()
+	readIntegrationType(t, reconnected, "service.ready")
+	readIntegrationType(t, reconnected, "system.snapshot")
+	readIntegrationType(t, reconnected, "service.connected")
+	writeIntegrationCommand(t, reconnected, attachCommand)
+	stale := readCommandResult(t, reconnected, "attach-1", "rejected")
+	if stale["error_code"] != "stale_connection_generation" {
+		t.Fatalf("reconnected attach replay = %#v", stale)
+	}
+	media.mu.Lock()
+	defer media.mu.Unlock()
+	if media.attachCount != 1 {
+		t.Fatalf("stale attach invoked controller %d times", media.attachCount)
 	}
 }
 
@@ -368,11 +393,13 @@ type fakeServiceMediaController struct {
 	activatedDestination string
 	resolvedSession      string
 	resolvedService      string
+	attachCount          int
 }
 
 func (f *fakeServiceMediaController) Attach(_ context.Context, request serviceMediaAttachRequest) (serviceMediaDescription, error) {
 	f.mu.Lock()
 	f.attach = request
+	f.attachCount++
 	f.mu.Unlock()
 	return serviceMediaDescription{SessionID: "media-test", CallID: request.Call.ID, AnswerSDP: "answer", Purpose: request.Purpose}, nil
 }

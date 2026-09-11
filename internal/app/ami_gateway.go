@@ -156,12 +156,18 @@ func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceM
 	}, ",")
 	originateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	channel, err := g.originateAndAwaitChannel(originateCtx, map[string]string{
+	channel, cleanupRequired, err := g.originateAndAwaitChannel(originateCtx, map[string]string{
 		"Action": "Originate", "Channel": "UnicastRTP/" + net.JoinHostPort(request.RTPHost, strconv.Itoa(request.RTPPort)) + "/c(" + request.Codec + ")",
 		"Context": dialplanContext, "Exten": extension, "Priority": "1", "Timeout": "5000",
 		"Async": "true", "Codecs": request.Codec, "ChannelId": request.SessionID, "Variable": variables,
 	})
 	if err != nil {
+		if cleanupRequired {
+			cleanupErr := g.cleanupProvisionalServiceMedia(request.SessionID, request.EngineCallID, dialplanContext == "from-local")
+			if cleanupErr != nil {
+				return fmt.Errorf("%w; provisional originate cleanup failed: %v", err, cleanupErr)
+			}
+		}
 		return err
 	}
 	g.mediaMu.Lock()
@@ -313,7 +319,7 @@ func (g *AMIGateway) action(ctx context.Context, fields map[string]string) (map[
 	return response, err
 }
 
-func (g *AMIGateway) originateAndAwaitChannel(ctx context.Context, fields map[string]string) (string, error) {
+func (g *AMIGateway) originateAndAwaitChannel(ctx context.Context, fields map[string]string) (string, bool, error) {
 	started := time.Now()
 	actionID := fmt.Sprintf("ami-originate-%d", started.UnixNano())
 	fields["ActionID"] = actionID
@@ -321,7 +327,7 @@ func (g *AMIGateway) originateAndAwaitChannel(ctx context.Context, fields map[st
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", g.cfg.Address)
 	if err != nil {
-		return "", fmt.Errorf("connect Asterisk AMI: %w", err)
+		return "", false, fmt.Errorf("connect Asterisk AMI: %w", err)
 	}
 	defer conn.Close()
 	if deadline, ok := ctx.Deadline(); ok {
@@ -329,63 +335,174 @@ func (g *AMIGateway) originateAndAwaitChannel(ctx context.Context, fields map[st
 	}
 	reader := bufio.NewReader(conn)
 	if _, err := reader.ReadString('\n'); err != nil {
-		return "", fmt.Errorf("read Asterisk AMI banner: %w", err)
+		return "", false, fmt.Errorf("read Asterisk AMI banner: %w", err)
 	}
 	login, err := writeAMIAction(conn, reader, map[string]string{
 		"Action": "Login", "Username": g.cfg.Username, "Secret": g.cfg.Secret, "Events": "on",
 	})
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if first(login, "Response") != "Success" {
-		return "", errors.New("Asterisk AMI login failed")
+		return "", false, errors.New("Asterisk AMI login failed")
 	}
-	response, err := writeAMIAction(conn, reader, fields)
+	if err := writeAMIFields(conn, fields); err != nil {
+		return "", false, err
+	}
+	response, err := readAMIResponse(reader, actionID)
 	if err != nil {
-		return "", err
+		return "", true, err
 	}
 	if first(response, "Response") != "Success" {
-		return "", fmt.Errorf("Asterisk rejected service media bridge: %s", first(response, "Message"))
+		return "", false, fmt.Errorf("Asterisk rejected service media bridge: %s", first(response, "Message"))
 	}
 	for {
 		event, err := readAMIFrame(reader)
 		if err != nil {
-			return "", fmt.Errorf("await Asterisk service media channel: %w", err)
+			return "", true, fmt.Errorf("await Asterisk service media channel: %w", err)
 		}
 		if first(event, "Event") != "OriginateResponse" || first(event, "ActionID") != actionID {
 			continue
 		}
 		if first(event, "Response") != "Success" {
-			return "", fmt.Errorf("Asterisk failed to originate service media: %s", first(event, "Reason"))
+			return "", false, fmt.Errorf("Asterisk failed to originate service media: %s", first(event, "Reason"))
 		}
 		channel := strings.TrimSpace(first(event, "Channel"))
 		if channel == "" {
-			return "", errors.New("Asterisk did not report the service media channel")
+			return "", true, errors.New("Asterisk did not report the service media channel")
 		}
 		g.diag.RecordEvent("manager.ami", "originate.completed", map[string]any{
 			"action_id": actionID, "duration_ns": time.Since(started).Nanoseconds(), "channel": channel,
 		})
-		return channel, nil
+		return channel, false, nil
+	}
+}
+
+func readAMIResponse(reader *bufio.Reader, actionID string) (map[string][]string, error) {
+	for {
+		frame, err := readAMIFrame(reader)
+		if err != nil {
+			return nil, err
+		}
+		if first(frame, "Response") != "" && first(frame, "ActionID") == actionID {
+			return frame, nil
+		}
+	}
+}
+
+func (g *AMIGateway) cleanupProvisionalServiceMedia(sessionID, engineCallID string, endCall bool) error {
+	deadline := time.Now().Add(7 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		lookupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		channel, found, err := g.findChannelByUniqueID(lookupCtx, sessionID)
+		cancel()
+		if err != nil {
+			lastErr = err
+		} else if found {
+			hangupCtx, hangupCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			response, hangupErr := g.action(hangupCtx, map[string]string{"Action": "Hangup", "Channel": channel, "Cause": "16"})
+			hangupCancel()
+			if hangupErr != nil {
+				lastErr = hangupErr
+			} else if first(response, "Response") != "Success" && !amiTargetAlreadyGone(first(response, "Message")) {
+				lastErr = fmt.Errorf("Asterisk rejected provisional media hangup: %s", first(response, "Message"))
+			} else {
+				lastErr = nil
+				break
+			}
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if endCall {
+		endCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		endErr := g.EndConference(endCtx, engineCallID)
+		cancel()
+		if endErr != nil {
+			lastErr = errors.Join(lastErr, endErr)
+		}
+	}
+	if lastErr != nil {
+		return lastErr
+	}
+	return nil
+}
+
+func (g *AMIGateway) findChannelByUniqueID(ctx context.Context, uniqueID string) (string, bool, error) {
+	actionID := fmt.Sprintf("ami-channels-%d", time.Now().UnixNano())
+	dialer := net.Dialer{Timeout: 2 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", g.cfg.Address)
+	if err != nil {
+		return "", false, err
+	}
+	defer conn.Close()
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+	reader := bufio.NewReader(conn)
+	if _, err := reader.ReadString('\n'); err != nil {
+		return "", false, err
+	}
+	login, err := writeAMIAction(conn, reader, map[string]string{
+		"Action": "Login", "Username": g.cfg.Username, "Secret": g.cfg.Secret, "Events": "off",
+	})
+	if err != nil || first(login, "Response") != "Success" {
+		return "", false, errors.New("Asterisk AMI login failed during provisional cleanup")
+	}
+	if err := writeAMIFields(conn, map[string]string{"Action": "CoreShowChannels", "ActionID": actionID}); err != nil {
+		return "", false, err
+	}
+	response, err := readAMIResponse(reader, actionID)
+	if err != nil {
+		return "", false, err
+	}
+	if first(response, "Response") != "Success" {
+		return "", false, fmt.Errorf("Asterisk rejected channel lookup: %s", first(response, "Message"))
+	}
+	channel := ""
+	for {
+		frame, err := readAMIFrame(reader)
+		if err != nil {
+			return "", false, err
+		}
+		if first(frame, "ActionID") != actionID {
+			continue
+		}
+		switch first(frame, "Event") {
+		case "CoreShowChannel":
+			if first(frame, "Uniqueid") == uniqueID {
+				channel = strings.TrimSpace(first(frame, "Channel"))
+			}
+		case "CoreShowChannelsComplete":
+			return channel, channel != "", nil
+		}
 	}
 }
 
 func writeAMIAction(conn io.Writer, reader *bufio.Reader, fields map[string]string) (map[string][]string, error) {
+	if err := writeAMIFields(conn, fields); err != nil {
+		return nil, err
+	}
+	return readAMIFrame(reader)
+}
+
+func writeAMIFields(conn io.Writer, fields map[string]string) error {
 	for _, key := range []string{"Action", "ActionID", "Username", "Secret", "Events", "Command", "To", "From", "Body", "Variable", "Channel", "Cause", "Conference", "Context", "Exten", "Priority", "Timeout", "Async", "Codecs", "ChannelId", "Digit", "Duration", "Receive"} {
 		value, ok := fields[key]
 		if !ok {
 			continue
 		}
 		if strings.ContainsAny(value, "\r\n") {
-			return nil, fmt.Errorf("invalid AMI field %s", key)
+			return fmt.Errorf("invalid AMI field %s", key)
 		}
 		if _, err := fmt.Fprintf(conn, "%s: %s\r\n", key, value); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if _, err := io.WriteString(conn, "\r\n"); err != nil {
-		return nil, err
+		return err
 	}
-	return readAMIFrame(reader)
+	return nil
 }
 
 func readAMIFrame(reader *bufio.Reader) (map[string][]string, error) {

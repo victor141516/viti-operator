@@ -56,10 +56,16 @@ type serviceMediaManager struct {
 	events     *EventHub
 	logger     *slog.Logger
 	hasHumans  func(Call) bool
+	callOpen   func(string) bool
 	sessions   map[string]*serviceMediaSession
 	byOwner    map[string]string
 	sources    map[string]serviceMediaSource
 	sourceIDs  []string
+}
+
+type serviceMediaCallbacks struct {
+	hasHumans func(Call) bool
+	callOpen  func(string) bool
 }
 
 type serviceMediaSession struct {
@@ -87,9 +93,10 @@ type serviceMediaSession struct {
 	bridged        bool
 	closed         bool
 	activated      bool
+	announced      bool
 }
 
-func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger, hasHumans ...func(Call) bool) (*serviceMediaManager, error) {
+func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerConfig, bridge serviceMediaBridge, events *EventHub, logger *slog.Logger, callbacks ...serviceMediaCallbacks) (*serviceMediaManager, error) {
 	listenAddress, err := net.ResolveUDPAddr("udp", cfg.ListenAddress)
 	if err != nil {
 		return nil, fmt.Errorf("resolve ICE listen address: %w", err)
@@ -141,8 +148,9 @@ func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerCon
 		iceServers: iceServers, bridge: bridge, events: events, logger: logger,
 		sessions: make(map[string]*serviceMediaSession), byOwner: make(map[string]string), sources: make(map[string]serviceMediaSource),
 	}
-	if len(hasHumans) != 0 {
-		manager.hasHumans = hasHumans[0]
+	if len(callbacks) != 0 {
+		manager.hasHumans = callbacks[0].hasHumans
+		manager.callOpen = callbacks[0].callOpen
 	}
 	return manager, nil
 }
@@ -282,19 +290,31 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	if previousID := m.byOwner[ownerKey]; previousID != "" {
 		replaced = m.sessions[previousID]
 	}
+	if replaced != nil && replaced.purpose == "originator" && replaced.connectionID == session.connectionID {
+		session.purpose = "originator"
+	}
 	m.sessions[sessionID] = session
 	m.byOwner[ownerKey] = sessionID
 	m.sources[sessionID] = serviceMediaSource{callID: request.Call.ID, serviceName: request.ServiceName}
 	m.sourceIDs = append(m.sourceIDs, sessionID)
 	m.pruneSourcesLocked()
+	callOpen := m.callOpen == nil || m.callOpen(request.Call.ID)
 	m.mu.Unlock()
+	if !callOpen {
+		session.close("call_ended_during_attach")
+		return nil, serviceMediaDescription{}, errors.New("call ended while the media session was attaching")
+	}
 	if replaced != nil {
-		if replaced.purpose == "originator" && replaced.connectionID == session.connectionID {
-			session.purpose = "originator"
-		}
 		replaced.close("replaced")
 	}
+	session.bridgeMu.Lock()
+	if session.closed {
+		session.bridgeMu.Unlock()
+		return nil, serviceMediaDescription{}, errors.New("call ended while the media session was attaching")
+	}
+	session.announced = true
 	m.publishParticipant("joined", session, "attached")
+	session.bridgeMu.Unlock()
 	go session.forwardAsteriskAudio()
 	session.peerStateChanged(peer.ConnectionState())
 	return session, serviceMediaDescription{SessionID: sessionID, CallID: request.Call.ID, AnswerSDP: local.SDP, Purpose: session.purpose}, nil
@@ -353,13 +373,36 @@ func selectServiceMediaCodec(offer string) (serviceMediaCodec, error) {
 				continue
 			}
 			for _, supported := range serviceMediaCodecs {
-				if strings.EqualFold(offered.Name, strings.TrimPrefix(supported.parameters.MimeType, "audio/")) {
-					return supported, nil
+				if serviceMediaCodecCompatible(offered, supported) {
+					selected := supported
+					selected.parameters.PayloadType = webrtc.PayloadType(value)
+					selected.parameters.SDPFmtpLine = offered.Fmtp
+					return selected, nil
 				}
 			}
 		}
 	}
 	return serviceMediaCodec{}, errors.New("SDP offer does not include full-duplex audio using Opus, G.722, PCMU, or PCMA")
+}
+
+func serviceMediaCodecCompatible(offered sdp.Codec, supported serviceMediaCodec) bool {
+	if !strings.EqualFold(offered.Name, strings.TrimPrefix(supported.parameters.MimeType, "audio/")) ||
+		offered.ClockRate != supported.parameters.ClockRate {
+		return false
+	}
+	channels := uint16(1)
+	if offered.EncodingParameters != "" {
+		value, err := strconv.ParseUint(offered.EncodingParameters, 10, 16)
+		if err != nil {
+			return false
+		}
+		channels = uint16(value)
+	}
+	expectedChannels := supported.parameters.Channels
+	if expectedChannels == 0 {
+		expectedChannels = 1
+	}
+	return channels == expectedChannels
 }
 
 func sdpMediaDirection(attributes []sdp.Attribute, fallback string) string {
@@ -545,6 +588,7 @@ func (s *serviceMediaSession) close(reason string) {
 		s.bridgeMu.Lock()
 		s.closed = true
 		bridged := s.bridged
+		announced := s.announced
 		s.bridgeMu.Unlock()
 		close(s.terminated)
 		_ = s.peer.Close()
@@ -563,7 +607,9 @@ func (s *serviceMediaSession) close(reason string) {
 			}
 			cancel()
 		}
-		s.manager.publishParticipant("left", s, reason)
+		if announced {
+			s.manager.publishParticipant("left", s, reason)
+		}
 	})
 }
 

@@ -239,7 +239,10 @@ are added by the pipeline API separately.
 The full-duplex offer must contain Opus, G.722, PCMU, or PCMA. One service can
 own one media session per call; attaching again replaces its prior generation.
 Later ICE candidates remain bound to the stable service name and exact control
-connection that created the session.
+connection that created the session. A service must allocate new `command_id`
+values for `media.attach` and `media.ice` after reconnecting; replaying either
+command from an older connection is rejected with
+`error_code: "stale_connection_generation"`.
 
 When service media is enabled, `call.start` requires the service to advertise
 both `call.start` and `call.media`. The manager sends `media.session.created`

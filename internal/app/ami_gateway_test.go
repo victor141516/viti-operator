@@ -160,6 +160,87 @@ func TestAMITargetAlreadyGoneOnlyAcceptsMissingResources(t *testing.T) {
 	}
 }
 
+func TestAMIGatewayCleansAcceptedOriginateWhenResponseEventIsLost(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan map[string][]string, 16)
+	go func() {
+		for {
+			conn, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			go serveUncertainOriginateAMI(conn, requests)
+		}
+	}()
+	gateway, err := NewAMIGateway(AMIConfig{
+		Address: listener.Addr().String(), Username: "manager", Secret: "secret",
+		FromNumber: "+34123456789", Realm: "ims.example.test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := serviceMediaBridgeRequest{
+		SessionID: "media-uncertain", EngineCallID: "call-uncertain", TraceID: "trace-uncertain",
+		ServiceName: "screening-bot", ConnectionID: "connection-uncertain", RecordingID: "track-uncertain",
+		RTPHost: "manager", RTPPort: 32001, Codec: "opus",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := gateway.JoinServiceMedia(ctx, request); err == nil {
+		t.Fatal("originate succeeded despite losing its correlated response event")
+	}
+	foundHangup := false
+	for len(requests) != 0 {
+		action := <-requests
+		if first(action, "Action") == "Hangup" && first(action, "Channel") == "UnicastRTP/manager:32001-00000077" {
+			foundHangup = true
+		}
+	}
+	if !foundHangup {
+		t.Fatal("accepted provisional Originate was not resolved and hung up")
+	}
+}
+
+func serveUncertainOriginateAMI(conn net.Conn, requests chan<- map[string][]string) {
+	defer conn.Close()
+	_, _ = fmt.Fprint(conn, "Asterisk Call Manager/5.0\r\n")
+	reader := bufio.NewReader(conn)
+	for {
+		frame, err := readAMIFrame(reader)
+		if err != nil {
+			return
+		}
+		requests <- frame
+		switch first(frame, "Action") {
+		case "Originate":
+			actionID := first(frame, "ActionID")
+			_, _ = fmt.Fprintf(conn,
+				"Event: Newchannel\r\nChannel: unrelated\r\n\r\n"+
+					"Response: Success\r\nActionID: %s\r\nMessage: Originate successfully queued\r\n\r\n",
+				actionID,
+			)
+			return
+		case "CoreShowChannels":
+			actionID := first(frame, "ActionID")
+			_, _ = fmt.Fprintf(conn,
+				"Response: Success\r\nActionID: %s\r\nEventList: start\r\n\r\n"+
+					"Event: CoreShowChannel\r\nActionID: %s\r\nChannel: UnicastRTP/manager:32001-00000077\r\nUniqueid: media-uncertain\r\n\r\n"+
+					"Event: CoreShowChannelsComplete\r\nActionID: %s\r\nEventList: Complete\r\n\r\n",
+				actionID, actionID, actionID,
+			)
+		case "Logoff":
+			_, _ = fmt.Fprint(conn, "Response: Goodbye\r\n\r\n")
+			return
+		default:
+			_, _ = fmt.Fprint(conn, "Response: Success\r\n\r\n")
+		}
+	}
+}
+
 func serveFakeAMI(conn net.Conn, requests chan<- map[string][]string) {
 	defer conn.Close()
 	_, _ = fmt.Fprint(conn, "Asterisk Call Manager/5.0\r\n")

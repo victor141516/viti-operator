@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -14,12 +15,14 @@ import (
 )
 
 type fakeServiceMediaBridge struct {
-	mu     sync.Mutex
-	joins  []serviceMediaBridgeRequest
-	leaves []string
-	dtmf   []string
-	starts []string
-	ends   []string
+	mu          sync.Mutex
+	joins       []serviceMediaBridgeRequest
+	leaves      []string
+	dtmf        []string
+	starts      []string
+	ends        []string
+	joinStarted chan struct{}
+	joinRelease chan struct{}
 }
 
 func (b *fakeServiceMediaBridge) EndServiceCall(_ context.Context, engineCallID string) error {
@@ -33,6 +36,10 @@ func (b *fakeServiceMediaBridge) JoinServiceMedia(_ context.Context, request ser
 	b.mu.Lock()
 	b.joins = append(b.joins, request)
 	b.mu.Unlock()
+	if b.joinStarted != nil {
+		close(b.joinStarted)
+		<-b.joinRelease
+	}
 	return nil
 }
 
@@ -158,6 +165,50 @@ func TestServiceMediaNegotiatesPCMUWithAsteriskBridge(t *testing.T) {
 	}
 }
 
+func TestServiceMediaNegotiatesDynamicOpusPayloadType(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{}
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, NewEventHub(), slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := Call{
+		ID: "call-opus-109", TraceID: "trace-opus-109", EngineCallID: "engine-opus-109", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOfferWithCodecs(t, []webrtc.RTPCodecParameters{{
+		RTPCodecCapability: webrtc.RTPCodecCapability{
+			MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1",
+		},
+		PayloadType: 109,
+	}})
+	defer client.Close()
+	description, err := manager.Attach(context.Background(), serviceMediaAttachRequest{
+		ServiceName: "dynamic-opus", ConnectionID: "connection-opus-109", Call: call, OfferSDP: offer, Purpose: "auxiliary",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		manager.CloseCall(call.ID, "test_complete")
+		_ = manager.iceMux.Close()
+	})
+	if !strings.Contains(description.AnswerSDP, "m=audio 9 UDP/TLS/RTP/SAVPF 109") {
+		t.Fatalf("answer did not preserve dynamic Opus payload 109:\n%s", description.AnswerSDP)
+	}
+	if err := client.SetRemoteDescription(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: description.AnswerSDP}); err != nil {
+		t.Fatal(err)
+	}
+	waitForPeerConnected(t, client, manager.sessions[description.SessionID].peer)
+	bridge.mu.Lock()
+	defer bridge.mu.Unlock()
+	if len(bridge.joins) != 1 || bridge.joins[0].Codec != "opus" {
+		t.Fatalf("dynamic Opus bridge request = %#v", bridge.joins)
+	}
+}
+
 func TestServiceMediaOriginatorRemainsWhenHumanIsPresent(t *testing.T) {
 	manager := &serviceMediaManager{
 		sessions: make(map[string]*serviceMediaSession),
@@ -167,6 +218,54 @@ func TestServiceMediaOriginatorRemainsWhenHumanIsPresent(t *testing.T) {
 	}
 	if !manager.originatorOrHumanRemains(Call{ID: "call-human", EngineCallID: "engine-human"}) {
 		t.Fatal("human participant did not retain the service-originated call")
+	}
+}
+
+func TestServiceMediaAttachRevalidatesCallAfterBlockingBridgeJoin(t *testing.T) {
+	bridge := &fakeServiceMediaBridge{joinStarted: make(chan struct{}), joinRelease: make(chan struct{})}
+	events := NewEventHub()
+	var callOpen atomic.Bool
+	callOpen.Store(true)
+	manager, err := newServiceMediaManager(
+		ServiceMediaConfig{Enabled: true, ListenAddress: "127.0.0.1:0", AdvertiseAddress: "127.0.0.1", AsteriskRTPHost: "127.0.0.1"},
+		nil, bridge, events, slog.New(slog.NewTextHandler(io.Discard, nil)),
+		serviceMediaCallbacks{callOpen: func(string) bool { return callOpen.Load() }},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer manager.iceMux.Close()
+	call := Call{
+		ID: "call-race", TraceID: "trace-race", EngineCallID: "engine-race", Instance: "engine-1",
+		Direction: DirectionIncoming, State: "active", StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+	}
+	client, offer := serviceMediaOffer(t)
+	defer client.Close()
+	result := make(chan error, 1)
+	go func() {
+		_, attachErr := manager.Attach(context.Background(), serviceMediaAttachRequest{
+			ServiceName: "race-service", ConnectionID: "race-connection", Call: call, OfferSDP: offer, Purpose: "auxiliary",
+		})
+		result <- attachErr
+	}()
+	<-bridge.joinStarted
+	callOpen.Store(false)
+	manager.CloseCall(call.ID, "call_ended")
+	close(bridge.joinRelease)
+	if err := <-result; err == nil {
+		t.Fatal("attach succeeded after the call ended during bridge join")
+	}
+	manager.mu.Lock()
+	remaining := len(manager.sessions)
+	manager.mu.Unlock()
+	bridge.mu.Lock()
+	leaves := append([]string(nil), bridge.leaves...)
+	bridge.mu.Unlock()
+	if remaining != 0 || len(leaves) != 1 {
+		t.Fatalf("remaining sessions=%d bridge leaves=%#v", remaining, leaves)
+	}
+	if _, sequence := events.StreamState(); sequence != 0 {
+		t.Fatalf("failed attach published %d participant or media events", sequence)
 	}
 }
 
