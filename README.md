@@ -14,6 +14,8 @@ manager-facing tunnel contract.
 
 - Shared SMS and call history across web and Android, with carrier acceptance,
   destination delivery, failure, and honest unconfirmed SMS states.
+- A replayable bidirectional WebSocket for trusted local services to observe all
+  system events, advertise call capabilities, and issue idempotent commands.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.

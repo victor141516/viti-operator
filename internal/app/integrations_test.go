@@ -156,6 +156,25 @@ func TestIntegrationReplaysRetainedEventsAfterResume(t *testing.T) {
 	readIntegrationType(t, socket, "service.connected")
 }
 
+func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	streamID, sequence := application.events.StreamState()
+	_, events, cancel := application.events.Subscribe(streamID, sequence)
+	defer cancel()
+	call := Call{ID: "call-1", TraceID: "trace-1"}
+	now := time.Now().UTC()
+	application.publishCallParticipantEvents("joined", "connected", call, "phone-1", "participant-1", "connection-1", "PJSIP/1", now)
+
+	logical := <-events
+	transport := <-events
+	if logical.Type != "call.participant.joined" || logical.CallID != call.ID {
+		t.Fatalf("logical event = %#v", logical)
+	}
+	if transport.Type != "call.media.connected" || transport.CallID != call.ID {
+		t.Fatalf("transport event = %#v", transport)
+	}
+}
+
 func newIntegrationTestServer(t *testing.T) (*App, *httptest.Server) {
 	t.Helper()
 	application, err := New(Config{
