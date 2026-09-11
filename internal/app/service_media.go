@@ -24,6 +24,13 @@ type serviceMediaCodec struct {
 	asteriskName string
 }
 
+const serviceMediaSourceLimit = 1024
+
+type serviceMediaSource struct {
+	callID      string
+	serviceName string
+}
+
 var serviceMediaCodecs = []serviceMediaCodec{
 	{webrtc.RTPCodecParameters{RTPCodecCapability: webrtc.RTPCodecCapability{
 		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2, SDPFmtpLine: "minptime=10;useinbandfec=1",
@@ -51,6 +58,8 @@ type serviceMediaManager struct {
 	hasHumans  func(Call) bool
 	sessions   map[string]*serviceMediaSession
 	byOwner    map[string]string
+	sources    map[string]serviceMediaSource
+	sourceIDs  []string
 }
 
 type serviceMediaSession struct {
@@ -129,7 +138,7 @@ func newServiceMediaManager(cfg ServiceMediaConfig, configuredICE []ICEServerCon
 			webrtc.WithMediaEngine(mediaEngine), webrtc.WithInterceptorRegistry(interceptors), webrtc.WithSettingEngine(settingEngine),
 		),
 		iceServers: iceServers, bridge: bridge, events: events, logger: logger,
-		sessions: make(map[string]*serviceMediaSession), byOwner: make(map[string]string),
+		sessions: make(map[string]*serviceMediaSession), byOwner: make(map[string]string), sources: make(map[string]serviceMediaSource),
 	}
 	if len(hasHumans) != 0 {
 		manager.hasHumans = hasHumans[0]
@@ -270,6 +279,9 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	}
 	m.sessions[sessionID] = session
 	m.byOwner[ownerKey] = sessionID
+	m.sources[sessionID] = serviceMediaSource{callID: request.Call.ID, serviceName: request.ServiceName}
+	m.sourceIDs = append(m.sourceIDs, sessionID)
+	m.pruneSourcesLocked()
 	m.mu.Unlock()
 	if replaced != nil {
 		if replaced.purpose == "originator" && replaced.connectionID == session.connectionID {
@@ -397,12 +409,12 @@ func (m *serviceMediaManager) authorizedSession(sessionID, serviceName, connecti
 
 func (m *serviceMediaManager) SourceForEngineSession(sessionID, callID string) (string, bool) {
 	m.mu.Lock()
-	session := m.sessions[sessionID]
+	source, found := m.sources[sessionID]
 	m.mu.Unlock()
-	if session == nil || session.call.ID != callID {
+	if !found || source.callID != callID {
 		return "", false
 	}
-	return session.serviceName, true
+	return source.serviceName, true
 }
 
 func (m *serviceMediaManager) CloseConnection(connectionID, reason string) {
@@ -522,6 +534,7 @@ func (s *serviceMediaSession) close(reason string) {
 		if s.manager.byOwner[ownerKey] == s.id {
 			delete(s.manager.byOwner, ownerKey)
 		}
+		s.manager.pruneSourcesLocked()
 		s.manager.mu.Unlock()
 		s.setMediaConnected(false, reason)
 		s.bridgeMu.Lock()
@@ -547,6 +560,23 @@ func (s *serviceMediaSession) close(reason string) {
 		}
 		s.manager.publishParticipant("left", s, reason)
 	})
+}
+
+func (m *serviceMediaManager) pruneSourcesLocked() {
+	if len(m.sources) <= serviceMediaSourceLimit {
+		return
+	}
+	retained := m.sourceIDs[:0]
+	for _, sessionID := range m.sourceIDs {
+		if len(m.sources) > serviceMediaSourceLimit {
+			if _, active := m.sessions[sessionID]; !active {
+				delete(m.sources, sessionID)
+				continue
+			}
+		}
+		retained = append(retained, sessionID)
+	}
+	m.sourceIDs = retained
 }
 
 func (m *serviceMediaManager) originatorOrHumanRemains(call Call) bool {

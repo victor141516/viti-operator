@@ -256,6 +256,9 @@ func TestServiceMediaBindsSessionToConnectionAndReplacesOwnerGeneration(t *testi
 	if _, err := manager.authorizedSession(first.SessionID, "transcriber", "connection-1"); err == nil {
 		t.Fatal("replaced media generation remained addressable")
 	}
+	if serviceName, found := manager.SourceForEngineSession(first.SessionID, call.ID); !found || serviceName != "transcriber" {
+		t.Fatalf("delayed DTMF source was lost after replacement: service=%q found=%t", serviceName, found)
+	}
 
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
