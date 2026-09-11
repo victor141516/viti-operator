@@ -317,6 +317,30 @@ they never enter the human-participant ownership registry. Recording labels use
 the stable service name, but SDP, ICE, socket IDs, and transport generations are
 never persisted.
 
+### Incoming-call screening pipeline
+
+`screening_pipeline` is an ordered list of stable integration names. The
+manager snapshots it when an incoming carrier call arrives and advances one
+stage at a time. It broadcasts every offer for observability, while the current
+target and exact context revision determine which `take_control`, `next`, or
+`ring_clients` decision is authoritative. An authorized `hangup` remains global.
+Opaque service output is appended to the persisted call history, increments the
+revision, and is included with every later offer.
+
+A metadata-only `next` leaves the carrier unanswered. `take_control` first
+reserves the stage and verifies its controller WebRTC session; only then does
+the engine answer and join the existing conference. Later stages operate in an
+active context. Human handoff creates local invitations into that conference,
+without sending generated ringback to the carrier. Auxiliary media can coexist
+with the current controller but never owns the carrier-call lifecycle.
+
+The runtime coordinator is deliberately process-local. Stage timeout, service
+or controlling-media loss, and unavailable stages all advance fail-open. If no
+stage remains, human clients ring for 60 seconds. A manager that observes a
+surviving active screened call after restart does not reconstruct ownership; it
+rings humans once. The exact pipeline snapshot and append-only JSON history are
+audit data, not resumable transport or coordination state.
+
 ## Contact synchronization and resolution
 
 Android contact access is opt-in in two distinct steps: the user accepts an

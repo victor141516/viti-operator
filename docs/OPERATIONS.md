@@ -38,6 +38,7 @@ Runtime files and secrets must not be committed. Important environment values:
 | `VITI_DIAGNOSTICS_DIR` | Absolute diagnostic directory outside the repo |
 | `VITI_DIAGNOSTICS_ENABLED` | Explicit opt-in for unredacted high-volume diagnostics; default `0` |
 | `VITI_DOCKER_SUBNET` | Explicit non-overlapping private Compose subnet |
+| `VITI_SCREENING_PIPELINE` | Ordered comma-separated stable screening service names; empty disables screening |
 
 ## Build and start
 
@@ -127,6 +128,28 @@ digit. The resulting source-attributed `call.dtmf` event is broadcast to every
 integration. Replacing an attachment for the same stable service/call closes
 the old peer connection. Reconnecting the control WebSocket always requires a
 new SDP exchange; transport state is deliberately not recoverable.
+
+### Incoming-call screening
+
+Set `VITI_SCREENING_PIPELINE` to stable service names in processing order, for
+example `metadata-filter,voice-check,spam-classifier`. Each named integration
+must connect with `call.screen`; a missing stage is skipped when its turn is
+reached. The service can set `decision_timeout_ms`, `media_timeout_ms`, and
+`processing_timeout_ms` in the capability options. Processing may use `-1` for
+no deadline, while decision and media timeouts must remain finite and positive.
+
+The default failure policy is always to advance and eventually ring humans.
+After a controlling bot has answered, human ringing creates new local conference
+invitations and the carrier hears conference audio or silence, never generated
+ringback. Human clients ring for 60 seconds. If the manager restarts while it can
+still observe an active screened carrier call, it abandons the old in-memory
+pipeline ownership and rings humans once.
+
+Use `GET /api/v1/calls/{id}` to inspect the snapshotted order and full stage
+history. Transport identifiers are intentionally absent. If a stage appears as
+`skipped_unavailable`, verify that the integration's `service.ready` response
+granted `call.screen` and that its stable name exactly matches the configured
+entry.
 
 ## Windows OpenStick ADB bridge
 

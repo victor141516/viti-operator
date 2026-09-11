@@ -1,6 +1,7 @@
 {
   "listen": "0.0.0.0:8787",
   "data_file": "/data/state.json",
+  "screening_pipeline": [],
   "telephony": {
     "type": "asterisk_ami",
     "ami": {
