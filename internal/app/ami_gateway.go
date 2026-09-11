@@ -135,6 +135,7 @@ func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceM
 	}
 	if !validCallControlID(request.SessionID) || !validCallControlID(request.EngineCallID) ||
 		!integrationNamePattern.MatchString(request.ServiceName) || !validCallControlID(request.ConnectionID) ||
+		!validCallControlID(request.RecordingID) ||
 		(request.TraceID != "" && !validCallControlID(request.TraceID)) {
 		return errors.New("invalid service media bridge identifiers")
 	}
@@ -148,9 +149,9 @@ func (g *AMIGateway) originateServiceMedia(ctx context.Context, request serviceM
 		"VITI_CALL_ID=" + request.EngineCallID,
 		"VITI_TRACE_ID=" + request.TraceID,
 		"VITI_CLIENT_ID=" + request.ServiceName,
-		"VITI_PARTICIPANT_ID=" + request.SessionID,
+		"VITI_PARTICIPANT_ID=" + request.ServiceName,
 		"VITI_CONNECTION_ID=" + request.ConnectionID,
-		"VITI_RECORDING_FILE_ID=" + request.SessionID,
+		"VITI_RECORDING_FILE_ID=" + request.RecordingID,
 		"VITI_PARTICIPANT_ROLE=service",
 	}, ",")
 	originateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)

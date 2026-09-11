@@ -68,6 +68,7 @@ type serviceMediaSession struct {
 	call           Call
 	serviceName    string
 	connectionID   string
+	recordingID    string
 	purpose        string
 	codec          serviceMediaCodec
 	peer           *webrtc.PeerConnection
@@ -181,6 +182,10 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	if err != nil {
 		return nil, serviceMediaDescription{}, errors.New("could not allocate media session")
 	}
+	recordingID, err := randomID("track")
+	if err != nil {
+		return nil, serviceMediaDescription{}, errors.New("could not allocate service recording segment")
+	}
 	rtpSocket, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
 	if err != nil {
 		return nil, serviceMediaDescription{}, fmt.Errorf("open Asterisk RTP bridge: %w", err)
@@ -210,7 +215,7 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	sender := transceiver.Sender()
 	session := &serviceMediaSession{
 		manager: m, id: sessionID, call: request.Call, serviceName: request.ServiceName,
-		connectionID: request.ConnectionID, purpose: request.Purpose, codec: codec, peer: peer,
+		connectionID: request.ConnectionID, recordingID: recordingID, purpose: request.Purpose, codec: codec, peer: peer,
 		asteriskRTP: rtpSocket, localTrack: localTrack,
 		connected: make(chan struct{}), terminated: make(chan struct{}),
 	}
@@ -260,7 +265,7 @@ func (m *serviceMediaManager) prepareSession(ctx context.Context, request servic
 	bridgeRequest := serviceMediaBridgeRequest{
 		SessionID: sessionID, CallID: request.Call.ID, EngineCallID: request.Call.EngineCallID,
 		TraceID: request.Call.TraceID, ServiceName: request.ServiceName, ConnectionID: request.ConnectionID,
-		RTPHost: m.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: codec.asteriskName,
+		RecordingID: recordingID, RTPHost: m.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: codec.asteriskName,
 	}
 	if joinExisting {
 		if err := m.bridge.JoinServiceMedia(ctx, bridgeRequest); err != nil {
@@ -316,7 +321,7 @@ func (s *serviceMediaSession) activateOutgoing(ctx context.Context, destination 
 	request := serviceMediaBridgeRequest{
 		SessionID: s.id, CallID: s.call.ID, EngineCallID: s.call.EngineCallID, TraceID: s.call.TraceID,
 		ServiceName: s.serviceName, ConnectionID: s.connectionID,
-		RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: s.codec.asteriskName,
+		RecordingID: s.recordingID, RTPHost: s.manager.cfg.AsteriskRTPHost, RTPPort: rtpPort, Codec: s.codec.asteriskName,
 	}
 	if err := s.manager.bridge.StartServiceCall(ctx, request, destination); err != nil {
 		return fmt.Errorf("start service call through Asterisk: %w", err)

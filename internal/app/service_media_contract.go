@@ -59,6 +59,7 @@ type serviceMediaBridgeRequest struct {
 	TraceID      string
 	ServiceName  string
 	ConnectionID string
+	RecordingID  string
 	RTPHost      string
 	RTPPort      int
 	Codec        string

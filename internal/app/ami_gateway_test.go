@@ -61,7 +61,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	}
 	mediaRequest := serviceMediaBridgeRequest{
 		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
-		ServiceName: "transcriber", ConnectionID: "integration-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
+		ServiceName: "transcriber", ConnectionID: "integration-42", RecordingID: "track-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
 	}
 	if err := gateway.JoinServiceMedia(ctx, mediaRequest); err != nil {
 		t.Fatal(err)
@@ -110,7 +110,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		if first(request, "Action") == "Originate" {
 			if first(request, "Context") == "viti-service-conference" {
 				sawMediaJoin = first(request, "Channel") == "UnicastRTP/manager:32000/c(opus)" &&
-					first(request, "ChannelId") == "media-42" && strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ROLE=service")
+					first(request, "ChannelId") == "media-42" && strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ROLE=service") &&
+					strings.Contains(first(request, "Variable"), "VITI_PARTICIPANT_ID=transcriber") &&
+					strings.Contains(first(request, "Variable"), "VITI_RECORDING_FILE_ID=track-42")
 			}
 			if first(request, "Context") == "from-local" {
 				sawServiceCall = first(request, "Exten") == "+34987654321" && first(request, "ChannelId") == "media-call-43"

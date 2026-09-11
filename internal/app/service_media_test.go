@@ -262,7 +262,8 @@ func TestServiceMediaBindsSessionToConnectionAndReplacesOwnerGeneration(t *testi
 
 	bridge.mu.Lock()
 	defer bridge.mu.Unlock()
-	if len(bridge.joins) != 2 || bridge.joins[0].RTPPort == 0 || bridge.joins[0].SessionID != first.SessionID {
+	if len(bridge.joins) != 2 || bridge.joins[0].RTPPort == 0 || bridge.joins[0].SessionID != first.SessionID ||
+		bridge.joins[0].RecordingID == "" || bridge.joins[0].RecordingID == first.SessionID {
 		t.Fatalf("bridge joins = %#v", bridge.joins)
 	}
 	if len(bridge.leaves) == 0 || bridge.leaves[0] != first.SessionID {
