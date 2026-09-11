@@ -104,7 +104,6 @@ type screeningManager struct {
 }
 
 type screeningRecovery struct {
-	call  Call
 	timer *time.Timer
 }
 
@@ -652,7 +651,7 @@ func (m *screeningManager) recoverActive(call Call) {
 			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
 		})
 	}
-	recovery := &screeningRecovery{call: call}
+	recovery := &screeningRecovery{}
 	recovery.timer = time.AfterFunc(m.ringTimeout, func() { m.recoveryExpired(call.ID, recovery) })
 	m.recovered[call.ID] = recovery
 	m.mu.Unlock()
@@ -669,7 +668,11 @@ func (m *screeningManager) recoveryExpired(callID string, expected *screeningRec
 		return
 	}
 	delete(m.recovered, callID)
-	call := recovery.call
+	call, found := m.store.GetCall(callID)
+	if !found || call.Screening == nil || call.EndedAt != nil {
+		m.mu.Unlock()
+		return
+	}
 	now := time.Now().UTC()
 	call.Screening = cloneCallScreening(call.Screening)
 	call.Screening.State = "ending"
@@ -771,12 +774,35 @@ func (m *screeningManager) HumanJoined(call Call) {
 func (m *screeningManager) CallEnded(call Call, actor, reason string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	recovered := false
 	if recovery := m.recovered[call.ID]; recovery != nil {
 		recovery.timer.Stop()
 		delete(m.recovered, call.ID)
+		recovered = true
 	}
 	session := m.sessions[call.ID]
 	if session == nil {
+		if recovered {
+			if latest, found := m.store.GetCall(call.ID); found {
+				call = latest
+			}
+			if call.Screening != nil {
+				now := time.Now().UTC()
+				call.Screening = cloneCallScreening(call.Screening)
+				call.Screening.State = "ended"
+				if call.Screening.Outcome == "" {
+					call.Screening.Outcome = "call_ended"
+				}
+				call.Screening.TerminatedBy = actor
+				call.Screening.Reason = reason
+				call.Screening.CompletedAt = &now
+				if err := m.store.SaveCall(call); err != nil {
+					m.events.Publish("screening.persistence.failed", map[string]any{
+						"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
+					})
+				}
+			}
+		}
 		return
 	}
 	m.stopAllTimers(session)

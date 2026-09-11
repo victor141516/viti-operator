@@ -275,6 +275,11 @@ func TestScreeningActiveCallAfterRestartFailsOpenOnce(t *testing.T) {
 		stored.Screening.Reason != "manager_restart_fail_open" {
 		t.Fatalf("restart recovery record = %#v", stored.Screening)
 	}
+	stored.ContactName = "Updated while ringing"
+	stored.RecordingTracks = []RecordingTrack{{ID: "track-after-restart", Role: "remote"}}
+	if err := application.store.SaveCall(stored); err != nil {
+		t.Fatal(err)
+	}
 	select {
 	case hungUp := <-hangups:
 		if hungUp.ID != call.ID {
@@ -282,6 +287,39 @@ func TestScreeningActiveCallAfterRestartFailsOpenOnce(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("restart recovery did not enforce the human ring timeout")
+	}
+	stored, _ = application.store.GetCall(call.ID)
+	if stored.ContactName != "Updated while ringing" || len(stored.RecordingTracks) != 1 ||
+		stored.Screening.Outcome != "no_human_answer" {
+		t.Fatalf("recovery timeout overwrote newer call state: %#v", stored)
+	}
+}
+
+func TestScreeningCallResultFinalizesRestartRecovery(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	manager := newScreeningManager([]string{"voice"}, application.store, application.events, application.integrations, screeningCallbacks{})
+	call := saveIncomingScreeningCall(t, application, "call-recovery-result")
+	now := time.Now().UTC()
+	call.State, call.AnsweredAt = "active", &now
+	call.Screening = &CallScreeningRecord{
+		Pipeline: []string{"voice"}, StartedAt: now.Add(-time.Second), ContextRevision: 1,
+		CurrentStage: 0, State: "controlled", Answered: true,
+	}
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	manager.CallActive(call)
+	call, _ = application.store.GetCall(call.ID)
+	endedAt := time.Now().UTC()
+	call.State, call.EndedAt, call.UpdatedAt = "ended", &endedAt, endedAt
+	if err := application.store.SaveCall(call); err != nil {
+		t.Fatal(err)
+	}
+	manager.CallEnded(call, "carrier", "call_result")
+	stored, _ := application.store.GetCall(call.ID)
+	if stored.Screening == nil || stored.Screening.State != "ended" || stored.Screening.CompletedAt == nil ||
+		stored.Screening.TerminatedBy != "carrier" || stored.Screening.Reason != "call_result" {
+		t.Fatalf("recovery call result record = %#v", stored.Screening)
 	}
 }
 
