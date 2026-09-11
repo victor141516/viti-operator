@@ -620,14 +620,16 @@ func (m *screeningManager) CallActive(call Call) {
 
 func (m *screeningManager) RecoverPersisted() {
 	for _, call := range m.store.Calls() {
-		if call.Direction == DirectionIncoming && call.EndedAt == nil && call.AnsweredAt != nil && call.Screening != nil {
+		if call.Direction == DirectionIncoming && call.EndedAt == nil && call.AnsweredAt != nil &&
+			call.Screening != nil && call.Screening.CompletedAt == nil {
 			m.recoverActive(call)
 		}
 	}
 }
 
 func (m *screeningManager) recoverActive(call Call) {
-	if call.Direction != DirectionIncoming || call.EndedAt != nil || call.AnsweredAt == nil || call.Screening == nil {
+	if call.Direction != DirectionIncoming || call.EndedAt != nil || call.AnsweredAt == nil ||
+		call.Screening == nil || call.Screening.CompletedAt != nil {
 		return
 	}
 	m.mu.Lock()
@@ -639,14 +641,12 @@ func (m *screeningManager) recoverActive(call Call) {
 		m.mu.Unlock()
 		return
 	}
-	now := time.Now().UTC()
 	call.Screening = cloneCallScreening(call.Screening)
 	call.Screening.Answered = true
 	call.Screening.State = "ringing_clients"
 	call.Screening.Outcome = "ring_clients"
 	call.Screening.TerminatedBy = "viti"
 	call.Screening.Reason = "manager_restart_fail_open"
-	call.Screening.CompletedAt = &now
 	if err := m.store.SaveCall(call); err != nil {
 		m.events.Publish("screening.persistence.failed", map[string]any{
 			"call_id": call.ID, "trace_id": call.TraceID, "error": err.Error(),
