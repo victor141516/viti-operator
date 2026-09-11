@@ -222,6 +222,51 @@ class StrongSwanAdapterTest(unittest.TestCase):
         adapter.load_and_initiate()
         self.assertEqual(observed, [10.0, 50.0])
 
+    def test_shutdown_between_load_and_initiate_never_starts_initiation(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(environment())
+        calls = []
+
+        def request(method, *_args, **_kwargs):
+            calls.append(method)
+            if method == "load_conn":
+                adapter.stop_requested = True
+            return {}
+
+        adapter.request = request
+        with self.assertRaisesRegex(InterruptedError, "shutdown requested"):
+            adapter.load_and_initiate()
+        self.assertEqual(calls, ["load_conn"])
+
+    def test_shutdown_during_session_creation_closes_before_command(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(environment())
+        command_called = False
+        closed = False
+
+        class Session:
+            class Transport:
+                @staticmethod
+                def close():
+                    nonlocal closed
+                    closed = True
+
+            transport = Transport()
+
+            @staticmethod
+            def initiate(_payload):
+                nonlocal command_called
+                command_called = True
+                return {}
+
+        def session(_timeout):
+            adapter.stop_requested = True
+            return Session()
+
+        adapter.session = session
+        with self.assertRaisesRegex(InterruptedError, "shutdown requested"):
+            adapter.request("initiate", {})
+        self.assertFalse(command_called)
+        self.assertTrue(closed)
+
     def test_reauthentication_uses_long_socket_timeout_for_slow_aka(self):
         adapter = strongswan_adapter.StrongSwanAdapter(
             environment(SWU_HTTP_AKA_TIMEOUT="35")

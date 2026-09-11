@@ -493,10 +493,17 @@ class StrongSwanAdapter:
         except OSError:
             pass
 
-    def request(self, method, payload=None, socket_timeout=10.0):
+    def request(self, method, payload=None, socket_timeout=10.0, cancellable=True):
+        if cancellable:
+            self.raise_if_stopping()
         session = self.session(socket_timeout)
         self.active_session = session
         try:
+            # A signal can arrive while the session is being created, before it
+            # is visible to the handler.  Re-check after publishing it so the
+            # command can never begin after shutdown was requested.
+            if cancellable:
+                self.raise_if_stopping()
             result = getattr(session, method)(payload) if payload is not None else getattr(session, method)()
             if hasattr(result, "__iter__") and not isinstance(
                 result, (dict, str, bytes)
@@ -565,6 +572,7 @@ class StrongSwanAdapter:
 
     def load_and_initiate(self):
         self.request("load_conn", build_connection(self.env))
+        self.raise_if_stopping()
         logs = self.request(
             "initiate",
             {"child": CHILD, "timeout": initiate_timeout_ms(self.env)},
@@ -692,7 +700,8 @@ class StrongSwanAdapter:
             try:
                 self.request("terminate", {
                     "ike": CONNECTION, "timeout": "1500", "force": "yes",
-                }, socket_timeout=min(2.0, max(0.1, deadline - time.monotonic())))
+                }, socket_timeout=min(2.0, max(0.1, deadline - time.monotonic())),
+                    cancellable=False)
             except Exception as error:
                 self.log(f"VICI termination failed: {error}")
             self.charon.send_signal(signal.SIGTERM)
