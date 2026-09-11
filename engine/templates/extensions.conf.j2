@@ -50,7 +50,6 @@ same => n,Ringing()
 {% if dialstr %}
 same => n,Dial({{ dialstr }},60,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-incoming-conference^s^1))
 {% else %}
-same => n,Answer()
 same => n,Wait(60)
 {% endif %}
 same => n,Hangup()

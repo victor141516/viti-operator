@@ -5,6 +5,11 @@ import sys
 import unittest
 from unittest import mock
 
+try:
+    from jinja2 import Environment
+except ImportError:  # The engine image includes python3-jinja2; lightweight host tests may not.
+    Environment = None
+
 import event_outbox
 import notify
 
@@ -175,6 +180,13 @@ class NotifyTest(unittest.TestCase):
         self.assertIn('VITI_SCREEN_ACTION}" = "hangup"', incoming[screening:ring])
         self.assertIn('VITI_SCREEN_ACTION}" = "take_control"', incoming[screening:ring])
 
+        no_endpoint_branch = incoming[
+            incoming.index("{% else %}", ring):
+            incoming.index("{% endif %}", incoming.index("{% else %}", ring))
+        ]
+        self.assertIn("same => n,Wait(60)", no_endpoint_branch)
+        self.assertNotIn("Answer()", no_endpoint_branch)
+
         active_handoff = template[
             template.index("[viti-ring-clients]"):
             template.index("[viti-outgoing-conference]")
@@ -183,6 +195,29 @@ class NotifyTest(unittest.TestCase):
         self.assertIn("G(viti-screened-client^s^1)", active_handoff)
         self.assertNotIn("Ringing()", active_handoff)
         self.assertIn("[viti-screened-client]", active_handoff)
+
+    @unittest.skipIf(Environment is None, "Jinja2 is not installed in the host test environment")
+    def test_incoming_screening_without_human_endpoints_stays_unanswered(self):
+        candidates = [
+            Path(__file__).with_name("templates") / "extensions.conf.j2",
+            Path("/opt/vowifi/templates/extensions.conf.j2"),
+        ]
+        template = next(path for path in candidates if path.exists()).read_text(encoding="utf-8")
+        rendered = Environment(trim_blocks=True, lstrip_blocks=True).from_string(template).render(
+            external_accounts=[],
+            webrtc_enable=False,
+        )
+        incoming = rendered[
+            rendered.index("[volte_ims]"):
+            rendered.index("[volte_ims_msg]")
+        ]
+        unanswered_handoff = incoming[
+            incoming.index("same => n,Ringing()"):
+            incoming.index("same => n(screen_control),Answer()")
+        ]
+
+        self.assertIn("same => n,Wait(60)", unanswered_handoff)
+        self.assertNotIn("Answer()", unanswered_handoff)
 
     def test_participant_event_keeps_call_and_trace_identity(self):
         response = mock.Mock(status_code=204, text="")
