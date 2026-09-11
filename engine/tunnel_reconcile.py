@@ -2,33 +2,64 @@
 """Apply tunnel endpoint changes to the long-running Asterisk process."""
 
 import os
+import json
 from pathlib import Path
 import subprocess
 import time
 
 
 class TunnelReconciler:
+    MARKER_FILE = "tunnel.applied.json"
+    MARKER_KEYS = {
+        "inner_ip.applied": "inner_ip",
+        "pcscf.applied": "pcscf",
+    }
+
     def __init__(self, rundir="/run/vowifi", render="/usr/local/bin/render.py", logger=None):
         self.rundir = Path(rundir)
         self.render = Path(render)
         self.log = logger or (lambda _message: None)
 
     def _read_marker(self, name):
+        key = self.MARKER_KEYS[name]
         try:
-            return (self.rundir / name).read_text(encoding="ascii").strip()
-        except OSError:
+            payload = json.loads(
+                (self.rundir / self.MARKER_FILE).read_text(encoding="utf-8")
+            )
+            value = payload.get(key, "")
+            return value if isinstance(value, str) else ""
+        except (OSError, ValueError, TypeError):
             return ""
 
     def _write_marker(self, name, value):
+        self._write_markers(**{self.MARKER_KEYS[name]: value})
+
+    def _write_markers(self, **updates):
+        """Atomically replace the complete applied tunnel observation."""
         self.rundir.mkdir(parents=True, exist_ok=True)
-        path = self.rundir / name
+        current = {
+            "inner_ip": self._read_marker("inner_ip.applied"),
+            "pcscf": self._read_marker("pcscf.applied"),
+        }
+        current.update(updates)
+        path = self.rundir / self.MARKER_FILE
         temporary = path.with_suffix(path.suffix + ".tmp")
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(descriptor, "w", encoding="ascii") as output:
-            output.write(value)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(current, output, separators=(",", ":"), sort_keys=True)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+
+    def record_initial(self, inner_ip, pcscf):
+        """Commit the initial observation after entrypoint rendering succeeds."""
+        updates = {}
+        if inner_ip:
+            updates["inner_ip"] = inner_ip
+        if pcscf:
+            updates["pcscf"] = pcscf
+        if updates:
+            self._write_markers(**updates)
 
     @staticmethod
     def _call(command):
@@ -49,11 +80,9 @@ class TunnelReconciler:
             return False
         previous = self._read_marker("pcscf.applied") or "unset"
         if self._call(["asterisk", "-rx", "core show uptime"]) != 0:
-            # Initial attach happens before Asterisk starts.  The entrypoint
-            # performs the first render after it observes the P-CSCF; recording
-            # it here avoids treating that initial assignment as a live change.
-            self._write_marker("pcscf.applied", address)
-            return True
+            # The entrypoint renders and atomically records the complete first
+            # observation before starting Asterisk.  Never consume it here.
+            return False
         self.log(f"P-CSCF changed ({previous} -> {address}); reloading PJSIP")
         if self._call(["python3", str(self.render)]) != 0:
             raise RuntimeError("render failed while applying the P-CSCF")
@@ -97,6 +126,8 @@ class TunnelReconciler:
             else:
                 raise RuntimeError("Asterisk did not recover after inner-IP change")
 
+        if not asterisk_running:
+            return False
         self._write_marker("inner_ip.applied", address)
         return True
 
@@ -119,13 +150,10 @@ class TunnelReconciler:
 
         asterisk_running = self._call(["asterisk", "-rx", "core show uptime"]) == 0
         if not asterisk_running:
-            # The entrypoint renders the discovered P-CSCF and starts Asterisk
-            # after the initial attach.  Mark both values as one observation.
-            if inner_changed:
-                self._write_marker("inner_ip.applied", inner_ip)
-            if pcscf_changed:
-                self._write_marker("pcscf.applied", pcscf)
-            return True
+            # The entrypoint renders and atomically records the complete first
+            # observation before starting Asterisk.  Repeated monitor samples
+            # remain pending until that transaction commits.
+            return False
 
         if inner_changed and pcscf_changed:
             if not self.render.exists():
@@ -157,8 +185,7 @@ class TunnelReconciler:
 
             # Advance neither marker until render, restart and registration all
             # succeed, so a failed transaction is retried in full.
-            self._write_marker("inner_ip.applied", inner_ip)
-            self._write_marker("pcscf.applied", pcscf)
+            self._write_markers(inner_ip=inner_ip, pcscf=pcscf)
             return True
 
         if inner_changed:

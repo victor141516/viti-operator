@@ -510,8 +510,33 @@ def run_resilience_scenarios(backend, connected_probe, lifecycle_probe):
     run_crash_recovery(backend, connected_probe, lifecycle_probe)
 
 
+def run_production_entrypoint_startup_shutdown():
+    """Stop production PID 1 while IKE_AUTH is blocked on slow AKA."""
+    COMPOSE_OVERRIDES["LAB_ENGINE_AKA_TIMEOUT"] = "60"
+    try:
+        reset_lab()
+        compose("up", "-d", *COMMON_SERVICES)
+        broker_request(
+            "/control",
+            {"mode": "timeout", "delay_seconds": 30, "reset_count": True},
+        )
+        compose("--profile", "entrypoint", "up", "-d", "engine-entrypoint")
+        wait_for_log("engine-entrypoint", "charon is ready through VICI", timeout=30)
+        wait_for_broker_requests(1)
+        compose("--profile", "entrypoint", "stop", "-t", "20", "engine-entrypoint")
+        compose(
+            "--profile", "entrypoint", "run", "--rm",
+            "-e", "LAB_PROBE_MODE=failed_attach",
+            "engine-entrypoint-terminated-probe",
+        )
+        print("LAB_PRODUCTION_ENTRYPOINT_STARTUP_SHUTDOWN_OK=strongswan")
+    finally:
+        COMPOSE_OVERRIDES.pop("LAB_ENGINE_AKA_TIMEOUT", None)
+
+
 def run_production_entrypoint_recovery_and_shutdown():
     """Crash charon in the packaged namespace, recover, then stop PID 1."""
+    run_production_entrypoint_startup_shutdown()
     reset_lab()
     compose(
         "--profile", "entrypoint", "up", "-d",

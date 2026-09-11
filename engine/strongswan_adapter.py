@@ -388,11 +388,13 @@ class RuntimeContract:
     def disconnected(self, reason_code="backend_stopped", reason_policy="transient", **extra):
         if self.down:
             return
+        if self.started:
+            self.event("tunnel_down", reason_code)
+        # DOWN is the externally observed completion boundary, so publish it
+        # only after tunnel_down is durable in the outbox.
         self.write_status(
             "DOWN", reason_code=reason_code, reason_policy=reason_policy, **extra
         )
-        if self.started:
-            self.event("tunnel_down", reason_code)
         self.down = True
         self.up = False
 
@@ -427,6 +429,10 @@ class StrongSwanAdapter:
 
     def log(self, message):
         print(f"[strongswan-adapter] {message}", flush=True)
+
+    def raise_if_stopping(self):
+        if self.stop_requested:
+            raise InterruptedError("adapter shutdown requested")
 
     def session(self, timeout=10.0):
         import vici
@@ -513,6 +519,7 @@ class StrongSwanAdapter:
             self.env, "SWU_CHARON_START_TIMEOUT", "15"
         )
         while time.monotonic() < deadline:
+            self.raise_if_stopping()
             if self.charon.poll() is not None:
                 raise RuntimeError(f"charon exited during startup ({self.charon.returncode})")
             if self.vici_socket.exists():
@@ -523,6 +530,7 @@ class StrongSwanAdapter:
                 except (OSError, RuntimeError):
                     pass
             time.sleep(0.1)
+        self.raise_if_stopping()
         raise TimeoutError("charon VICI socket did not become ready")
 
     def start_charon(self):
@@ -583,6 +591,7 @@ class StrongSwanAdapter:
         }
         last_sa = None
         while time.monotonic() < deadline:
+            self.raise_if_stopping()
             if self.charon.poll() is not None:
                 raise RuntimeError(f"charon exited while connecting ({self.charon.returncode})")
             last_sa = self.current_sa()
@@ -603,6 +612,7 @@ class StrongSwanAdapter:
                 )
                 return
             time.sleep(0.2)
+        self.raise_if_stopping()
         raise TimeoutError(f"SWu tunnel did not become usable; last_sa={last_sa!r}")
 
     def open_control(self):
@@ -720,9 +730,13 @@ class StrongSwanAdapter:
                 pass
         try:
             if self.wait_auth_ready():
+                self.raise_if_stopping()
                 self.start_charon()
+                self.raise_if_stopping()
                 self.load_and_initiate()
+                self.raise_if_stopping()
                 self.wait_connected()
+                self.raise_if_stopping()
                 self.open_control()
                 self.monitor()
             if self.signal_received is not None:

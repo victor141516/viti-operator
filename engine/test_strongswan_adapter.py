@@ -366,6 +366,23 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 ["tunnel_start", "tunnel_up", "tunnel_down"],
             )
 
+    def test_runtime_publishes_down_only_after_durable_event(self):
+        runtime = strongswan_adapter.RuntimeContract(environment())
+        runtime.started = True
+        calls = mock.Mock()
+        calls.attach_mock(mock.patch.object(runtime, "event").start(), "event")
+        calls.attach_mock(mock.patch.object(runtime, "write_status").start(), "status")
+        self.addCleanup(mock.patch.stopall)
+
+        runtime.disconnected("test")
+
+        self.assertEqual(calls.mock_calls, [
+            mock.call.event("tunnel_down", "test"),
+            mock.call.status(
+                "DOWN", reason_code="test", reason_policy="transient"
+            ),
+        ])
+
     def test_runtime_deduplicates_connected_status_between_heartbeats(self):
         with tempfile.TemporaryDirectory() as directory:
             runtime = strongswan_adapter.RuntimeContract({
@@ -459,6 +476,48 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 "reason_code": "signal",
                 "reason_policy": "transient",
             }])
+
+    def test_signal_between_startup_phases_prevents_next_phase(self):
+        with tempfile.TemporaryDirectory() as directory:
+            failures = []
+
+            class Runtime:
+                rundir = Path(directory)
+
+                @staticmethod
+                def start():
+                    return None
+
+                @staticmethod
+                def disconnected(**failure):
+                    failures.append(failure)
+
+            adapter = strongswan_adapter.StrongSwanAdapter(environment())
+            adapter.runtime = Runtime()
+            adapter.wait_auth_ready = lambda: True
+
+            def interrupted_start():
+                adapter.stop_requested = True
+                adapter.signal_received = signal.SIGTERM
+
+            adapter.start_charon = interrupted_start
+            adapter.load_and_initiate = mock.Mock()
+            adapter.terminate = lambda: None
+
+            self.assertEqual(adapter.run(), 0)
+            adapter.load_and_initiate.assert_not_called()
+            self.assertEqual(failures, [{
+                "reason_code": "signal",
+                "reason_policy": "transient",
+            }])
+
+    def test_startup_waits_are_cancellation_aware(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(environment())
+        adapter.stop_requested = True
+        with self.assertRaisesRegex(InterruptedError, "shutdown requested"):
+            adapter.wait_for_vici()
+        with self.assertRaisesRegex(InterruptedError, "shutdown requested"):
+            adapter.wait_connected()
 
 
 if __name__ == "__main__":

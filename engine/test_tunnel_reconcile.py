@@ -16,17 +16,14 @@ class TunnelReconcilerTest(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_initial_inner_address_is_recorded_without_restarting_asterisk(self):
+    def test_initial_inner_address_remains_pending_until_entrypoint_commit(self):
         with mock.patch.object(self.subject, "_call", return_value=1) as call:
-            self.assertTrue(self.subject.apply_inner_ip("2001:db8::10"))
-        self.assertEqual(
-            (Path(self.temp.name) / "inner_ip.applied").read_text(),
-            "2001:db8::10",
-        )
+            self.assertFalse(self.subject.apply_inner_ip("2001:db8::10"))
+        self.assertFalse((Path(self.temp.name) / self.subject.MARKER_FILE).exists())
         call.assert_called_once_with(["asterisk", "-rx", "core show uptime"])
 
     def test_changed_inner_address_restarts_and_restores_registration(self):
-        (Path(self.temp.name) / "inner_ip.applied").write_text("2001:db8::10")
+        self.subject.record_initial("2001:db8::10", "")
         calls = []
 
         def call(command):
@@ -44,7 +41,7 @@ class TunnelReconcilerTest(unittest.TestCase):
             "core show uptime", "core restart now", "pjsip send register volte_ims",
         ])
         self.assertEqual(
-            (Path(self.temp.name) / "inner_ip.applied").read_text(),
+            self.subject._read_marker("inner_ip.applied"),
             "2001:db8::20",
         )
 
@@ -77,11 +74,11 @@ class TunnelReconcilerTest(unittest.TestCase):
             "pjsip send register volte_ims",
         ])
         self.assertEqual(
-            (Path(self.temp.name) / "inner_ip.applied").read_text(),
+            self.subject._read_marker("inner_ip.applied"),
             "2001:db8::20",
         )
         self.assertEqual(
-            (Path(self.temp.name) / "pcscf.applied").read_text(),
+            self.subject._read_marker("pcscf.applied"),
             "2001:db8::30",
         )
 
@@ -89,17 +86,28 @@ class TunnelReconcilerTest(unittest.TestCase):
         with mock.patch.object(self.subject, "_call", side_effect=[0, 0, 1]):
             with self.assertRaisesRegex(RuntimeError, "core restart failed"):
                 self.subject.apply("2001:db8::20", "2001:db8::30")
-        self.assertFalse((Path(self.temp.name) / "inner_ip.applied").exists())
-        self.assertFalse((Path(self.temp.name) / "pcscf.applied").exists())
+        self.assertFalse((Path(self.temp.name) / self.subject.MARKER_FILE).exists())
+
+    def test_combined_marker_replace_failure_preserves_previous_observation(self):
+        self.subject.record_initial("2001:db8::10", "2001:db8::11")
+        with mock.patch.object(tunnel_reconcile.os, "replace", side_effect=OSError("disk")):
+            with self.assertRaisesRegex(OSError, "disk"):
+                self.subject.record_initial("2001:db8::20", "2001:db8::30")
+        self.assertEqual(
+            self.subject._read_marker("inner_ip.applied"), "2001:db8::10"
+        )
+        self.assertEqual(
+            self.subject._read_marker("pcscf.applied"), "2001:db8::11"
+        )
 
     def test_unchanged_inner_address_is_a_noop(self):
-        (Path(self.temp.name) / "inner_ip.applied").write_text("2001:db8::10")
+        self.subject.record_initial("2001:db8::10", "")
         with mock.patch.object(self.subject, "_call") as call:
             self.assertFalse(self.subject.apply_inner_ip("2001:db8::10"))
         call.assert_not_called()
 
     def test_pcscf_change_renders_reloads_and_registers(self):
-        (Path(self.temp.name) / "pcscf.applied").write_text("2001:db8::10")
+        self.subject.record_initial("", "2001:db8::10")
         with mock.patch.object(self.subject, "_call", return_value=0) as call:
             self.assertTrue(self.subject.apply_pcscf("2001:db8::20"))
         self.assertEqual([item.args[0] for item in call.call_args_list], [
@@ -109,7 +117,7 @@ class TunnelReconcilerTest(unittest.TestCase):
             ["asterisk", "-rx", "pjsip send register volte_ims"],
         ])
         self.assertEqual(
-            (Path(self.temp.name) / "pcscf.applied").read_text(),
+            self.subject._read_marker("pcscf.applied"),
             "2001:db8::20",
         )
 
@@ -117,15 +125,12 @@ class TunnelReconcilerTest(unittest.TestCase):
         with mock.patch.object(self.subject, "_call", side_effect=[0, 1]):
             with self.assertRaisesRegex(RuntimeError, "render failed"):
                 self.subject.apply_pcscf("2001:db8::20")
-        self.assertFalse((Path(self.temp.name) / "pcscf.applied").exists())
+        self.assertFalse((Path(self.temp.name) / self.subject.MARKER_FILE).exists())
 
-    def test_initial_pcscf_is_recorded_without_rendering_before_asterisk(self):
+    def test_initial_pcscf_remains_pending_until_entrypoint_commit(self):
         with mock.patch.object(self.subject, "_call", return_value=1) as call:
-            self.assertTrue(self.subject.apply_pcscf("2001:db8::20"))
-        self.assertEqual(
-            (Path(self.temp.name) / "pcscf.applied").read_text(),
-            "2001:db8::20",
-        )
+            self.assertFalse(self.subject.apply_pcscf("2001:db8::20"))
+        self.assertFalse((Path(self.temp.name) / self.subject.MARKER_FILE).exists())
         call.assert_called_once_with(["asterisk", "-rx", "core show uptime"])
 
 

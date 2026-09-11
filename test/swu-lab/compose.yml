@@ -73,7 +73,7 @@ services:
       SWU_MNC: "001"
       SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
       SWU_HTTP_AKA_TOKEN: lab-token
-      SWU_HTTP_AKA_TIMEOUT: "1"
+      SWU_HTTP_AKA_TIMEOUT: "${LAB_ENGINE_AKA_TIMEOUT:-1}"
       SWU_TUN_MTU: "1400"
       SWU_LIVENESS_PERIOD: "${LAB_SWU_LIVENESS_PERIOD:-20}"
       SWU_NATT_KEEPALIVE: "${LAB_SWU_NATT_KEEPALIVE:-20}"

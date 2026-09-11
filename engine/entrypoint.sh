@@ -21,6 +21,58 @@ export USIM_PIN USIM_READER USIM_READER_INDEX USIM_READER_PORT USIM_IMSI VOWIFI_
 export SWU_SOURCE SWU_EPDG SWU_APN SWU_MCC SWU_MNC SWU_CHILD_REKEY_MINUTES SWU_IKE_REKEY_MINUTES SWU_IDR_MODE
 export SWU_HTTP_AKA_URL SWU_HTTP_AKA_TOKEN
 
+# Install an unset-safe shutdown path before starting workers or entering any
+# potentially long PIN, IKE, or P-CSCF wait. Docker may stop the container at
+# any point in startup.
+OUTBOX_PID=""
+KEEPER_PID=""
+SWU_PID=""
+AMI_PID=""
+ASTERISK_PID=""
+SHUTDOWN_STARTED=0
+
+shutdown_engine() {
+  [ "$SHUTDOWN_STARTED" = "1" ] && return
+  SHUTDOWN_STARTED=1
+  trap - TERM INT
+  log "stopping engine services..."
+  adapter_pid=$(cat "$VOWIFI_RUNDIR/swu_adapter.pid" 2>/dev/null || true)
+  [ -n "$SWU_PID" ] && kill -TERM "$SWU_PID" 2>/dev/null || true
+  # Also signal the adapter directly. The supervisor is a subshell and the
+  # adapter is its grandchild, so waiting for only the supervisor is not a
+  # sufficient persistence boundary.
+  [ -n "$adapter_pid" ] && kill -TERM "$adapter_pid" 2>/dev/null || true
+  if [ -n "$adapter_pid" ]; then
+    for _ in $(seq 1 120); do
+      st=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json'))['state'])" 2>/dev/null || echo "")
+      process_state=$(awk '{print $3}' "/proc/$adapter_pid/stat" 2>/dev/null || echo "gone")
+      # RuntimeContract publishes DOWN only after its tunnel_down event is
+      # durable. Require both that boundary and completion of this exact
+      # adapter process before allowing PID 1 to leave the namespace.
+      if [ "$st" = "DOWN" ] && { [ "$process_state" = "gone" ] || [ "$process_state" = "Z" ]; }; then
+        break
+      fi
+      sleep 0.1
+    done
+  fi
+  [ -n "$SWU_PID" ] && wait "$SWU_PID" 2>/dev/null || true
+  # Give the durable worker one final chance to deliver tunnel_down before exit.
+  python3 /usr/local/bin/event_outbox.py --flush-once >/dev/null 2>&1 || true
+  for pid in "$ASTERISK_PID" "$AMI_PID" "$OUTBOX_PID" "$KEEPER_PID"; do
+    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+  done
+  for pid in "$ASTERISK_PID" "$AMI_PID" "$OUTBOX_PID" "$KEEPER_PID"; do
+    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+  done
+}
+
+handle_shutdown_signal() {
+  shutdown_engine
+  exit 143
+}
+
+trap handle_shutdown_signal TERM INT
+
 # Delivery reports are irreplaceable protocol evidence. They are committed to
 # the bind-mounted runtime outbox by ami_usim and retried here across manager or
 # container restarts until a 2xx acknowledgement is received.
@@ -69,7 +121,7 @@ else
 fi
 rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json" \
   "$VOWIFI_RUNDIR/pcscf.applied" "$VOWIFI_RUNDIR/inner_ip.applied" \
-  "$VOWIFI_RUNDIR/swu_adapter.pid"
+  "$VOWIFI_RUNDIR/tunnel.applied.json" "$VOWIFI_RUNDIR/swu_adapter.pid"
 
 # Full adapter/charon output goes to the opt-in diagnostic file. Normal operation
 # retains only normalized lifecycle evidence in Docker logs and a bounded file.
@@ -134,21 +186,27 @@ for _ in $(seq 1 30); do
   sleep 1
 done
 addr=$(cat "$VOWIFI_RUNDIR/pcscf" 2>/dev/null)
+inner=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json')).get('inner_ip',''))" 2>/dev/null || echo "")
 if [ -n "$addr" ]; then
   log "discovered P-CSCF: $addr"
-  python3 /usr/local/bin/render.py || true   # re-render pjsip.conf with pcscf
-  # Seed the applied-marker so the tunnel integration only re-renders + reloads
-  # Asterisk on a LATER change (reconnect/reauth), not redundantly right after this render.
-  printf '%s' "$addr" > "$VOWIFI_RUNDIR/pcscf.applied"
+  if ! python3 /usr/local/bin/render.py; then
+    log "render failed while applying the initial P-CSCF"
+    shutdown_engine
+    exit 1
+  fi
 else
   log "no P-CSCF discovered yet - continuing (manager will surface tunnel state)"
 fi
 
-# PJSIP resolves bind_interface=ipsec0 when its transport starts. Remember the initial inner
-# address so the tunnel integration can detect a later change and restart that transport.
-inner=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json')).get('inner_ip',''))" 2>/dev/null || echo "")
-if [ -n "$inner" ]; then
-  printf '%s' "$inner" > "$VOWIFI_RUNDIR/inner_ip.applied"
+# Commit the initial tunnel endpoints as one atomic observation, and only after
+# the P-CSCF render succeeded. A later reconnect can now distinguish a real
+# change from the values Asterisk is about to consume at startup.
+if [ -n "$inner" ] || [ -n "$addr" ]; then
+  if ! PYTHONPATH=/usr/local/bin python3 -c 'import sys; from tunnel_reconcile import TunnelReconciler; TunnelReconciler(sys.argv[1]).record_initial(sys.argv[2], sys.argv[3])' "$VOWIFI_RUNDIR" "$inner" "$addr"; then
+    log "failed to persist the initial tunnel observation"
+    shutdown_engine
+    exit 1
+  fi
 fi
 
 # --- 5. Start USIM<->AMI bridge and Asterisk -------------------------------------
@@ -168,42 +226,6 @@ if [[ "${VOWIFI_DIAGNOSTICS_ENABLED:-0}" =~ ^(1|true|yes|on)$ ]]; then
     done ) &
 fi
 
-SHUTDOWN_STARTED=0
-shutdown_engine() {
-  [ "$SHUTDOWN_STARTED" = "1" ] && return
-  SHUTDOWN_STARTED=1
-  trap - TERM INT
-  log "stopping engine services..."
-  adapter_pid=$(cat "$VOWIFI_RUNDIR/swu_adapter.pid" 2>/dev/null || true)
-  kill -TERM "$SWU_PID" 2>/dev/null || true
-  # Also signal the adapter directly. This closes the narrow race where PID 1
-  # asks the supervisor to stop while the latter is blocked in `wait` and its
-  # nested trap has not run yet.
-  [ -n "$adapter_pid" ] && kill -TERM "$adapter_pid" 2>/dev/null || true
-  # The supervisor is a subshell and is PID 1's child, but the adapter is its
-  # grandchild.  A signal may make the subshell exit before the adapter has
-  # persisted tunnel_down.  Keep PID 1 alive until that causal boundary is on
-  # disk; otherwise Docker tears down the namespace and can leave a stale
-  # CONNECTED status even though every process is gone.
-  if [ -n "$adapter_pid" ]; then
-    for _ in $(seq 1 120); do
-      st=$(python3 -c "import json;print(json.load(open('$VOWIFI_RUNDIR/swu_status.json'))['state'])" 2>/dev/null || echo "")
-      [ "$st" = "DOWN" ] && break
-      sleep 0.1
-    done
-  fi
-  wait "$SWU_PID" 2>/dev/null || true
-  # Give the durable worker one final chance to deliver tunnel_down before exit.
-  python3 /usr/local/bin/event_outbox.py --flush-once >/dev/null 2>&1 || true
-  for pid in "${ASTERISK_PID:-}" "$AMI_PID" "$OUTBOX_PID" "${KEEPER_PID:-}"; do
-    [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
-  done
-  for pid in "${ASTERISK_PID:-}" "$AMI_PID" "$OUTBOX_PID" "${KEEPER_PID:-}"; do
-    [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
-  done
-}
-
-trap shutdown_engine TERM INT
 log "starting Asterisk..."
 asterisk -f &
 ASTERISK_PID=$!
