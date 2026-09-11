@@ -1,0 +1,20 @@
+diff --git a/src/libcharon/sa/ikev2/tasks/ike_auth.c b/src/libcharon/sa/ikev2/tasks/ike_auth.c
+index e998b90..ed9fc55 100644
+--- a/src/libcharon/sa/ikev2/tasks/ike_auth.c
++++ b/src/libcharon/sa/ikev2/tasks/ike_auth.c
+@@ -839,8 +839,13 @@ METHOD(task_t, build_i, status_t,
+ 		message->add_notify(message, FALSE, EAP_ONLY_AUTHENTICATION,
+ 							chunk_empty);
+ 		/* indicate support for RFC 6311 Message ID synchronization */
+-		message->add_notify(message, FALSE, IKEV2_MESSAGE_ID_SYNC_SUPPORTED,
+-							chunk_empty);
++		if (lib->settings->get_bool(lib->settings,
++								   "%s.send_message_id_sync_supported", TRUE,
++								   lib->ns))
++		{
++			message->add_notify(message, FALSE,
++					IKEV2_MESSAGE_ID_SYNC_SUPPORTED, chunk_empty);
++		}
+ 		/* only use a PPK in the first round */
+ 		if (!get_ppk_i(this))
+ 		{

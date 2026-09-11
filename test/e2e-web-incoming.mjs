@@ -5,11 +5,13 @@ const pageURL = process.env.VITI_WEB_URL || "http://127.0.0.1:18788/?testTone=1#
 const barrierPath = process.env.VITI_BARRIER_PATH || "";
 const apiKey = process.env.VITI_TEST_API_KEY || "";
 const winner = process.env.VITI_INCOMING_WINNER === "android" ? "android" : "web";
+const expectRemoteHangup = process.env.VITI_EXPECT_REMOTE_HANGUP === "1";
 const anyIncomingPeer = process.env.VITI_INCOMING_ANY_PEER === "1";
 const expectedPeer = process.env.VITI_INCOMING_PEER || "Prueba local";
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 
 if (!barrierPath) throw new Error("VITI_BARRIER_PATH is required");
+if (expectRemoteHangup && winner !== "web") throw new Error("remote-hangup mode requires the web winner");
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -89,6 +91,7 @@ let ringing = false;
 let active = false;
 let bidirectional = false;
 let joinedConference = false;
+let remoteHungup = false;
 let historyFinalized = false;
 let initialFinalizedCalls = 0;
 const incomingCallFilter = anyIncomingPeer
@@ -152,11 +155,19 @@ try {
     ), 30000);
     mark("web-joined");
   }
-  await waitFor("release instruction", () => existsSync(`${barrierPath}.release`), 60000);
+  if (expectRemoteHangup) {
+    await waitFor("remote hangup instruction", () => existsSync(`${barrierPath}.remote-hangup`), 60000);
+    remoteHungup = await waitFor("remote call termination", () => evaluate("state.localCall === false"), 30000);
+    mark("web-remote-hungup");
+  } else {
+    await waitFor("release instruction", () => existsSync(`${barrierPath}.release`), 60000);
+  }
 } finally {
   try {
-    await evaluate("state.voice?.hangup(); true");
-    await waitFor("call hangup", () => evaluate("state.localCall === false"), 10000);
+    if (!remoteHungup) {
+      await evaluate("document.querySelector('#hangup-call').click(); true");
+      await waitFor("call hangup", () => evaluate("state.localCall === false"), 30000);
+    }
     historyFinalized = await waitFor(
       "finalized incoming history",
       () => evaluate(`${callsFetch}.then(value => value.calls.filter(call =>
@@ -180,10 +191,12 @@ const result = {
   active: Boolean(active),
   bidirectional: Boolean(bidirectional),
   joined_conference: Boolean(joinedConference),
+  remote_hangup: expectRemoteHangup ? Boolean(remoteHungup) : null,
   history_finalized: Boolean(historyFinalized),
 };
 console.log(JSON.stringify(result));
 const winnerSucceeded = winner === "web"
   ? result.active && result.bidirectional
   : result.joined_conference;
-if (!(result.registered && result.ringing && winnerSucceeded && result.history_finalized)) process.exitCode = 1;
+if (!(result.registered && result.ringing && winnerSucceeded && result.history_finalized)
+  || (expectRemoteHangup && !result.remote_hangup)) process.exitCode = 1;

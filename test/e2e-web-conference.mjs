@@ -63,6 +63,9 @@ class BrowserClient {
       else resolve(message.result);
     });
     await this.command("Runtime.enable");
+    await waitFor(`${this.name} web application`, () => this.evaluate(
+      "location.protocol.startsWith('http') && document.readyState === 'complete' && typeof state !== 'undefined'",
+    ), 45000);
     await this.evaluate("sessionStorage.setItem('viti-e2e-test-tone', '1'); true");
   }
 
@@ -74,7 +77,12 @@ class BrowserClient {
 
   async evaluate(expression) {
     const result = await this.command("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
-    if (result.exceptionDetails) throw new Error(`${this.name}: browser expression failed`);
+    if (result.exceptionDetails) {
+      const detail = result.exceptionDetails.exception?.description
+        || result.exceptionDetails.text
+        || "unknown JavaScript exception";
+      throw new Error(`${this.name}: browser expression failed: ${detail}`);
+    }
     return result.result?.value;
   }
 

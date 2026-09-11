@@ -57,8 +57,8 @@ server as down.
 The engine image comes from the bundled `engine/` directory. It
 contains:
 
-- a Python SWu client for IKEv2, EAP-AKA, NAT traversal, liveness, and userspace
-  ESP;
+- strongSwan `charon` for IKEv2, EAP-AKA, NAT traversal, liveness, and
+  reauthentication, with `kernel-libipsec` processing ESP in userspace;
 - a TUN interface carrying the inner carrier-assigned IP connection;
 - sysmocom Asterisk with PJSIP support for IMS-AKA, SMS, WebRTC, RTP, DTMF, and
   server-side conferences;
@@ -414,21 +414,54 @@ long-term secret out of the card.
 ### SWu and ePDG
 
 The engine discovers the carrier ePDG from the subscription's MCC/MNC using the
-3GPP public naming convention. It negotiates IKEv2 over UDP 500/4500 and uses
-EAP-AKA with the selected SIM provider. Successful IKE_AUTH creates IPsec
-security associations and a carrier-assigned inner connection through the TUN
-interface. NAT-T keepalives, liveness probes, fragmentation, reauthentication,
-and tunnel supervision are handled by the SWu client.
+3GPP public naming convention. strongSwan `charon` negotiates IKEv2 over UDP
+500/4500 and a custom EAP-AKA plugin forwards RAND/AUTN to the manager's selected
+SIM provider. Successful IKE_AUTH creates security associations; the
+`kernel-libipsec` plugin processes ESP in userspace and carries the
+carrier-assigned IPv6 connection through `ipsec0`. The deployment does not use
+kernel XFRM/IPsec.
+
+Only traffic sourced from the assigned inner IPv6 address uses strongSwan's
+route table. The adapter removes any broad `from all` rule created during
+interface setup and installs a source-specific rule, preventing LAN, Docker,
+Tailscale, manager, and WebRTC traffic from being captured by the carrier
+tunnel. The cleanup drains every duplicate priority/table-220 rule and verifies
+that exactly one source-specific rule remains. This is repeated after an
+in-process charon recovery because that recovery keeps the existing network
+namespace.
+
+The VICI adapter normalizes strongSwan state into the manager's tunnel contract.
+It also reconciles configuration attributes after attach and reauthentication:
+a changed P-CSCF re-renders PJSIP, reloads `res_pjsip`, and restores the desired
+registration; a changed inner address restarts Asterisk so its `ipsec0` transport
+binds the new address. Startup clears persisted reconciliation markers, so an
+attach that finishes after Asterisk starts is applied rather than mistaken for
+already-consumed state. When that late first attach changes both values, the
+engine renders the IMS objects first and then performs one Asterisk restart so
+configuration and transport become visible atomically. The two applied values
+are one canonical observation in `tunnel.applied.json`; a single durable atomic
+replace advances both only after the complete transaction succeeds. Initial
+attach is recorded through the same format only after its P-CSCF render succeeds.
+Normal SA renewals do neither.
+
+VICI control has operation-specific deadlines. Status requests remain short,
+while initiation and reauthentication may outlive the synchronous AKA broker
+timeout. The production entrypoint installs its shutdown trap before starting
+workers or entering PIN, IKE, or P-CSCF waits, and every adapter startup wait is
+cancellation-aware. During container shutdown the adapter first persists
+`tunnel_down`, then publishes `DOWN`, closes any in-flight VICI request, and
+tears down charon within a bounded budget. PID 1 waits for that state and the
+exact adapter process to finish. This keeps the durable lifecycle contract
+inside Docker's stop grace period even when the authentication provider is slow
+or unavailable.
 
 The engine refreshes two independent security-association lifetimes. It renews
 the ESP CHILD SA every 30 minutes and proactively renews the parent IKE SA every
-45 minutes. The latter is deliberately earlier than O2's observed
-responder-initiated renewal at roughly 55 minutes: initiating the exchange from
-the engine preserves the existing IKE roles, inner address, CHILD SA, SIP
-dialogs, and active media. A lost or rejected proactive IKE renewal retains the
-current association and retries after 60 seconds instead of tearing down a
-working tunnel. A carrier-forced tunnel deletion remains a real data-plane
-boundary and cannot preserve an existing carrier call.
+45 minutes. This avoids depending on carrier-specific renewal timing while
+preserving the inner address, SIP dialogs, and active media. A lost or rejected
+proactive renewal retains the current association and retries instead of
+tearing down a working tunnel. A carrier-forced tunnel deletion remains a real
+data-plane boundary and cannot preserve an existing carrier call.
 
 Every SWu process creates a random generation and monotonically increasing event
 sequence. `tunnel_start`, `tunnel_up`, and `tunnel_down` attempt a synchronous
@@ -441,6 +474,11 @@ down boundary in the same state file as call history. Duplicate, retired,
 out-of-order, and older cross-generation claims are ignored. The down boundary
 survives a later up and manager restart so a delayed call hook from an older data
 plane cannot reopen a terminated call.
+
+The production image uses a digest-pinned Fedora base, the immutable Fedora
+release repository, checksum-pinned Python source archives, and commit-pinned
+native telecom sources. This prevents routine repository updates from silently
+changing the packaged SWu stack between clean builds.
 
 ### IMS
 
@@ -805,6 +843,7 @@ protected after testing.
 |---|---|---|
 | Go singleton manager | Small static binary, simple concurrency, reliable embedded assets | Horizontal scaling needs an external store/event bus |
 | Asterisk carrier engine | Mature SIP, IMS patches, media translation, and conferencing | Engine image is specialized and privileged |
+| strongSwan userspace IPsec | Mature IKEv2/rekey state machine while keeping ESP on a TUN device | Engine requires `NET_ADMIN` and `/dev/net/tun` |
 | Shared JsSIP voice layer | Web and Android follow the same SIP/WebRTC behavior | Android voice depends on a controlled WebView |
 | Self-managed Android Telecom | Native concurrency, endpoints and headset actions without becoming the default dialer | API 24-25 and devices without Telecom use a vendor-dependent legacy audio path |
 | Process-owned Android call service | Activity recreation does not destroy a call | Android process death still loses the local SIP leg |

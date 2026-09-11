@@ -2,7 +2,7 @@
 """
 notify.py - Best-effort event hook: POST engine events to the manager.
 
-Usage (from the Asterisk dialplan or swu_ike tunnel hooks):
+Usage (from the Asterisk dialplan or tunnel lifecycle hooks):
   notify.py <event> [arg1] [arg2] ...
 
 Call events carry <asterisk-linkedid> <trace-id> before their normal arguments.

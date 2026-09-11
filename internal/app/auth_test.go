@@ -4,11 +4,58 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 )
+
+type authReadinessFixture struct {
+	err error
+}
+
+func (f authReadinessFixture) AuthenticateAKA(context.Context, []byte, []byte) (AKAResult, error) {
+	return AKAResult{}, errors.New("not used")
+}
+
+func (f authReadinessFixture) CheckSIMReady(context.Context) error {
+	return f.err
+}
+
+func TestAuthenticateReadyReportsProviderStateWithoutIssuingAChallenge(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		err    error
+		ready  bool
+		detail string
+	}{
+		{name: "ready", ready: true},
+		{name: "SIM absent", err: errors.New("OpenStick SIM is not ready: state is ABSENT"), detail: "ABSENT"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			application := &App{auth: authReadinessFixture{err: test.err}}
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/authenticate/ready", nil)
+			response := httptest.NewRecorder()
+			application.authenticateReady(response, request)
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d", response.Code)
+			}
+			var payload struct {
+				Ready  bool   `json:"ready"`
+				Detail string `json:"detail"`
+			}
+			if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload.Ready != test.ready || !strings.Contains(payload.Detail, test.detail) {
+				t.Fatalf("unexpected readiness payload: %#v", payload)
+			}
+		})
+	}
+}
 
 func TestAuthBrokerRoundTrip(t *testing.T) {
 	broker := NewAuthBroker()
@@ -143,11 +190,11 @@ func TestOpenStickReadinessRejectsConnectedStickWithoutReadySIM(t *testing.T) {
 	}
 }
 
-func TestOpenStickReadinessRejectsMissingBridgeProvider(t *testing.T) {
+func TestOpenStickReadinessRejectsMissingBridgeHelper(t *testing.T) {
 	auth := &OpenStickAuthenticator{runADB: fakeOpenStickReadiness(map[string]fakeADBResult{
-		"shell content query --uri content://lab.codex.simidentity.aka/material": {err: errors.New("provider missing")},
+		"shell test -x /data/local/tmp/qmi_auth_aka": {err: errors.New("helper missing")},
 	})}
-	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "provider") {
+	if err := auth.CheckSIMReady(context.Background()); err == nil || !strings.Contains(err.Error(), "helper") {
 		t.Fatalf("missing bridge readiness error = %v", err)
 	}
 }
@@ -197,6 +244,49 @@ func TestOpenStickReadinessDoesNotDebounceDefinitiveSIMAbsence(t *testing.T) {
 	}
 }
 
+func TestOpenStickAuthenticationWaitsForHelperExitBeforeDestructiveRead(t *testing.T) {
+	material := append([]byte("AKA1"), 8, 16, 16)
+	material = append(material, bytes.Repeat([]byte{1}, 8)...)
+	material = append(material, bytes.Repeat([]byte{2}, 16)...)
+	material = append(material, bytes.Repeat([]byte{3}, 16)...)
+	encoded := base64.StdEncoding.EncodeToString(material)
+	probeReads := 0
+	providerReads := 0
+	auth := &OpenStickAuthenticator{
+		Timeout:   time.Second,
+		PollDelay: time.Millisecond,
+		runADB: func(_ context.Context, args ...string) ([]byte, error) {
+			command := strings.Join(args, " ")
+			switch command {
+			case "shell cat " + openStickResult:
+				probeReads++
+				if probeReads == 1 {
+					return []byte("PROBE=activity-start\nAKA_RESULT=success\n"), nil
+				}
+				return []byte("PROBE=activity-start\nAKA_RESULT=success\nPROBE_EXIT port=rmnet0 code=0\n"), nil
+			case "shell content query --uri content://lab.codex.simidentity.aka/material":
+				providerReads++
+				if probeReads < 2 {
+					t.Fatal("destructive provider read raced the running helper")
+				}
+				return []byte("Row: 0 material=" + encoded), nil
+			default:
+				return nil, nil
+			}
+		},
+	}
+	result, err := auth.AuthenticateAKA(context.Background(), bytes.Repeat([]byte{4}, 16), bytes.Repeat([]byte{5}, 16))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if providerReads != 1 {
+		t.Fatalf("provider reads = %d, want exactly one", providerReads)
+	}
+	if len(result.RES) != 8 || len(result.CK) != 16 || len(result.IK) != 16 {
+		t.Fatalf("unexpected AKA result lengths: %d/%d/%d", len(result.RES), len(result.CK), len(result.IK))
+	}
+}
+
 type fakeADBResult struct {
 	output string
 	err    error
@@ -208,7 +298,6 @@ func fakeOpenStickReadiness(overrides map[string]fakeADBResult) func(context.Con
 		"shell getprop gsm.sim.state":                {output: "READY"},
 		"shell pm path lab.codex.simidentity":        {output: "package:/data/app/lab.codex.simidentity-1.apk"},
 		"shell test -x /data/local/tmp/qmi_auth_aka": {},
-		"shell content query --uri content://lab.codex.simidentity.aka/material": {output: "No result found."},
 	}
 	for command, result := range overrides {
 		defaults[command] = result

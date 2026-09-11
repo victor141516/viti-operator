@@ -5,6 +5,11 @@ with shared web and Android clients over Tailscale. The Go manager owns history,
 recordings and client state. The bundled Asterisk/VoWiFi engine handles ePDG,
 IMS and conference audio.
 
+The engine has one SWu implementation: strongSwan `charon` negotiates IKEv2
+and EAP-AKA, while `kernel-libipsec` carries userspace ESP through `ipsec0`.
+Python orchestration adapts strongSwan's VICI state to the stable
+manager-facing tunnel contract.
+
 ## Features
 
 - Shared SMS and call history across web and Android, with carrier acceptance,
@@ -94,6 +99,20 @@ npm --prefix web-src run build
 go test ./...
 go build ./cmd/viti-operator
 ```
+
+The isolated SWu laboratory exercises authentication faults, real UDP/TCP
+transport, client- and responder-initiated rekeys, reauthentication, crash
+recovery, route isolation, cancellation during a blocked startup `IKE_AUTH`,
+and the production entrypoint lifecycle:
+
+```sh
+docker build -t viti-operator-engine:local -f engine/Dockerfile engine
+python test/swu-lab/run_lab.py --backend-image viti-operator-engine:local --no-build
+```
+
+This laboratory is deterministic and does not contact a real carrier. Real SIM,
+IMS, SMS, and call checks are separate opt-in acceptance tests performed against
+the user's subscription.
 
 Build Android with JDK 17, Android SDK 36 and the included Gradle wrapper:
 

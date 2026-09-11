@@ -3,6 +3,7 @@ const pageURL = process.env.VITI_WEB_URL || "http://127.0.0.1:18788/#messages";
 const apiKey = process.env.VITI_TEST_API_KEY || "";
 const destination = process.env.VITI_TEST_DESTINATION || "";
 const marker = process.env.VITI_TEST_MESSAGE_MARKER || "";
+const messageText = process.env.VITI_TEST_MESSAGE_TEXT || marker;
 const cdpBase = `http://127.0.0.1:${cdpPort}`;
 
 if (!/^Viti-(?:inbound|outbound)-check-[0-9]+$/.test(marker)) {
@@ -10,6 +11,9 @@ if (!/^Viti-(?:inbound|outbound)-check-[0-9]+$/.test(marker)) {
 }
 if (destination && !/^\+[1-9][0-9]{7,14}$/.test(destination)) {
   throw new Error("VITI_TEST_DESTINATION is not E.164");
+}
+if (!messageText.startsWith(marker) || [...messageText].length > 1000) {
+  throw new Error("VITI_TEST_MESSAGE_TEXT must start with the marker and contain at most 1000 characters");
 }
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -95,7 +99,7 @@ try {
       const to = document.querySelector('#message-to');
       const text = document.querySelector('#message-text');
       to.value = ${JSON.stringify(destination)};
-      text.value = ${JSON.stringify(marker)};
+      text.value = ${JSON.stringify(messageText)};
       text.dispatchEvent(new Event('input', { bubbles: true }));
       const form = document.querySelector('#message-form');
       form.requestSubmit(form.querySelector('[type="submit"]'));
@@ -117,6 +121,10 @@ try {
   }
 }
 
-const result = { submitted: destination ? Boolean(submitted) : null, visible: Boolean(visible) };
+const result = {
+  submitted: destination ? Boolean(submitted) : null,
+  visible: Boolean(visible),
+  text_length: [...messageText].length,
+};
 console.log(JSON.stringify(result));
 if (!visible || (destination && !submitted)) process.exitCode = 1;

@@ -1,0 +1,66 @@
+diff --git a/src/libcharon/sa/ikev2/tasks/ike_auth.c b/src/libcharon/sa/ikev2/tasks/ike_auth.c
+index ed9fc55..db5e26a 100644
+--- a/src/libcharon/sa/ikev2/tasks/ike_auth.c
++++ b/src/libcharon/sa/ikev2/tasks/ike_auth.c
+@@ -864,7 +864,8 @@ METHOD(task_t, build_i, status_t,
+ 	/* check if an authenticator is in progress */
+ 	if (!this->my_auth)
+ 	{
+-		identification_t *idi, *idr = NULL;
++		identification_t *idi, *idr = NULL, *requested_idr = NULL;
++		char *request_idr;
+ 		id_payload_t *id_payload;
+ 
+ 		/* clean up authentication config from a previous round */
+@@ -873,17 +874,37 @@ METHOD(task_t, build_i, status_t,
+ 
+ 		/* add (optional) IDr */
+ 		cfg = get_auth_cfg(this, FALSE);
+-		if (cfg)
++		request_idr = lib->settings->get_str(lib->settings,
++										   "%s.request_idr", NULL, lib->ns);
++		if (request_idr && *request_idr)
++		{
++			requested_idr = identification_create_from_string(request_idr);
++			if (requested_idr->get_type(requested_idr) == ID_ANY)
++			{
++				requested_idr->destroy(requested_idr);
++				DBG1(DBG_CFG, "invalid configured request_idr");
++				return FAILED;
++			}
++			idr = requested_idr;
++		}
++		else if (cfg)
+ 		{
+ 			idr = cfg->get(cfg, AUTH_RULE_IDENTITY);
+-			if (!cfg->get(cfg, AUTH_RULE_IDENTITY_LOOSE) && idr &&
+-				!idr->contains_wildcards(idr))
++			if (cfg->get(cfg, AUTH_RULE_IDENTITY_LOOSE) ||
++				(idr && idr->contains_wildcards(idr)))
++			{
++				idr = NULL;
++			}
++		}
++		if (idr)
++		{
++			if (!requested_idr)
+ 			{
+ 				this->ike_sa->set_other_id(this->ike_sa, idr->clone(idr));
+-				id_payload = id_payload_create_from_identification(
+-															PLV2_ID_RESPONDER, idr);
+-				message->add_payload(message, (payload_t*)id_payload);
+ 			}
++			id_payload = id_payload_create_from_identification(
++												PLV2_ID_RESPONDER, idr);
++			message->add_payload(message, (payload_t*)id_payload);
+ 		}
+ 		/* add IDi */
+ 		cfg = this->ike_sa->get_auth_cfg(this->ike_sa, TRUE);
+@@ -913,6 +934,7 @@ METHOD(task_t, build_i, status_t,
+ 				message->add_notify(message, FALSE, INITIAL_CONTACT, chunk_empty);
+ 			}
+ 		}
++		DESTROY_IF(requested_idr);
+ 
+ 		/* build authentication data */
+ 		this->my_auth = authenticator_create_builder(this->ike_sa, cfg,

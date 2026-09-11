@@ -210,7 +210,9 @@ func TestSMSExplicitMessageIDWithMismatchedSCTSIsRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrongTime := now.Add(time.Hour)
+	// A plausible past service-centre time remains authoritative and must not
+	// be replaced by the event receive time merely because it mismatches.
+	wrongTime := now.Add(-time.Hour)
 	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
 		Phase: "status_report", MessageID: "sms-one", Instance: "engine-1", Destination: "+34600000000",
 		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0), ServiceCentreTime: &wrongTime,
@@ -420,6 +422,45 @@ func TestSMSRestartUsesSCTSToOverrideStaleVolatileMessageID(t *testing.T) {
 	}, now.Add(2*time.Hour))
 	if err != nil || !changed || message.ID != "sms-old" || message.State != "delivered" {
 		t.Fatalf("message=%+v changed=%t err=%v", message, changed, err)
+	}
+}
+
+func TestSMSFutureSCTSFallsBackToRecordedEventTime(t *testing.T) {
+	store, _, now := newOutgoingSMS(t)
+	submitSMSPart(t, store, "sms-one", "engine-1", "+34600000000", 1, 1, 4, 9, now)
+	receivedAt := now.Add(4 * time.Second)
+	misdecodedSCTS := receivedAt.Add(time.Hour)
+	message, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", Instance: "engine-1", Destination: "+34600000000",
+		Part: 1, Parts: 1, TPReference: smsInt(9), Status: smsInt(0), ServiceCentreTime: &misdecodedSCTS,
+	}, receivedAt)
+	if err != nil || !changed || message.State != "delivered" || message.DeliveryState != "delivered" {
+		t.Fatalf("message=%+v changed=%t err=%v", message, changed, err)
+	}
+}
+
+func TestSMSFutureSCTSFallbackDoesNotGuessReusedReference(t *testing.T) {
+	store, original, now := newOutgoingSMS(t)
+	for index, id := range []string{"sms-old", "sms-new"} {
+		submitted := now.Add(time.Duration(index) * time.Hour)
+		message := original
+		message.ID = id
+		message.Parts = []SMSPartStatus{{
+			Part: 1, Parts: 1, Instance: "engine-1", Recipient: message.To,
+			TPReference: smsInt(7), State: "submitted", SubmittedAt: &submitted, UpdatedAt: submitted,
+		}}
+		if err := store.SaveMessage(message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receivedAt := now.Add(2 * time.Hour)
+	misdecodedSCTS := receivedAt.Add(time.Hour)
+	_, changed, err := store.ApplySMSProtocolEvent(SMSProtocolEvent{
+		Phase: "status_report", Instance: "engine-1", Destination: original.To,
+		Part: 1, Parts: 1, TPReference: smsInt(7), Status: smsInt(0), ServiceCentreTime: &misdecodedSCTS,
+	}, receivedAt)
+	if !errors.Is(err, ErrSMSReportAmbiguous) || changed {
+		t.Fatalf("changed=%t err=%v", changed, err)
 	}
 }
 

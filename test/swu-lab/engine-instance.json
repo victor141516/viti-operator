@@ -1,0 +1,21 @@
+{
+  "id": "lab-line",
+  "imsi": "001010123456789",
+  "mcc": "001",
+  "mnc": "001",
+  "epdg": "172.30.40.10",
+  "apn": "ims",
+  "msisdn": "+34999999999",
+  "reader_index": 0,
+  "pin": "",
+  "manager_url": "",
+  "rtp_start": 10000,
+  "rtp_end": 10059,
+  "sip": {
+    "listen_addr": "0.0.0.0",
+    "transport": "udp",
+    "webrtc": {
+      "enable": false
+    }
+  }
+}

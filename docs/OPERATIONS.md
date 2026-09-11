@@ -465,12 +465,25 @@ do not add them to source-controlled configuration.
    the local authentication transport and is not the carrier IMS stack.
 
 For an approximately hourly IMS interruption, inspect
-`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for `IKE_SA rekey` and
-`swu_ike exited`. Healthy lifetime maintenance reports `IKE_SA rekey complete`
-without an Asterisk restart. The default proactive periods are 30 minutes for
-the ESP CHILD SA and 45 minutes for the parent IKE SA; `0` disables either timer
-through `SWU_CHILD_REKEY_MINUTES` or `SWU_IKE_REKEY_MINUTES` in the rendered
-engine environment.
+`${VITI_DIAGNOSTICS_DIR}/engine/swu-operational.log` for strongSwan SA state,
+VICI lifecycle events, and `IKE_SA rekey complete`. Healthy lifetime
+maintenance completes without restarting Asterisk. The default proactive
+periods are 30 minutes for the ESP CHILD SA and 45 minutes for the parent IKE SA;
+`0` disables either timer through `SWU_CHILD_REKEY_MINUTES` or
+`SWU_IKE_REKEY_MINUTES` in the rendered engine environment.
+
+The adapter intentionally gives attach and reauthentication VICI operations
+more time than the configured AKA request timeout; ordinary status operations
+retain a short deadline. The entrypoint accepts termination throughout startup,
+including while `IKE_AUTH` is blocked on AKA. On shutdown it records
+`tunnel_down` durably before publishing `DOWN`, waits for the exact adapter
+process, and bounds the remaining VICI/charon cleanup. A container that stops
+within its configured grace period should therefore leave an exact
+`tunnel_start`, `tunnel_up`, `tunnel_down` sequence even if AKA was stalled.
+If charon crashes while the container remains alive, the supervisor starts a
+fresh adapter generation in the same network namespace. The adapter removes all
+stale table-220 rules before installing and verifying the single IMS-source
+rule; unrelated IPv6 traffic must never use `ipsec0` during this recovery.
 
 ### Modem was unplugged
 

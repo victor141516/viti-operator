@@ -171,6 +171,7 @@ func (a *App) routes() {
 	a.mux.HandleFunc("POST /api/engine/event", a.engineEvent)
 	a.mux.HandleFunc("GET /api/engine/recording", a.engineRecordingSettings)
 	a.mux.Handle("POST /api/v1/authenticate", a.authorized(http.HandlerFunc(a.authenticate)))
+	a.mux.Handle("GET /api/v1/authenticate/ready", a.authorized(http.HandlerFunc(a.authenticateReady)))
 	a.mux.Handle("GET /api/v1/auth/agents/{agent}/challenges", a.authorized(http.HandlerFunc(a.pollAuthChallenge)))
 	a.mux.Handle("POST /api/v1/auth/agents/{agent}/challenges/{id}/response", a.authorized(http.HandlerFunc(a.respondAuthChallenge)))
 	webRoot, _ := fs.Sub(webAssets, "web")
@@ -1046,6 +1047,29 @@ func (a *App) authenticate(w http.ResponseWriter, r *http.Request) {
 		response = AuthResponse{AUTS: base64.RawStdEncoding.EncodeToString(result.AUTS)}
 	}
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (a *App) authenticateReady(w http.ResponseWriter, r *http.Request) {
+	if a.auth == nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ready": false, "detail": "SIM authentication is disabled",
+		})
+		return
+	}
+	checker, ok := a.auth.(SIMReadinessChecker)
+	if !ok {
+		writeJSON(w, http.StatusOK, map[string]any{"ready": true})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+	defer cancel()
+	if err := checker.CheckSIMReady(ctx); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ready": false, "detail": err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ready": true})
 }
 
 func (a *App) pollAuthChallenge(w http.ResponseWriter, r *http.Request) {

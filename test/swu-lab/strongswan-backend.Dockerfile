@@ -1,0 +1,47 @@
+FROM fedora:43@sha256:a651ddf48ea28a06ed4e1e6519f51c9f47e7a5a138722ade87369b8fbb7e5b42
+
+ARG STRONGSWAN_COMMIT=b43f6bfeed34b4afc8a7eb0c0de38e6e70177847
+
+RUN dnf -y --disablerepo='*' --enablerepo=fedora install autoconf automake bison curl-devel diffutils flex gcc git gperf patch \
+    iproute iproute-tc json-c-devel libtool make openssl-devel pkg-config \
+    procps-ng python3 python3-build python3-devel python3-pip tcpdump && dnf clean all
+
+COPY engine/patches/strongswan/0001-configurable-message-id-sync-advertisement.patch /tmp/strongswan-message-id-sync.patch
+COPY engine/patches/strongswan/0002-configurable-request-idr.patch /tmp/strongswan-request-idr.patch
+
+RUN git init /usr/src/strongswan && \
+    cd /usr/src/strongswan && \
+    git remote add origin https://github.com/strongswan/strongswan.git && \
+    git fetch --depth 1 origin "${STRONGSWAN_COMMIT}" && \
+    git checkout --detach FETCH_HEAD && \
+    git apply /tmp/strongswan-message-id-sync.patch && \
+    git apply --recount /tmp/strongswan-request-idr.patch && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr --sysconfdir=/etc \
+      --enable-swanctl --enable-vici --enable-python-wheels --enable-openssl \
+      --enable-aes --enable-sha1 --enable-sha2 --enable-hmac \
+      --enable-kernel-libipsec --enable-eap-identity --enable-eap-aka && \
+    make -j"$(nproc)" && make install && ldconfig && \
+    python3 -m pip install --no-cache-dir ./src/libcharon/plugins/vici/python
+
+COPY engine/strongswan/eap_aka_broker_plugin.c /tmp/eap_aka_broker_plugin.c
+
+RUN cd /usr/src/strongswan && \
+    gcc -std=gnu11 -fPIC -shared -include config.h \
+      -I. -Isrc/libstrongswan -Isrc/libcharon -Isrc/libsimaka \
+      $(pkg-config --cflags libcurl json-c) \
+      /tmp/eap_aka_broker_plugin.c \
+      -L/usr/lib64/ipsec -Wl,-rpath,/usr/lib64/ipsec \
+      -lsimaka -lcharon -lstrongswan $(pkg-config --libs libcurl json-c) -pthread \
+      -o /usr/lib64/ipsec/plugins/libstrongswan-eap-aka-broker.so && \
+    rm -rf /usr/src/strongswan /tmp/eap_aka_broker_plugin.c /tmp/strongswan-message-id-sync.patch /tmp/strongswan-request-idr.patch
+
+COPY engine/strongswan/strongswan.conf /etc/strongswan.conf
+COPY engine/strongswan_adapter.py /usr/local/bin/strongswan_adapter.py
+COPY engine/tunnel_contract.py /usr/local/bin/tunnel_contract.py
+COPY engine/tunnel_reconcile.py /usr/local/bin/tunnel_reconcile.py
+COPY engine/event_outbox.py /usr/local/bin/event_outbox.py
+COPY test/swu-lab/lab_probe.py /opt/swu-lab/lab_probe.py
+
+RUN chmod +x /usr/local/bin/strongswan_adapter.py
+ENTRYPOINT ["python3", "/usr/local/bin/strongswan_adapter.py"]

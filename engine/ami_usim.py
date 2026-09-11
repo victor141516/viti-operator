@@ -63,7 +63,7 @@ def forward_sms_protocol_event(message):
 
 # --- Reader binding by physical USB port -----------------------------------------------------
 # Resolve a reader by its STABLE physical USB port path (USIM_READER_PORT, e.g. "3-2") so the SIP
-# IMS-AKA path addresses the same physical reader as swu_ike/pin_keeper — even when pcscd flips
+# IMS-AKA path addresses the same physical reader as pin_keeper — even when pcscd flips
 # two identical (serial-less) readers' enumeration order. Mirrors control/app/usbreader.py.
 try:
     from smartcard.scard import (
@@ -154,7 +154,7 @@ def _hcard(conn):
 
 class _Tx:
     """Best-effort PC/SC transaction: exclusive card access for the auth sequence, so it
-    cannot interleave with pin_keeper / swu_ike APDUs on the shared card."""
+    cannot interleave with pin_keeper APDUs on the shared card."""
     def __init__(self, conn):
         self.conn = conn
         self.hcard = None

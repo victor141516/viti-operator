@@ -2,11 +2,11 @@
 """
 pin_keeper.py - Keep the USIM CHV1 (PIN) verified for the whole engine lifetime.
 
-Why: swu_ike's EAP-AKA (IKE) and Asterisk's ims_aka (SIP) both run AUTHENTICATE against
+Why: SWu EAP-AKA and Asterisk's ims_aka (SIP) both run AUTHENTICATE against
 the USIM, which requires CHV1 verified. Empirically, PIN verification persists at the card
 level across separate PC/SC connections as long as the card stays powered. So we verify
 once, then hold an idle connection open and only re-verify when the card is re-inserted /
-reset. We do NOT poll with SELECTs (that would race with swu_ike/ami_usim APDU sequences,
+reset. We do NOT poll with SELECTs (that would race with ami_usim APDU sequences,
 which pcscd does not serialize as groups).
 
 Config via env (set by entrypoint from /config/instance.json):
@@ -178,7 +178,7 @@ def read_iccid(conn):
 # --- Reader binding by physical USB port ----------------------------------------------------
 # Resolve a reader by its STABLE physical USB port path (e.g. "3-2") instead of the pcscd
 # enumeration index, which can flip between two identical (serial-less) readers on re-enumeration.
-# Mirrors control/app/usbreader.py and swu_ike.resolve_reader_index_by_port so pin_keeper, swu_ike
+# Mirrors control/app/usbreader.py so pin_keeper
 # and the manager all agree on which physical reader a line is bound to. Best-effort: returns None
 # when the port can't be resolved so callers fall back to the ICCID/index strategy.
 try:
@@ -415,7 +415,7 @@ def main():
     log(f"starting; reader={reader_spec} pin={'set' if pin else 'none'}")
 
     # Verify PIN once, then HOLD the connection open indefinitely. An open handle keeps
-    # the card powered, so CHV1 verification persists for swu_ike (IKE EAP-AKA) and
+    # the card powered, so CHV1 verification persists for SWu EAP-AKA and
     # ami_usim (SIP IMS-AKA). We do NOT poll the card (polling races with their APDU
     # sequences); we only re-acquire if the held connection genuinely dies.
     conn = None
