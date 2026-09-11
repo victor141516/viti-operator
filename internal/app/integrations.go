@@ -178,6 +178,26 @@ func (r *integrationRegistry) finishCommand(service string, result integrationCo
 	r.mu.Unlock()
 }
 
+func (r *integrationRegistry) abandonCommand(service string, command integrationCommand) {
+	fingerprint, err := commandFingerprint(command)
+	if err != nil {
+		return
+	}
+	key := service + "\x00" + command.CommandID
+	r.mu.Lock()
+	record, found := r.commands[key]
+	if found && !record.completed && record.fingerprint == fingerprint {
+		delete(r.commands, key)
+		for index, candidate := range r.commandKeys {
+			if candidate == key {
+				r.commandKeys = append(r.commandKeys[:index], r.commandKeys[index+1:]...)
+				break
+			}
+		}
+	}
+	r.mu.Unlock()
+}
+
 func commandFingerprint(command integrationCommand) ([sha256.Size]byte, error) {
 	canonical, err := json.Marshal(command)
 	if err != nil {
@@ -425,6 +445,7 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 	accepted := base
 	accepted.Status = "accepted"
 	if !writeAcceptedIntegrationResult(ctx, results, accepted) {
+		a.integrations.abandonCommand(connection.name, command)
 		return false
 	}
 

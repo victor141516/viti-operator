@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -174,6 +175,25 @@ func TestIntegrationReplaysRetainedEventsAfterResume(t *testing.T) {
 		t.Fatalf("replayed event = %#v", replayed)
 	}
 	readIntegrationType(t, socket, "service.connected")
+}
+
+func TestIntegrationCommandCanRetryWhenAcceptedWasNotDelivered(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	connection := &integrationConnection{
+		name: "retry-service", capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`)},
+	}
+	command := integrationCommand{
+		Type: "call.start", Version: 1, CommandID: "retry-1", Payload: json.RawMessage(`{"to":"+12025550123"}`),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	results := make(chan integrationResultDelivery, 1)
+	if application.handleIntegrationCommand(ctx, connection, command, results) {
+		t.Fatal("command continued after accepted delivery failed")
+	}
+	if _, replayed, err := application.integrations.beginCommand(connection.name, command); err != nil || replayed {
+		t.Fatalf("exact retry remained reserved: replayed=%v err=%v", replayed, err)
+	}
 }
 
 func TestCallParticipantPublishesLogicalAndTransportEvents(t *testing.T) {
