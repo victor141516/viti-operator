@@ -73,9 +73,9 @@ class TunnelReconciler:
             return False
 
         asterisk_running = self._call(["asterisk", "-rx", "core show uptime"]) == 0
-        if asterisk_running and previous:
+        if asterisk_running:
             self.log(
-                f"tunnel inner IP changed ({previous} -> {address}); "
+                f"tunnel inner IP changed ({previous or 'unset'} -> {address}); "
                 "restarting the Asterisk transport"
             )
             if self._call(["asterisk", "-rx", "core restart now"]) != 0:

@@ -21,7 +21,9 @@ ARG ASTERISK_COMMIT=d231cb2c658545773fcd5eb9de787219b9ef6566
 
 WORKDIR /home/asterisk-build
 
-RUN dnf -y install git gcc g++ openssl-devel patch libedit-devel opus-devel libuuid-devel autoconf \
+# The Fedora release repository is immutable.  Deliberately exclude the mutable
+# updates/testing repositories so a clean build cannot silently select newer RPMs.
+RUN dnf -y --disablerepo='*' --enablerepo=fedora install git gcc g++ openssl-devel patch libedit-devel opus-devel libuuid-devel autoconf \
     automake libtool gettext perl python3 flex bison pkg-config m4 gettext-devel gperf gmp-devel \
     jansson-devel libxml2-devel sqlite-devel opencore-amr-devel vo-amrwbenc-devel \
     libmnl-devel speex-devel speexdsp-devel libvorbis-devel alsa-lib-devel portaudio-devel \
@@ -67,7 +69,8 @@ RUN git init pjproject && cd pjproject && \
     make -j$(nproc) && \
     make install
 
-RUN pip install --no-cache-dir panoramisk==1.4
+RUN pip install --no-cache-dir \
+    "https://files.pythonhosted.org/packages/source/p/panoramisk/panoramisk-1.4.tar.gz#sha256=345d4c3b6a60e54beb601136ef2bba8fe2023c3a5dbe89e0b0d7dd4aa96d535a"
 
 # Build the pinned userspace-IPsec backend. kernel-libipsec owns ESP and creates
 # ipsec0; kernel-netlink is loaded only as the Linux network/route provider. The

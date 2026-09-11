@@ -159,7 +159,6 @@ export class LiveCallSoakTracker {
     this.activeSamples += 1
     const reasons = []
     if (!sample.charon) reasons.push('charon_absent')
-    if (sample.python) reasons.push('python_backend_present')
     if (!sample.tunnel) reasons.push('tunnel_absent')
     if (!sample.ims) reasons.push('ims_unregistered')
     if (!(sample.ike_ids || []).length) reasons.push('ike_sa_absent')

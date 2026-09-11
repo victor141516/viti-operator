@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 
 from jinja2 import Environment, FileSystemLoader
 
@@ -292,43 +293,64 @@ def main():
 
     # Export env for the SIM helpers and strongSwan adapter.
     env_path = os.environ.get("VOWIFI_ENV", "/run/vowifi/engine.env")
-    os.makedirs(os.path.dirname(env_path), exist_ok=True)
-    with open(env_path, "w") as f:
-        f.write(f"USIM_PIN={cfg.get('pin','')}\n")
-        f.write(f"USIM_READER={cfg.get('reader', 'imsi:'+ctx['imsi'])}\n")
-        f.write(f"USIM_ICCID={cfg.get('iccid','')}\n")
-        f.write(f"VOWIFI_ID={ctx['id']}\n")
-        f.write(f"MANAGER_URL={ctx['manager_url']}\n")
-        # The index is retained for local PC/SC helpers; SWu authentication is
-        # normally delegated to the manager's selected SIM provider.
-        f.write(f"USIM_READER_INDEX={cfg.get('reader_index', 0)}\n")
-        # Stable physical USB port path of the reader (e.g. "3-2"). pin_keeper resolves it
-        # back to a live PC/SC index in-container, so the SIM is always addressed by the reader
-        # that PHYSICALLY holds it — surviving pcscd re-enumerating two identical readers into a
-        # different order. Empty -> fall back to USIM_READER_INDEX.
-        f.write(f"USIM_READER_PORT={cfg.get('reader_port','')}\n")
-        f.write(f"USIM_IMSI={ctx['imsi']}\n")
-        f.write(f"SWU_SOURCE={ctx['local_addr']}\n")
-        f.write(f"SWU_EPDG={ctx['epdg']}\n")
-        f.write(f"SWU_APN={cfg.get('apn','ims')}\n")
-        f.write(f"SWU_MCC={ctx['mcc']}\n")
-        f.write(f"SWU_MNC={ctx['mnc']}\n")
-        # ePDG identity (IDr) encoding: 'apn' (default) sends the bare APN — the form most
-        # carriers' ePDGs expect and the proven-safe default; 'fqdn' builds the operator APN-FQDN
-        # (<apn>.apn.epc.mnc<MNC3>.mcc<MCC3>.pub.3gppnetwork.org) that a minority of stricter
-        # ePDGs require. Consumed by strongswan_adapter.py.
-        f.write(f"SWU_IDR_MODE={cfg.get('idr_mode','apn')}\n")
-        # Proactive CHILD-SA rekey period (minutes; 0 = disabled). IKEv2 does not carry SA
-        # lifetime on the wire, so strongSwan uses this local-policy value to rekey the ESP SA
-        # before it silently ages out (3GPP TS 24.302 7.2.2C). Set by the manager from
-        # settings.rekey.minutes (default 30); hand-authored configs may omit it.
-        f.write(f"SWU_CHILD_REKEY_MINUTES={cfg.get('rekey_minutes', 30)}\n")
-        # Proactive IKE-SA rekey period. O2's ePDG has been observed initiating a rekey after
-        # roughly 55 minutes; going first preserves our initiator role and avoids a full tunnel
-        # reconnect that would interrupt active SIP calls. This is deliberately independent from
-        # the shorter ESP CHILD-SA rekey period.
-        f.write(f"SWU_IKE_REKEY_MINUTES={cfg.get('ike_rekey_minutes', 45)}\n")
-    os.chmod(env_path, 0o600)
+    env_dir = os.path.dirname(env_path) or "."
+    os.makedirs(env_dir, exist_ok=True)
+    descriptor, env_tmp = tempfile.mkstemp(
+        prefix=".engine.env.", dir=env_dir, text=True
+    )
+    try:
+        with os.fdopen(descriptor, "w") as f:
+            descriptor = None
+            f.write(f"USIM_PIN={cfg.get('pin','')}\n")
+            f.write(f"USIM_READER={cfg.get('reader', 'imsi:'+ctx['imsi'])}\n")
+            f.write(f"USIM_ICCID={cfg.get('iccid','')}\n")
+            f.write(f"VOWIFI_ID={ctx['id']}\n")
+            f.write(f"MANAGER_URL={ctx['manager_url']}\n")
+            # The index is retained for local PC/SC helpers; SWu authentication is
+            # normally delegated to the manager's selected SIM provider.
+            f.write(f"USIM_READER_INDEX={cfg.get('reader_index', 0)}\n")
+            # Stable physical USB port path of the reader (e.g. "3-2"). pin_keeper resolves it
+            # back to a live PC/SC index in-container, so the SIM is always addressed by the reader
+            # that PHYSICALLY holds it — surviving pcscd re-enumerating two identical readers into a
+            # different order. Empty -> fall back to USIM_READER_INDEX.
+            f.write(f"USIM_READER_PORT={cfg.get('reader_port','')}\n")
+            f.write(f"USIM_IMSI={ctx['imsi']}\n")
+            f.write(f"SWU_SOURCE={ctx['local_addr']}\n")
+            f.write(f"SWU_EPDG={ctx['epdg']}\n")
+            f.write(f"SWU_APN={cfg.get('apn','ims')}\n")
+            f.write(f"SWU_MCC={ctx['mcc']}\n")
+            f.write(f"SWU_MNC={ctx['mnc']}\n")
+            # ePDG identity (IDr) encoding: 'apn' (default) sends the bare APN — the form most
+            # carriers' ePDGs expect and the proven-safe default; 'fqdn' builds the operator APN-FQDN
+            # (<apn>.apn.epc.mnc<MNC3>.mcc<MCC3>.pub.3gppnetwork.org) that a minority of stricter
+            # ePDGs require. Consumed by strongswan_adapter.py.
+            f.write(f"SWU_IDR_MODE={cfg.get('idr_mode','apn')}\n")
+            # Proactive CHILD-SA rekey period (minutes; 0 = disabled). IKEv2 does not carry SA
+            # lifetime on the wire, so strongSwan uses this local-policy value to rekey the ESP SA
+            # before it silently ages out (3GPP TS 24.302 7.2.2C). Set by the manager from
+            # settings.rekey.minutes (default 30); hand-authored configs may omit it.
+            f.write(f"SWU_CHILD_REKEY_MINUTES={cfg.get('rekey_minutes', 30)}\n")
+            # Proactive IKE-SA rekey period. Carrier ePDGs commonly rotate long-lived SAs; going
+            # first preserves our initiator role and avoids a full tunnel reconnect that would
+            # interrupt active SIP calls. This is deliberately independent from the shorter ESP
+            # CHILD-SA rekey period.
+            f.write(f"SWU_IKE_REKEY_MINUTES={cfg.get('ike_rekey_minutes', 45)}\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(env_tmp, env_path)
+        directory = os.open(env_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            os.unlink(env_tmp)
+        except FileNotFoundError:
+            pass
+        raise
     print(f"[render] env -> {env_path}")
 
 

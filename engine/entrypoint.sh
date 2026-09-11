@@ -67,7 +67,8 @@ else
   rm -f "$VOWIFI_RUNDIR/charon.log"
   SWU_LOG_TARGET=/dev/null
 fi
-rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json"
+rm -f "$VOWIFI_RUNDIR/swu.ctl" "$VOWIFI_RUNDIR/swu_status.json" \
+  "$VOWIFI_RUNDIR/pcscf.applied" "$VOWIFI_RUNDIR/inner_ip.applied"
 
 # Full adapter/charon output goes to the opt-in diagnostic file. Normal operation
 # retains only normalized lifecycle evidence in Docker logs and a bounded file.

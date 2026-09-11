@@ -85,7 +85,7 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 return records()
 
         adapter = strongswan_adapter.StrongSwanAdapter(environment())
-        adapter.session = lambda: Session()
+        adapter.session = lambda _timeout=10.0: Session()
         with self.assertRaises(strongswan_adapter.ViciCommandError) as raised:
             adapter.request("initiate", {"child": "ims"})
         self.assertEqual(len(raised.exception.records), 1)
@@ -129,6 +129,54 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 )
             ),
             "52500",
+        )
+        self.assertEqual(
+            strongswan_adapter.initiate_socket_timeout(
+                environment(SWU_HTTP_AKA_TIMEOUT="35")
+            ),
+            50.0,
+        )
+
+    def test_initiate_uses_long_socket_timeout_for_slow_aka(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(
+            environment(SWU_HTTP_AKA_TIMEOUT="35")
+        )
+        observed = []
+
+        class Session:
+            class Transport:
+                @staticmethod
+                def close():
+                    return None
+
+            transport = Transport()
+
+            @staticmethod
+            def load_conn(_payload):
+                return {}
+
+            @staticmethod
+            def initiate(_payload):
+                return iter(({"success": b"yes"},))
+
+        def session(timeout):
+            observed.append(timeout)
+            return Session()
+
+        adapter.session = session
+        adapter.load_and_initiate()
+        self.assertEqual(observed, [10.0, 50.0])
+
+    def test_reauthentication_uses_long_socket_timeout_for_slow_aka(self):
+        adapter = strongswan_adapter.StrongSwanAdapter(
+            environment(SWU_HTTP_AKA_TIMEOUT="35")
+        )
+        with mock.patch.object(adapter, "request") as request:
+            adapter.handle_control("reauth")
+        request.assert_called_once_with(
+            "rekey",
+            {"ike": strongswan_adapter.CONNECTION, "reauth": "yes"},
+            socket_timeout=50.0,
         )
 
     def test_runtime_persists_backoff_metadata(self):
@@ -274,6 +322,29 @@ class StrongSwanAdapterTest(unittest.TestCase):
                 runtime.connected("2001:db8::10", "2001:db8::20", "ipsec0")
                 runtime.connected("2001:db8::10", "2001:db8::20", "ipsec0")
             write.assert_called_once()
+
+    def test_shutdown_persists_tunnel_down_before_peer_teardown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            events = []
+
+            class Runtime:
+                rundir = Path(directory)
+
+                @staticmethod
+                def start():
+                    events.append("start")
+
+                @staticmethod
+                def disconnected(**_failure):
+                    events.append("down")
+
+            adapter = strongswan_adapter.StrongSwanAdapter(environment())
+            adapter.runtime = Runtime()
+            adapter.wait_auth_ready = lambda: False
+            adapter.terminate = lambda: events.append("terminate")
+
+            self.assertEqual(adapter.run(), 0)
+            self.assertEqual(events, ["start", "down", "terminate"])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ const sample = (seconds, overrides = {}) => {
     conference_count: 1,
     conference_parties: 2,
     charon: true,
-    python: false,
     tunnel: true,
     ims: true,
     ike_ids: [1],

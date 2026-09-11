@@ -508,6 +508,22 @@ def run_resilience_scenarios(backend, connected_probe, lifecycle_probe):
     run_crash_recovery(backend, connected_probe, lifecycle_probe)
 
 
+def run_production_entrypoint_shutdown():
+    """Stop the packaged PID 1 and require its durable terminal event."""
+    reset_lab()
+    compose(
+        "--profile", "entrypoint", "up", "-d",
+        "epdg", "aka-broker", "nat-gateway", "engine-entrypoint",
+    )
+    wait_for_log("engine-entrypoint", "starting Asterisk", timeout=120)
+    compose("--profile", "entrypoint", "stop", "-t", "15", "engine-entrypoint")
+    compose(
+        "--profile", "entrypoint", "run", "--rm",
+        "engine-entrypoint-terminated-probe",
+    )
+    print("LAB_PRODUCTION_ENTRYPOINT_SHUTDOWN_OK=strongswan")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -536,6 +552,7 @@ def main():
     services = (*COMMON_SERVICES, *BACKEND_SERVICES)
     if args.backend_image:
         COMPOSE_FIXED_OVERRIDES["LAB_STRONGSWAN_BACKEND_IMAGE"] = args.backend_image
+        COMPOSE_FIXED_OVERRIDES["LAB_ENGINE_IMAGE"] = args.backend_image
     reset_lab()
     try:
         if not args.no_build:
@@ -564,6 +581,8 @@ def main():
             )
         if args.scenario in ("all", "resilience"):
             run_resilience_scenarios(backend, connected_probe, lifecycle_probe)
+        if args.backend_image and args.scenario in ("all", "resilience"):
+            run_production_entrypoint_shutdown()
         print("LAB_SUITE_OK=strongswan")
     except Exception:
         try:

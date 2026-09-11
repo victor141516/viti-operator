@@ -119,7 +119,6 @@ print(json.dumps({
     "charon": present(["pgrep", "-x", "charon"]),
     "charon_identity": process_identity("charon"),
     "asterisk_identity": process_identity("asterisk"),
-    "python": present(["pgrep", "-f", "[s]wu_ike.py"]),
     "tunnel": present(["ip", "link", "show", "ipsec0"]),
     "ims": bool(re.search(r"(?m)^\s*volte_ims/.*\sRegistered\s", registrations)),
     "active_channels": int(active.group(1)) if active else 0,

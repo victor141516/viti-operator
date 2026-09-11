@@ -48,6 +48,24 @@ class TunnelReconcilerTest(unittest.TestCase):
             "2001:db8::20",
         )
 
+    def test_late_first_inner_address_restarts_already_running_asterisk(self):
+        calls = []
+
+        def call(command):
+            calls.append(command[-1])
+            return 0
+
+        with mock.patch.object(self.subject, "_call", side_effect=call), mock.patch.object(
+            tunnel_reconcile.subprocess,
+            "check_output",
+            return_value=b"volte_ims Registered",
+        ), mock.patch.object(tunnel_reconcile.time, "sleep"):
+            self.assertTrue(self.subject.apply_inner_ip("2001:db8::20"))
+
+        self.assertEqual(calls, [
+            "core show uptime", "core restart now", "pjsip send register volte_ims",
+        ])
+
     def test_unchanged_inner_address_is_a_noop(self):
         (Path(self.temp.name) / "inner_ip.applied").write_text("2001:db8::10")
         with mock.patch.object(self.subject, "_call") as call:

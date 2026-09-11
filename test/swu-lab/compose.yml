@@ -142,6 +142,58 @@ services:
     volumes:
       - strongswan-runtime:/run/vowifi:ro
 
+  # Opt-in packaged-image check.  The lab normally replaces the engine
+  # entrypoint to isolate protocol behavior; this service verifies that Docker
+  # SIGTERM reaches the real production supervisor and durably records down.
+  engine-entrypoint:
+    profiles: [entrypoint]
+    image: ${LAB_ENGINE_IMAGE:-viti-operator-engine:entrypoint-test}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        ip route replace 172.30.40.10/32 via 172.30.39.254
+        exec /entrypoint.sh
+    depends_on:
+      epdg:
+        condition: service_started
+      aka-broker:
+        condition: service_started
+      nat-gateway:
+        condition: service_healthy
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    stop_grace_period: 15s
+    environment:
+      SWU_HTTP_AKA_URL: http://aka-broker:8080/authenticate
+      SWU_HTTP_AKA_TOKEN: lab-token
+      SWU_HTTP_AKA_TIMEOUT: "1"
+      VOWIFI_AMI_SECRET: lab-ami-secret
+      VOWIFI_VOICE_PASSWORD: lab-voice-password
+      VOWIFI_RUNDIR: /run/vowifi
+      VITI_EVENT_OUTBOX_DIR: /run/vowifi/event-outbox
+    volumes:
+      - ./engine-instance.json:/config/instance.json:ro
+      - engine-entrypoint-runtime:/run/vowifi
+    networks:
+      outer:
+        ipv4_address: 172.30.39.21
+
+  engine-entrypoint-terminated-probe:
+    profiles: [entrypoint]
+    build:
+      context: ../..
+      dockerfile: test/swu-lab/tools.Dockerfile
+    entrypoint: ["python3", "/opt/swu-lab/lab_probe.py"]
+    network_mode: none
+    environment:
+      LAB_PROBE_MODE: terminated
+      PYTHONPATH: /usr/local/bin
+      VOWIFI_RUNDIR: /run/vowifi
+    volumes:
+      - engine-entrypoint-runtime:/run/vowifi:ro
+
 networks:
   outer:
     driver: bridge
@@ -156,3 +208,4 @@ networks:
 
 volumes:
   strongswan-runtime:
+  engine-entrypoint-runtime:

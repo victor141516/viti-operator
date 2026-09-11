@@ -154,6 +154,11 @@ def initiate_timeout_ms(env):
     return str(max(1, round(seconds * 1000)))
 
 
+def initiate_socket_timeout(env):
+    """Allow VICI to outlive charon's configured synchronous initiation wait."""
+    return int(initiate_timeout_ms(env)) / 1000.0 + 5.0
+
+
 def build_connection(env):
     """Build the VICI load-conn payload from the stable backend inputs."""
     identity = permanent_nai(env)
@@ -372,6 +377,7 @@ class StrongSwanAdapter:
         ).split()
         self.charon = None
         self.control = None
+        self.active_session = None
         self.stop_requested = False
         self.signal_received = None
         self.was_established = False
@@ -386,11 +392,11 @@ class StrongSwanAdapter:
     def log(self, message):
         print(f"[strongswan-adapter] {message}", flush=True)
 
-    def session(self):
+    def session(self, timeout=10.0):
         import vici
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        sock.settimeout(10)
+        sock.settimeout(timeout)
         sock.connect(str(self.vici_socket))
         return vici.Session(sock)
 
@@ -445,8 +451,9 @@ class StrongSwanAdapter:
         except OSError:
             pass
 
-    def request(self, method, payload=None):
-        session = self.session()
+    def request(self, method, payload=None, socket_timeout=10.0):
+        session = self.session(socket_timeout)
+        self.active_session = session
         try:
             result = getattr(session, method)(payload) if payload is not None else getattr(session, method)()
             if hasattr(result, "__iter__") and not isinstance(
@@ -461,6 +468,8 @@ class StrongSwanAdapter:
                 return records
             return result
         finally:
+            if self.active_session is session:
+                self.active_session = None
             self.close_session(session)
 
     def wait_for_vici(self):
@@ -513,7 +522,9 @@ class StrongSwanAdapter:
     def load_and_initiate(self):
         self.request("load_conn", build_connection(self.env))
         logs = self.request(
-            "initiate", {"child": CHILD, "timeout": initiate_timeout_ms(self.env)}
+            "initiate",
+            {"child": CHILD, "timeout": initiate_timeout_ms(self.env)},
+            socket_timeout=initiate_socket_timeout(self.env),
         )
         if logs:
             self.log(f"VICI initiation completed with {len(logs)} control records")
@@ -582,7 +593,8 @@ class StrongSwanAdapter:
             payload["reauth"] = "yes"
         elif action == "rekey-child":
             payload = {"child": CHILD}
-        self.request("rekey", payload)
+        timeout = initiate_socket_timeout(self.env) if action == "reauth" else 10.0
+        self.request("rekey", payload, socket_timeout=timeout)
         self.log(f"VICI control completed: {action}")
 
     def monitor(self):
@@ -628,20 +640,21 @@ class StrongSwanAdapter:
         finally:
             selector.close()
 
-    def terminate(self):
+    def terminate(self, budget=8.0):
+        deadline = time.monotonic() + budget
         if self.charon and self.charon.poll() is None:
             try:
                 self.request("terminate", {
-                    "ike": CONNECTION, "timeout": "5000", "force": "yes",
-                })
+                    "ike": CONNECTION, "timeout": "1500", "force": "yes",
+                }, socket_timeout=min(2.0, max(0.1, deadline - time.monotonic())))
             except Exception as error:
                 self.log(f"VICI termination failed: {error}")
             self.charon.send_signal(signal.SIGTERM)
             try:
-                self.charon.wait(timeout=10)
+                self.charon.wait(timeout=max(0.1, deadline - time.monotonic()))
             except subprocess.TimeoutExpired:
                 self.charon.kill()
-                self.charon.wait(timeout=5)
+                self.charon.wait(timeout=1)
 
     def run(self):
         reason = "backend_stopped"
@@ -655,6 +668,11 @@ class StrongSwanAdapter:
         def request_stop(signum, _frame):
             self.signal_received = signum
             self.stop_requested = True
+            # A VICI stream may be waiting for a slow AKA provider. Closing the
+            # active socket makes SIGTERM interrupt that wait immediately so the
+            # adapter can persist tunnel_down within Docker's shutdown budget.
+            if self.active_session is not None:
+                self.close_session(self.active_session)
 
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous_handlers[signum] = signal.signal(signum, request_stop)
@@ -683,8 +701,10 @@ class StrongSwanAdapter:
             return_code = 1
             self.log(f"backend failed: {error}")
         finally:
-            self.terminate()
+            # Persist the causal boundary before any best-effort peer teardown.
+            # This makes tunnel_down durable even if charon ignores SIGTERM.
             self.runtime.disconnected(**failure)
+            self.terminate()
             if self.control:
                 self.control.close()
             for signum, handler in previous_handlers.items():
