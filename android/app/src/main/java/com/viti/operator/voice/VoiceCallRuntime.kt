@@ -17,6 +17,7 @@ import java.util.UUID
 
 data class VoiceCallSnapshot(
     val voice: VoiceUiState = VoiceUiState(),
+    val serverConnectionAvailable: Boolean = false,
     val legToken: String = "",
     val direction: VoiceCallDirection? = null,
     val phase: VoiceCallPhase? = null,
@@ -83,6 +84,7 @@ class VoiceCallRuntime(
 
     private var leg: Leg? = null
     private var voice = VoiceUiState()
+    private var serverConnectionAvailable = false
     private var deferredProvisioning: VoiceProvisioning? = null
     private val legacyFocusMutex = Mutex()
     private val _snapshot = MutableStateFlow(VoiceCallSnapshot())
@@ -90,7 +92,9 @@ class VoiceCallRuntime(
 
     fun start(provisioning: VoiceProvisioning) {
         if (leg == null) {
+            serverConnectionAvailable = false
             voiceClient.start(provisioning)
+            publish()
         } else {
             deferredProvisioning = provisioning
         }
@@ -283,8 +287,14 @@ class VoiceCallRuntime(
             return
         }
         when (event.type) {
-            "connected" -> if (leg == null) voice = VoiceUiState(state = "connected", detail = "Connecting the line…")
-            "registered" -> if (leg == null) voice = VoiceUiState(state = "registered", detail = "Line ready for calls")
+            "connected" -> {
+                serverConnectionAvailable = false
+                if (leg == null) voice = VoiceUiState(state = "connected", detail = "Connecting the line…")
+            }
+            "registered" -> {
+                serverConnectionAvailable = true
+                if (leg == null) voice = VoiceUiState(state = "registered", detail = "Line ready for calls")
+            }
             "calling" -> updateLegPhase(event, VoiceCallPhase.DIALING, "Calling ${event.peer.ifBlank { leg?.peer.orEmpty() }}…")
             "ringing" -> updateLegPhase(event, VoiceCallPhase.RINGING, "Ringing…")
             "active" -> activateFromSip(event)
@@ -305,10 +315,21 @@ class VoiceCallRuntime(
             "dtmf" -> Unit
             "dtmf-failed" -> publishNotice(event.cause.ifBlank { "Could not send the DTMF tone" })
             "ended", "failed" -> finishFromSip(event)
-            "registration-failed" -> if (leg == null) voice = VoiceUiState(state = event.type, detail = event.cause.ifBlank { "Could not register the line" })
-            "disconnected" -> if (leg == null) voice = VoiceUiState(state = "disconnected", detail = "Telephony disconnected")
+            "registration-failed" -> {
+                serverConnectionAvailable = false
+                if (leg == null) voice = VoiceUiState(state = event.type, detail = event.cause.ifBlank { "Could not register the line" })
+            }
+            "unregistered", "disconnected" -> {
+                serverConnectionAvailable = false
+                if (leg == null) {
+                    voice = VoiceUiState(
+                        state = event.type,
+                        detail = if (event.type == "unregistered") "The phone is not registered" else "Telephony disconnected",
+                    )
+                }
+            }
         }
-        if (event.type in setOf("connected", "registered", "registration-failed", "disconnected")) publish()
+        if (event.type in setOf("connected", "registered", "registration-failed", "unregistered", "disconnected")) publish()
     }
 
     fun close() {
@@ -815,18 +836,78 @@ class VoiceCallRuntime(
         current.platformDisconnecting = true
         val job = current.platformJob
         val control = current.control
+        val cleanupStartedAt = System.nanoTime()
+        var stage = "prepare"
+        onDiagnostic(
+            "telecom.cleanup-started",
+            mapOf(
+                "leg_token" to current.token,
+                "rejected" to rejected,
+                "has_control" to (control != null),
+                "has_platform_job" to (job != null),
+            ),
+        )
         try {
             if (control != null) {
+                stage = "disconnect"
+                val disconnectStartedAt = System.nanoTime()
+                onDiagnostic("telecom.disconnect-started", mapOf("leg_token" to current.token, "rejected" to rejected))
                 control.disconnect(rejected)
+                onDiagnostic(
+                    "telecom.disconnect-completed",
+                    mapOf(
+                        "leg_token" to current.token,
+                        "duration_ms" to elapsedMilliseconds(disconnectStartedAt),
+                    ),
+                )
+                stage = "scope-await"
+                val scopeAwaitStartedAt = System.nanoTime()
+                onDiagnostic("telecom.scope-await-started", mapOf("leg_token" to current.token))
                 job?.join()
+                onDiagnostic(
+                    "telecom.scope-await-completed",
+                    mapOf(
+                        "leg_token" to current.token,
+                        "duration_ms" to elapsedMilliseconds(scopeAwaitStartedAt),
+                    ),
+                )
             } else {
+                stage = "admission-cancel"
+                val admissionCancelStartedAt = System.nanoTime()
+                onDiagnostic("telecom.admission-cancel-started", mapOf("leg_token" to current.token))
                 job?.cancelAndJoin()
+                onDiagnostic(
+                    "telecom.admission-cancel-completed",
+                    mapOf(
+                        "leg_token" to current.token,
+                        "duration_ms" to elapsedMilliseconds(admissionCancelStartedAt),
+                    ),
+                )
             }
+            onDiagnostic(
+                "telecom.cleanup-completed",
+                mapOf(
+                    "leg_token" to current.token,
+                    "duration_ms" to elapsedMilliseconds(cleanupStartedAt),
+                ),
+            )
         } catch (error: Throwable) {
             current.platformDisconnecting = false
+            onDiagnostic(
+                "telecom.cleanup-failed",
+                mapOf(
+                    "leg_token" to current.token,
+                    "stage" to stage,
+                    "duration_ms" to elapsedMilliseconds(cleanupStartedAt),
+                    "error" to error.toString(),
+                ),
+            )
             throw error
         }
     }
+
+    private fun elapsedMilliseconds(startedAt: Long): Long =
+        (System.nanoTime() - startedAt).coerceAtLeast(0L) / 1_000_000L
 
     private fun markTerminal(current: Leg, detail: String, failed: Boolean, rejected: Boolean = false) {
         current.phase = VoiceCallPhase.ENDING
@@ -854,7 +935,7 @@ class VoiceCallRuntime(
         publish()
         deferredProvisioning?.let { provisioning ->
             deferredProvisioning = null
-            voiceClient.start(provisioning)
+            start(provisioning)
         }
         onDiagnostic("telecom.call-cleared", mapOf("leg_token" to token, "failed" to failed, "detail" to detail))
     }
@@ -863,6 +944,7 @@ class VoiceCallRuntime(
         val current = leg
         val value = VoiceCallSnapshot(
             voice = voice,
+            serverConnectionAvailable = serverConnectionAvailable,
             legToken = current?.token.orEmpty(),
             direction = current?.direction,
             phase = current?.phase,

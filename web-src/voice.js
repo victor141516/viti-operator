@@ -4,6 +4,17 @@ import { createMicrophoneInputController } from './microphone-input.js'
 import { createCallQualitySampler } from './call-quality.js'
 import { createAudioLevelMeter } from './audio-level-meter.js'
 
+export function isDefinitiveRemoteSessionEnd(event) {
+  // JsSIP emits `ended` with a remote originator only after accepting a BYE.
+  // A BYE terminates the SIP dialog deliberately; transport and WebRTC faults
+  // use `failed` instead and remain eligible for media recovery.
+  return event?.originator === 'remote'
+}
+
+export function incomingPeerName(identity = {}) {
+  return identity?.display_name || identity?.uri?.user || 'Private number'
+}
+
 export function createVoice(onEvent, audioElement, identity = {}) {
   let ua = null
   let session = null
@@ -305,7 +316,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       remote_identity: next.remote_identity?.toString?.(), request: next.request?.toString?.(),
     }, next)
     if (next.direction === 'incoming') {
-      const from = next.remote_identity?.uri?.user || 'Private number'
+      const from = incomingPeerName(next.remote_identity)
       startIncomingRing()
       emit('incoming', { from }, next)
     }
@@ -409,7 +420,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       testAudio = null
     }
     next.on('ended', (event) => {
-      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next, 'unavailable'); diagnose('session.ended', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('ended'); stopIncomingRing('ended'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next); diagnose('session.ended', { originator: event?.originator, cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       lastTerminationClassification = {
         event: 'ended', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
@@ -424,7 +435,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       // must not end (or play an end tone over) the replacement call.
       if (!wasCurrent) return
       if (wasCurrent) { microphoneInput.release(); stopLevelMeters() }
-	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded
+	  const interrupted = wasCurrent && (next.__vitiWasActive || next.__vitiRecovery) && !next.__vitiLocallyEnded && !isDefinitiveRemoteSessionEnd(event)
 	  if (wasCurrent && !interrupted) { microphoneMute.reset(); telecomMuted = false; systemInactive = false; if (audioElement) audioElement.muted = false }
 	  if (interrupted) { emit('interrupted', { trace_id: traceId(next), cause: event?.cause || 'Call media ended unexpectedly' }, next); return }
       const finish = () => { if (!next.__vitiLocallyEnded) emit('ended', { trace_id: traceId(next) }, next) }
@@ -432,7 +443,7 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       else finish()
     })
     next.on('failed', (event) => {
-      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next, 'unavailable'); diagnose('session.failed', { cause: event?.cause, message: event?.message?.toString?.() }, next)
+      stopRingback('failed'); stopIncomingRing('failed'); stopTestAudio(); cancelDTMFFeedback(); stopQuality(next); diagnose('session.failed', { originator: event?.originator, cause: event?.cause, message: event?.message?.toString?.() }, next)
       const wasCurrent = session === next
       lastTerminationClassification = {
         event: 'failed', was_current: wasCurrent, was_active: next.__vitiWasActive === true,
@@ -473,7 +484,10 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       ua.on('connecting', (event) => diagnose('ua.connecting', { attempts: event?.attempts }))
       ua.on('connected', () => { diagnose('ua.connected'); emit('connected') })
       ua.on('registered', (event) => { diagnose('ua.registered', { response: event?.response?.toString?.() }); emit('registered') })
-      ua.on('unregistered', (event) => diagnose('ua.unregistered', { cause: event?.cause }))
+      ua.on('unregistered', (event) => {
+        diagnose('ua.unregistered', { cause: event?.cause })
+        emit('unregistered', { cause: event?.cause || '' })
+      })
       ua.on('disconnected', (event) => { diagnose('ua.disconnected', { code: event?.code, reason: event?.reason }); emit('disconnected') })
       ua.on('registrationFailed', (event) => { diagnose('ua.registration-failed', { cause: event?.cause, response: event?.response?.toString?.() }); emit('registration-failed', { cause: event?.cause || '' }) })
       ua.on('newRTCSession', ({ session: next, request }) => { diagnose('ua.new-session', { request: request?.toString?.() }, next); bindSession(next) })

@@ -7,8 +7,8 @@ client, and a working SIM alone does not establish carrier compatibility.
 
 This guide covers the checked-in Compose deployment. Optional components in a
 development checkout may differ: use `docker compose config --services` to see
-what your revision actually contains. In particular, the bundled OpenAI bots and
-visual bot editor are not prerequisites for bringing up the carrier connection.
+what your revision actually contains. The bundled OpenAI bots and visual bot
+editor are optional and are not prerequisites for bringing up the carrier connection.
 
 ## 1. Architecture and prerequisites
 
@@ -297,8 +297,12 @@ Configure a per-user Scheduled Task to run that launcher at sign-in with
 `powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -File <launcher>`.
 Use an unlimited execution time, restart on failure, and do not start duplicate
 instances. Update an existing bridge task instead of installing a second one.
-Some development revisions include `Install-VitiAdbBridge.ps1`; inspect its task
-action and ensure it starts ADB first, rather than only the proxy.
+The included `Install-VitiAdbBridge.ps1` automates this setup and starts ADB before
+the proxy. After stopping the initial foreground bridge, run it from the root:
+
+```powershell
+.\Install-VitiAdbBridge.ps1 -AdbExecutable 'C:\path\to\platform-tools\adb.exe'
+```
 
 After a planned reboot, verify the whole chain: Docker, containers, ADB device,
 SIM provider, tunnel, IMS, then a client. A bridge process can be alive while its
@@ -311,11 +315,12 @@ and an ordered incoming-call screening pipeline. Start with an empty pipeline;
 add stable service names only after baseline calling works. See
 [docs/API.md](docs/API.md) and [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
-If your revision includes the OpenAI Compose services, leave `OPENAI_API_KEY`
-empty until intentionally enabling them. Commercial screening additionally
-needs a private greeting file and an enabled handler. Follow the operations
-guide shipped with that revision; do not assume that a documentation-only update
-also installs these optional development components.
+The OpenAI Compose services remain idle without `OPENAI_API_KEY`. Leave it empty
+until intentionally enabling them. Commercial screening additionally needs a
+private greeting file and an enabled handler. Follow the
+[bot setup instructions](docs/OPERATIONS.md) and
+[integration protocol](docs/INTEGRATIONS.md) for media formats, activation,
+delegation, and session cleanup.
 
 Back up `.env`, `deploy/viti.json`, `deploy/instance.json`, and `deploy/data`
 securely. Recordings and history contain personal data. Take consistent backups

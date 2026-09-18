@@ -18,6 +18,7 @@ type Message struct {
 	From                    string          `json:"from"`
 	To                      string          `json:"to"`
 	Text                    string          `json:"text"`
+	ProtocolDebug           bool            `json:"protocol_debug,omitempty"`
 	State                   string          `json:"state"`
 	DeliveryState           string          `json:"delivery_state,omitempty"`
 	DeliveryReportRequested bool            `json:"delivery_report_requested,omitempty"`

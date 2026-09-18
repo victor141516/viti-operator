@@ -83,6 +83,7 @@ RUN git init /usr/src/strongswan && \
     git remote add origin https://github.com/strongswan/strongswan.git && \
     git fetch --depth 1 origin "${STRONGSWAN_COMMIT}" && \
     git checkout --detach FETCH_HEAD && \
+    sed -i 's/\r$//' /tmp/strongswan-message-id-sync.patch /tmp/strongswan-request-idr.patch && \
     git apply /tmp/strongswan-message-id-sync.patch && \
     git apply --recount /tmp/strongswan-request-idr.patch && \
     ./autogen.sh && \

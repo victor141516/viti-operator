@@ -14,6 +14,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -39,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -97,6 +104,7 @@ class IncomingCallActivity : ComponentActivity() {
                 return
             }
             serviceValidated = true
+            connected.takeOverIncomingRingtone(expectedToken)
             snapshotJob?.cancel()
             snapshotJob = lifecycleScope.launch {
                 connected.snapshot.collect { current ->
@@ -355,10 +363,8 @@ internal fun IncomingCallScreen(
                     contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            text = peer.trim().firstOrNull()?.uppercase() ?: "?",
-                            style = MaterialTheme.typography.displayMedium,
-                            fontWeight = FontWeight.Medium,
+                        RingingPhoneIcon(
+                            modifier = Modifier.size(52.dp),
                         )
                     }
                 }
@@ -411,6 +417,38 @@ internal fun IncomingCallScreen(
             }
         }
     }
+}
+
+@Composable
+private fun RingingPhoneIcon(modifier: Modifier = Modifier) {
+    val transition = rememberInfiniteTransition(label = "Ringing phone")
+    val rotation by transition.animateFloat(
+        initialValue = -12f,
+        targetValue = 12f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 360, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "Phone rotation",
+    )
+    val scale by transition.animateFloat(
+        initialValue = 0.94f,
+        targetValue = 1.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 720, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "Phone pulse",
+    )
+    Icon(
+        imageVector = Icons.Default.Call,
+        contentDescription = "Phone ringing",
+        modifier = modifier.graphicsLayer {
+            rotationZ = rotation
+            scaleX = scale
+            scaleY = scale
+        },
+    )
 }
 
 @Composable

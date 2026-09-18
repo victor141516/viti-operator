@@ -50,13 +50,17 @@ func (a *OpenStickAuthenticator) CheckSIMReady(ctx context.Context) error {
 		return a.lastError
 	}
 	// AuthenticateAKA deliberately force-stops and restarts the bridge while it
-	// owns this mutex. A concurrent health probe would otherwise observe that
-	// short maintenance window as a missing provider and flash a false SIM
-	// failure in every client. The in-flight AKA operation itself is sufficient
-	// evidence that this authenticator is the selected live provider; the next
-	// probe will perform the complete hardware check.
+	// owns this mutex. Preserve a recent successful hardware observation during
+	// that maintenance window, but never treat an unproven or already failing
+	// AKA operation as evidence that the SIM transport is healthy.
 	if !a.mu.TryLock() {
-		return nil
+		if !a.lastReady.IsZero() && now.Sub(a.lastReady) < 30*time.Second {
+			return nil
+		}
+		if a.lastError != nil {
+			return a.lastError
+		}
+		return errors.New("OpenStick authentication is in progress; SIM readiness has not been confirmed")
 	}
 	defer a.mu.Unlock()
 	rawErr := a.checkSIMReadyNow(ctx)

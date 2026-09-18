@@ -17,6 +17,11 @@ VALID_ACTIONS = {"ring_clients", "take_control", "hangup"}
 REQUEST_TIMEOUT_SECONDS = 5
 
 
+def trace(message):
+    """Write call-routing diagnostics without contaminating SHELL() stdout."""
+    print(f"[screen-call] {message}", file=sys.stderr, flush=True)
+
+
 def post_json(url, payload, headers):
     request = urllib.request.Request(
         url,
@@ -37,6 +42,7 @@ def screening_action(call_id, post=post_json):
     manager_token = os.environ.get("VOWIFI_MANAGER_TOKEN") or env.get("VOWIFI_MANAGER_TOKEN", "")
     instance = os.environ.get("VOWIFI_ID") or env.get("VOWIFI_ID", "1")
     if not manager_url or not call_id:
+        trace(f"call_id={call_id or '-'} action=ring_clients reason=missing_configuration")
         return "ring_clients"
     headers = {"X-Viti-Engine-Token": manager_token} if manager_token else {}
     try:
@@ -47,12 +53,15 @@ def screening_action(call_id, post=post_json):
                 headers,
             )
             if status != 200:
+                trace(f"call_id={call_id} action=ring_clients reason=http_status status={status}")
                 return "ring_clients"
             action = str(response.get("action", "")).strip().lower()
+            trace(f"call_id={call_id} manager_action={action or '-'}")
             if action == "pending":
                 continue
             return action if action in VALID_ACTIONS else "ring_clients"
-    except Exception:
+    except Exception as error:
+        trace(f"call_id={call_id} action=ring_clients reason=request_failed error={error!r}")
         return "ring_clients"
 
 

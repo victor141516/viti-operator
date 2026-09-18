@@ -41,6 +41,8 @@ type App struct {
 	smsMu             sync.Mutex
 	imsMu             sync.Mutex
 	simAuthMu         sync.Mutex
+	testCallMu        sync.Mutex
+	testCallPending   bool
 	stateMu           sync.RWMutex
 	tunnel            engineTunnelState
 	clients           map[string]clientPresence
@@ -106,6 +108,10 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("open diagnostics: %w", err)
 	}
 	store.SetDiagnostics(diag)
+	botConfiguration, err := store.EnsureBotConfiguration(cfg.ScreeningPipeline)
+	if err != nil {
+		return nil, fmt.Errorf("initialize bot configuration: %w", err)
+	}
 	events := NewEventHub()
 	events.SetDiagnostics(diag)
 	if instrumented, ok := gateway.(interface{ SetDiagnostics(*DiagnosticRecorder) }); ok {
@@ -119,7 +125,7 @@ func New(cfg Config, logger *slog.Logger) (*App, error) {
 		}
 	}
 	a := &App{cfg: cfg, logger: logger, store: store, events: events, gateway: gateway, broker: broker, diag: diag, mux: http.NewServeMux(), clients: clients, simAuthAssignment: store.SIMAuthAssignment(), callSessions: newCallSessionRegistry(), integrations: newIntegrationRegistry()}
-	a.screening = newScreeningManager(cfg.ScreeningPipeline, store, events, a.integrations, screeningCallbacks{
+	a.screening = newScreeningManager(botConfiguration.ScreeningPipeline, store, events, a.integrations, screeningCallbacks{
 		closeController: func(serviceName, callID, reason string) {
 			if a.serviceMedia != nil {
 				a.serviceMedia.CloseServiceCall(serviceName, callID, reason)
@@ -192,14 +198,20 @@ func (a *App) routes() {
 	a.mux.Handle("PUT /api/v1/ims-registration", a.authorized(http.HandlerFunc(a.setIMSRegistration)))
 	a.mux.Handle("GET /api/v1/events", a.authorized(http.HandlerFunc(a.waitEvents)))
 	a.mux.Handle("GET /api/v1/integrations/ws", a.authorized(http.HandlerFunc(a.integrationWebSocket)))
+	a.mux.Handle("GET /api/v1/bots", a.authorized(http.HandlerFunc(a.bots)))
+	a.mux.Handle("PUT /api/v1/bots/pipeline", a.authorized(http.HandlerFunc(a.setBotPipeline)))
+	a.mux.Handle("PUT /api/v1/bots/{name}/activation", a.authorized(http.HandlerFunc(a.setBotActivation)))
 	a.mux.Handle("GET /api/v1/messages", a.authorized(http.HandlerFunc(a.messages)))
 	a.mux.Handle("POST /api/v1/messages", a.authorized(http.HandlerFunc(a.sendMessage)))
+	a.mux.Handle("POST /api/v1/messages/debug/preview", a.authorized(http.HandlerFunc(a.previewDebugMessage)))
+	a.mux.Handle("POST /api/v1/messages/debug/send", a.authorized(http.HandlerFunc(a.sendDebugMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
 	a.mux.Handle("GET /api/v1/calls/{id}", a.authorized(http.HandlerFunc(a.callDetails)))
 	a.mux.Handle("POST /api/v1/calls/normalize", a.authorized(http.HandlerFunc(a.normalizeCallDestination)))
 	a.mux.Handle("GET /api/v1/contacts", a.authorized(http.HandlerFunc(a.contacts)))
 	a.mux.Handle("PUT /api/v1/contacts/sources/{client}", a.authorized(http.HandlerFunc(a.replaceContactSource)))
 	a.mux.Handle("POST /api/v1/calls", a.authorized(http.HandlerFunc(a.startCall)))
+	a.mux.Handle("POST /api/v1/calls/test-incoming", a.authorized(http.HandlerFunc(a.testIncomingCall)))
 	a.mux.Handle("POST /api/v1/calls/{id}/hangup", a.authorized(http.HandlerFunc(a.hangupCall)))
 	a.mux.Handle("POST /api/v1/calls/participants/leave", a.authorized(http.HandlerFunc(a.leaveCallParticipant)))
 	a.mux.Handle("GET /api/v1/recording", a.authorized(http.HandlerFunc(a.recordingSettings)))
@@ -338,6 +350,7 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var callUpdate *engineCallUpdate
+	bypassScreening := false
 	switch request.Event {
 	case "sms_in":
 		a.ingestEngineSMS(w, request.Instance, request.Args, request.RecordedAtNS)
@@ -383,6 +396,8 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		direction := DirectionIncoming
 		if request.Event == "call_out" {
 			direction = DirectionOutgoing
+		} else if len(request.Args) > 1 && request.Args[1] == "diagnostic" {
+			bypassScreening = true
 		}
 		peer := strings.TrimSpace(request.Args[0])
 		if direction == DirectionIncoming && peer == "" {
@@ -456,11 +471,16 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "could not persist call")
 		return
 	}
+	call = a.callWithResolvedContact(call)
 	if changed {
 		a.events.Publish("call.updated", call)
 	}
 	if request.Event == "call_in" && changed {
-		a.screening.StartIncoming(call)
+		if bypassScreening {
+			a.events.Publish("call.incoming", screeningCallPayload(call))
+		} else {
+			a.screening.StartIncoming(call)
+		}
 	}
 	if request.Event == "call_active" && changed {
 		a.events.Publish("call.active", screeningCallPayload(call))
@@ -477,6 +497,14 @@ func (a *App) engineEvent(w http.ResponseWriter, r *http.Request) {
 	}
 	a.diag.RecordTrace("manager.call", "event.completed", call.TraceID, map[string]any{"engine_event": request, "call": call})
 	writeJSON(w, http.StatusOK, call)
+}
+
+func (a *App) callWithResolvedContact(call Call) Call {
+	if contact, found := resolveContact(a.store.Contacts(""), call.Peer); found {
+		call.ContactID = contact.ID
+		call.ContactName = contact.Name
+	}
+	return call
 }
 
 func normalizeDirection(value string) Direction {
@@ -684,6 +712,91 @@ func (a *App) sendMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusAccepted, message)
 }
 
+func (a *App) smsDebugDefaults() SMSDebugDefaults {
+	return SMSDebugDefaults{
+		FromNumber: a.cfg.Telephony.AMI.FromNumber, Realm: a.cfg.Telephony.AMI.Realm,
+		SMSC: a.cfg.Telephony.AMI.SMSC, AccessNetworkInfo: a.cfg.Telephony.AMI.AccessNetworkInfo,
+	}
+}
+
+func (a *App) previewDebugMessage(w http.ResponseWriter, r *http.Request) {
+	var request SMSDebugRequest
+	if err := readJSON(r, &request, 128<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	preview, err := buildSMSDebugPreview(request, a.smsDebugDefaults())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, preview)
+}
+
+func (a *App) sendDebugMessage(w http.ResponseWriter, r *http.Request) {
+	debugGateway, ok := a.gateway.(SMSDebugGateway)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "the configured telephony provider does not support raw SMS debugging")
+		return
+	}
+	var request SMSDebugRequest
+	if err := readJSON(r, &request, 128<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	preview, err := buildSMSDebugPreview(request, a.smsDebugDefaults())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 4*time.Second)
+	defer cancel()
+	if status, statusErr := a.runtimeStatus(ctx); statusErr != nil {
+		a.diag.RecordEvent("manager.sms", "debug-send.blocked-unavailable", status)
+		writeError(w, http.StatusServiceUnavailable, runtimeUnavailableMessage(status))
+		return
+	}
+	id, err := randomID("sms")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not allocate message")
+		return
+	}
+	now := time.Now().UTC()
+	deadline := now.Add(smsDeliveryReportWindow)
+	message := Message{
+		ID: id, Direction: DirectionOutgoing, To: preview.Request.To, Text: preview.Request.Text,
+		ProtocolDebug: true, State: "sending", DeliveryState: "pending", DeliveryReportRequested: *preview.Request.RequestDeliveryReport,
+		StatusDetail: "Edited protocol message queued for local submission.", DeliveryReportDeadline: &deadline,
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := a.store.SaveMessage(message); err != nil {
+		writeError(w, http.StatusInternalServerError, "could not persist message")
+		return
+	}
+	a.events.Publish("message.updated", message)
+	go a.deliverDebugMessage(debugGateway, message, preview)
+	writeJSON(w, http.StatusAccepted, message)
+}
+
+func (a *App) deliverDebugMessage(gateway SMSDebugGateway, message Message, preview SMSDebugPreview) {
+	a.smsMu.Lock()
+	defer a.smsMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	result, err := gateway.SendDebugSMS(ctx, message.ID, preview)
+	updated, changed, persistErr := a.store.UpdateMessage(message.ID, func(current *Message) bool {
+		return applySMSSubmitResult(current, result, err, time.Now().UTC())
+	})
+	if persistErr != nil {
+		a.logger.Warn("persist debug SMS submission result", "message_id", message.ID, "error", persistErr)
+	} else if changed {
+		a.events.Publish("message.updated", updated)
+	}
+	if err != nil && !errors.Is(err, ErrDeliveryUnconfirmed) {
+		a.logger.Warn("debug SMS send failed", "message_id", message.ID, "error", err)
+	}
+}
+
 func (a *App) deliverMessage(message Message) {
 	// Both clients may submit concurrently, but the single IMS MESSAGE channel
 	// is serialized here. Requests are accepted immediately and remain visible
@@ -852,6 +965,63 @@ func (a *App) startCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, call)
+}
+
+func (a *App) testIncomingCall(w http.ResponseWriter, r *http.Request) {
+	tester, ok := a.gateway.(IncomingCallTester)
+	if !ok {
+		writeError(w, http.StatusNotImplemented, "the telephony provider cannot simulate an incoming call")
+		return
+	}
+	var request struct {
+		DelayMS int64 `json:"delay_ms"`
+	}
+	if err := readJSON(r, &request, 4<<10); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if request.DelayMS == 0 {
+		request.DelayMS = 2_000
+	}
+	if request.DelayMS < 250 || request.DelayMS > 10_000 {
+		writeError(w, http.StatusBadRequest, "delay_ms must be between 250 and 10000")
+		return
+	}
+	for _, call := range a.store.Calls() {
+		if call.EndedAt == nil {
+			writeError(w, http.StatusConflict, "the line is already in use")
+			return
+		}
+	}
+	a.testCallMu.Lock()
+	if a.testCallPending {
+		a.testCallMu.Unlock()
+		writeError(w, http.StatusConflict, "an incoming-call test is already scheduled")
+		return
+	}
+	a.testCallPending = true
+	a.testCallMu.Unlock()
+	delay := time.Duration(request.DelayMS) * time.Millisecond
+	scheduledAt := time.Now().UTC().Add(delay)
+	time.AfterFunc(delay, func() {
+		defer func() {
+			a.testCallMu.Lock()
+			a.testCallPending = false
+			a.testCallMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		a.diag.RecordEvent("manager.call", "incoming-test.started", map[string]any{"delay_ms": request.DelayMS})
+		if err := tester.TestIncomingCall(ctx); err != nil {
+			a.logger.Warn("incoming-call test failed", "error", err)
+			a.diag.RecordEvent("manager.call", "incoming-test.failed", map[string]any{"error": err.Error()})
+			return
+		}
+		a.diag.RecordEvent("manager.call", "incoming-test.submitted", nil)
+	})
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"scheduled": true, "delay_ms": request.DelayMS, "scheduled_at": scheduledAt,
+	})
 }
 
 func (a *App) startCallOperation(ctx context.Context, to, country, traceID string) (Call, int, error) {

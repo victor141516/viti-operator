@@ -105,9 +105,8 @@ func TestIntegrationCommandsEnforceCapabilitiesAndIdempotency(t *testing.T) {
 			"call.start": json.RawMessage(`{}`), "call.hangup": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`),
 		},
 	})
-	readIntegrationType(t, controller, "service.ready")
-	readIntegrationType(t, controller, "system.snapshot")
-	readIntegrationType(t, controller, "service.connected")
+	ready := readIntegrationType(t, controller, "service.ready")
+	activateIntegrationForTest(t, application, controller, ready)
 	writeIntegrationCommand(t, controller, integrationCommand{
 		Type: "call.start", Version: 1, CommandID: "invalid-start", Payload: json.RawMessage(`{"to":12}`),
 	})
@@ -213,9 +212,8 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 		Type: "service.hello", Version: 1, Name: "transcriber",
 		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`), "call.dtmf": json.RawMessage(`{}`)},
 	})
-	readIntegrationType(t, socket, "service.ready")
-	readIntegrationType(t, socket, "system.snapshot")
-	readIntegrationType(t, socket, "service.connected")
+	ready := readIntegrationType(t, socket, "service.ready")
+	activateIntegrationForTest(t, application, socket, ready)
 
 	attachCommand := integrationCommand{
 		Type: "media.attach", Version: 1, CommandID: "attach-1", CallID: call.ID,
@@ -278,9 +276,8 @@ func TestIntegrationNegotiatesServiceMediaAndRoutesICEAndDTMF(t *testing.T) {
 		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`), "call.dtmf": json.RawMessage(`{}`)},
 	})
 	defer reconnected.Close()
-	readIntegrationType(t, reconnected, "service.ready")
-	readIntegrationType(t, reconnected, "system.snapshot")
-	readIntegrationType(t, reconnected, "service.connected")
+	reconnectedReady := readIntegrationType(t, reconnected, "service.ready")
+	activateIntegrationForTest(t, application, reconnected, reconnectedReady)
 	writeIntegrationCommand(t, reconnected, attachCommand)
 	stale := readCommandResult(t, reconnected, "attach-1", "rejected")
 	if stale["error_code"] != "stale_connection_generation" {
@@ -309,9 +306,8 @@ func TestIntegrationDisconnectClosesMediaBeforeBlockedCommandsFinish(t *testing.
 		Type: "service.hello", Version: 1, Name: "blocked-transcriber",
 		Capabilities: map[string]json.RawMessage{"call.media": json.RawMessage(`{}`)},
 	})
-	readIntegrationType(t, socket, "service.ready")
-	readIntegrationType(t, socket, "system.snapshot")
-	readIntegrationType(t, socket, "service.connected")
+	ready := readIntegrationType(t, socket, "service.ready")
+	activateIntegrationForTest(t, application, socket, ready)
 
 	writeIntegrationCommand(t, socket, integrationCommand{
 		Type: "media.attach", Version: 1, CommandID: "initial-attach", CallID: call.ID,
@@ -368,9 +364,8 @@ func TestIntegrationServiceCallPreparesMediaBeforeDialActivation(t *testing.T) {
 		Capabilities: map[string]json.RawMessage{"call.start": json.RawMessage(`{}`), "call.media": json.RawMessage(`{}`)},
 	})
 	defer socket.Close()
-	readIntegrationType(t, socket, "service.ready")
-	readIntegrationType(t, socket, "system.snapshot")
-	readIntegrationType(t, socket, "service.connected")
+	ready := readIntegrationType(t, socket, "service.ready")
+	activateIntegrationForTest(t, application, socket, ready)
 	writeIntegrationCommand(t, socket, integrationCommand{
 		Type: "call.start", Version: 1, CommandID: "service-start", Payload: json.RawMessage(`{"to":"+12025550123","sdp_offer":"v=0\\r\\n"}`),
 	})
@@ -717,6 +712,21 @@ func dialIntegration(t *testing.T, server *httptest.Server, hello integrationHel
 		t.Fatal(err)
 	}
 	return socket
+}
+
+func activateIntegrationForTest(t *testing.T, application *App, socket *websocket.Conn, ready map[string]any) {
+	t.Helper()
+	service, ok := ready["service"].(map[string]any)
+	if !ok {
+		t.Fatalf("service.ready omitted service: %#v", ready)
+	}
+	name, _ := service["name"].(string)
+	connectionID, _ := service["connection_id"].(string)
+	if _, _, err := application.integrations.setAuxiliaryActive(name, connectionID, true); err != nil {
+		t.Fatal(err)
+	}
+	readIntegrationType(t, socket, "service.access.updated")
+	readIntegrationType(t, socket, "system.snapshot")
 }
 
 func readIntegrationMessage(t *testing.T, socket *websocket.Conn) map[string]any {

@@ -88,7 +88,7 @@ class NotifyTest(unittest.TestCase):
             self.assertEqual(args, (event, event_args))
             self.assertEqual(kwargs["extra"], {"call_id": "linked-42", "trace_id": "trace-99"})
             self.assertGreater(kwargs["recorded_at_ns"], 0)
-            if event in ("call_in", "call_out"):
+            if event in ("call_in", "call_out", "call_active"):
                 deliver.assert_called_once_with(Path("queued.json"))
             else:
                 deliver.assert_not_called()
@@ -171,6 +171,7 @@ class NotifyTest(unittest.TestCase):
             template.index("[volte_ims_msg]")
         ]
         screening = incoming.index("screen_call.py")
+        self.assertIn("${TRIM(${SHELL(python3 /usr/local/bin/screen_call.py", incoming)
         ring = incoming.index("Ringing()", screening)
         answer = incoming.index("n(screen_control),Answer()", screening)
         conference = incoming.index("Goto(viti-carrier-conference,s,1)", answer)

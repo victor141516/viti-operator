@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNormalizeDialDestination(t *testing.T) {
@@ -114,6 +115,27 @@ func TestStartCallNormalizesNationalDestinationBeforePersistence(t *testing.T) {
 	}
 }
 
+func TestStartCallRemainsAvailableWithoutSIMWhileCarrierPathIsReady(t *testing.T) {
+	application := newDialingTestApp(t)
+	application.auth = &readinessFixture{ready: false}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+
+	status := runtimeStatusForTest(t, server.URL)
+	if !status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+		t.Fatalf("status did not preserve the usable carrier path: %#v", status)
+	}
+	response, err := http.Post(server.URL+"/api/v1/calls", "application/json", bytes.NewBufferString(`{"to":"+12025550123"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusCreated {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("start call without SIM returned %d: %s", response.StatusCode, body)
+	}
+}
+
 func TestDialNormalizationFailureDoesNotCreateCall(t *testing.T) {
 	application := newDialingTestApp(t)
 	recorder := httptest.NewRecorder()
@@ -124,6 +146,50 @@ func TestDialNormalizationFailureDoesNotCreateCall(t *testing.T) {
 	}
 	if calls := application.store.Calls(); len(calls) != 0 {
 		t.Fatalf("normalization failure created calls: %#v", calls)
+	}
+}
+
+func TestIncomingCallTestIsDelayedAndDeduplicated(t *testing.T) {
+	application := newDialingTestApp(t)
+	triggered := make(chan time.Time, 1)
+	application.gateway = &incomingCallTestFixture{MemoryGateway: MemoryGateway{}, triggered: triggered}
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+
+	started := time.Now()
+	response, err := http.Post(
+		server.URL+"/api/v1/calls/test-incoming",
+		"application/json",
+		bytes.NewBufferString(`{"delay_ms":250}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		t.Fatalf("test call status = %d", response.StatusCode)
+	}
+
+	duplicate, err := http.Post(
+		server.URL+"/api/v1/calls/test-incoming",
+		"application/json",
+		bytes.NewBufferString(`{"delay_ms":250}`),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate.Body.Close()
+	if duplicate.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate test call status = %d", duplicate.StatusCode)
+	}
+
+	select {
+	case at := <-triggered:
+		if at.Sub(started) < 200*time.Millisecond {
+			t.Fatalf("incoming-call test ran before its delay: %s", at.Sub(started))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("incoming-call test was not triggered")
 	}
 }
 
@@ -144,3 +210,13 @@ func newDialingTestApp(t *testing.T) *App {
 type dialingCaptureGateway struct{ MemoryGateway }
 
 func (dialingCaptureGateway) StartCall(context.Context, string, string) error { return nil }
+
+type incomingCallTestFixture struct {
+	MemoryGateway
+	triggered chan<- time.Time
+}
+
+func (fixture *incomingCallTestFixture) TestIncomingCall(context.Context) error {
+	fixture.triggered <- time.Now()
+	return nil
+}

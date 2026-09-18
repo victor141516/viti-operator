@@ -1,10 +1,12 @@
 .env
 /data/
 /.tmp/
+/.codex-remote-attachments/
 deploy/viti.json
 deploy/instance.json
 deploy/data/
 deploy/engine-logs/
+deploy/bot-media/
 deploy/*.pid
 android/local.properties
 android/.gradle/

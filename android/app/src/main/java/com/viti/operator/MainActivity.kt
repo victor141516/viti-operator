@@ -34,6 +34,7 @@ import androidx.lifecycle.lifecycleScope
 import com.viti.operator.auth.RemoteAuthService
 import com.viti.operator.auth.ShizukuSetup
 import com.viti.operator.data.SettingsStore
+import com.viti.operator.data.VitiApi
 import com.viti.operator.data.SessionCountryDetector
 import com.viti.operator.data.ContactsRepository
 import com.viti.operator.data.PhoneRoutingSettings
@@ -144,6 +145,7 @@ class MainActivity : ComponentActivity() {
                         onRequestCallNotifications = ::requestCallNotificationAccess,
                         onOpenFullScreenCallSettings = ::openFullScreenCallSettings,
                         onOpenCallChannelSettings = ::openCallChannelSettings,
+						onTestIncomingCall = ::testIncomingCall,
                     )
                 }
             }
@@ -349,6 +351,19 @@ class MainActivity : ComponentActivity() {
         }
         openSettings(intent)
     }
+
+	private fun testIncomingCall() {
+		lifecycleScope.launch {
+			viewModel.showNotice("Scheduling a local test call…")
+			runCatching {
+				VitiApi(settingsStore.settings.first()).scheduleIncomingCallTest()
+			}.onSuccess {
+				viewModel.showNotice("Test call scheduled. You have two seconds to leave or lock the screen.")
+			}.onFailure { error ->
+				viewModel.showNotice(error.message ?: "The server could not schedule the test call")
+			}
+		}
+	}
 
     private fun appNotificationSettingsIntent(): Intent =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

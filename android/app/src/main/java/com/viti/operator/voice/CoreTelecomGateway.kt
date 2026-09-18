@@ -10,8 +10,15 @@ import androidx.core.telecom.CallControlResult
 import androidx.core.telecom.CallControlScope
 import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @RequiresApi(Build.VERSION_CODES.O)
 class CoreTelecomGateway(context: Context) : PlatformCallGateway {
@@ -35,27 +42,39 @@ class CoreTelecomGateway(context: Context) : PlatformCallGateway {
             CallAttributesCompat.CALL_TYPE_AUDIO_CALL,
             CallAttributesCompat.SUPPORTS_SET_INACTIVE,
         )
-        callsManager.addCall(
-            attributes,
-            onAnswer = { callbacks.onAnswer() },
-            onDisconnect = { callbacks.onDisconnect(it.code == DisconnectCause.REJECTED) },
-            onSetActive = { callbacks.onSetActive() },
-            onSetInactive = { callbacks.onSetInactive() },
-        ) {
-            val endpoints = EndpointRegistry()
-            val control = CorePlatformCallControl(this, endpoints)
-            onReady(control)
-            launch {
-                combine(currentCallEndpoint, availableEndpoints, isMuted) { current, available, muted ->
-                    endpoints.replace(available)
-                    PlatformAudioState(
-                        current = current.toVoiceEndpoint(),
-                        available = available.map(CallEndpointCompat::toVoiceEndpoint),
-                        telecomMuted = muted,
-                    )
-                }.collect(callbacks::onAudioState)
+        withDetachedCallScope { audioStateScope ->
+            callsManager.addCall(
+                attributes,
+                onAnswer = { callbacks.onAnswer() },
+                onDisconnect = { callbacks.onDisconnect(it.code == DisconnectCause.REJECTED) },
+                onSetActive = { callbacks.onSetActive() },
+                onSetInactive = { callbacks.onSetInactive() },
+            ) {
+                val endpoints = EndpointRegistry()
+                val control = CorePlatformCallControl(this, endpoints)
+                onReady(control)
+                audioStateScope.launch {
+                    combine(currentCallEndpoint, availableEndpoints, isMuted) { current, available, muted ->
+                        endpoints.replace(available)
+                        PlatformAudioState(
+                            current = current.toVoiceEndpoint(),
+                            available = available.map(CallEndpointCompat::toVoiceEndpoint),
+                            telecomMuted = muted,
+                        )
+                    }.collect(callbacks::onAudioState)
+                }
             }
         }
+    }
+}
+
+internal suspend fun <T> withDetachedCallScope(block: suspend (CoroutineScope) -> T): T {
+    val lifetime = SupervisorJob()
+    val scope = CoroutineScope(currentCoroutineContext().minusKey(Job) + lifetime)
+    return try {
+        block(scope)
+    } finally {
+        withContext(NonCancellable) { lifetime.cancelAndJoin() }
     }
 }
 

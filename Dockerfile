@@ -16,13 +16,17 @@ COPY internal/ ./internal/
 COPY --from=web-build /src/internal/app/web/ ./internal/app/web/
 RUN CGO_ENABLED=0 go test ./... && \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-operator ./cmd/viti-operator && \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-loopback-proxy ./cmd/viti-loopback-proxy
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-loopback-proxy ./cmd/viti-loopback-proxy && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-openai-realtime-bot ./cmd/viti-openai-realtime-bot && \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/viti-commercial-screening-bot ./cmd/viti-commercial-screening-bot
 
 FROM alpine:3.22
 RUN apk add --no-cache android-tools ca-certificates && \
     addgroup -S -g 10001 viti && adduser -S -D -h /home/viti -u 10001 -G viti viti
 COPY --from=go-build /out/viti-operator /usr/local/bin/viti-operator
 COPY --from=go-build /out/viti-loopback-proxy /usr/local/bin/viti-loopback-proxy
+COPY --from=go-build /out/viti-openai-realtime-bot /usr/local/bin/viti-openai-realtime-bot
+COPY --from=go-build /out/viti-commercial-screening-bot /usr/local/bin/viti-commercial-screening-bot
 RUN mkdir -p /data /config /home/viti/.android && chown -R viti:viti /data /home/viti
 USER viti
 ENV HOME=/home/viti

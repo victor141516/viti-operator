@@ -19,6 +19,21 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class VoiceCallRuntimeTest {
     @Test
+    fun voiceRegistrationAvailabilitySurvivesCallStateAndClearsOnDisconnect() = runTest(UnconfinedTestDispatcher()) {
+        val runtime = runtime(FakeVoiceEngine(), null, FakeLegacyAudio())
+
+        runtime.onVoiceEvent(VoiceEngineEvent("registered"))
+        assertTrue(runtime.snapshot.value.serverConnectionAvailable)
+
+        runtime.onVoiceEvent(VoiceEngineEvent("incoming", peer = "+34600000000", legToken = "connection-test"))
+        assertTrue(runtime.snapshot.value.serverConnectionAvailable)
+
+        runtime.onVoiceEvent(VoiceEngineEvent("unregistered"))
+        assertFalse(runtime.snapshot.value.serverConnectionAvailable)
+        runtime.close()
+    }
+
+    @Test
     fun outgoingSipDialWaitsForTelecomAdmission() = runTest(UnconfinedTestDispatcher()) {
         val engine = FakeVoiceEngine()
         val gateway = FakeGateway(deferAdmission = true)
@@ -303,7 +318,8 @@ class VoiceCallRuntimeTest {
     @Test
     fun successfulDisconnectStillWaitsForTheTelecomScopeToFinish() = runTest(UnconfinedTestDispatcher()) {
         val gateway = FakeGateway(completeOnDisconnect = false)
-        val runtime = runtime(FakeVoiceEngine(), gateway, FakeLegacyAudio())
+        val diagnostics = mutableListOf<String>()
+        val runtime = runtime(FakeVoiceEngine(), gateway, FakeLegacyAudio()) { kind, _ -> diagnostics += kind }
 
         runtime.placeCall("+34600000009")
         runCurrent()
@@ -313,8 +329,14 @@ class VoiceCallRuntimeTest {
 
         assertEquals(token, runtime.snapshot.value.legToken)
         assertEquals(VoiceCallPhase.ENDING, runtime.snapshot.value.phase)
+        assertTrue("telecom.disconnect-started" in diagnostics)
+        assertTrue("telecom.disconnect-completed" in diagnostics)
+        assertTrue("telecom.scope-await-started" in diagnostics)
+        assertFalse("telecom.scope-await-completed" in diagnostics)
         gateway.finish()
         runCurrent()
+        assertTrue("telecom.scope-await-completed" in diagnostics)
+        assertTrue("telecom.cleanup-completed" in diagnostics)
         assertTrue(runtime.snapshot.value.legToken.isBlank())
         runtime.close()
     }
@@ -914,6 +936,7 @@ class VoiceCallRuntimeTest {
         gateway: PlatformCallGateway?,
         legacy: FakeLegacyAudio,
         sessions: VoiceCallSessionControl = NoOpVoiceCallSessionControl,
+        onDiagnostic: (String, Map<String, Any?>) -> Unit = { _, _ -> },
     ) = VoiceCallRuntime(
         scope = this,
         voiceClient = engine,
@@ -921,6 +944,7 @@ class VoiceCallRuntimeTest {
         legacyAudio = legacy,
         callSessionControl = sessions,
         onSnapshot = {},
+        onDiagnostic = onDiagnostic,
     )
 
     private class FakeVoiceEngine : VoiceEngineControl {

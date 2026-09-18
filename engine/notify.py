@@ -146,10 +146,10 @@ def main():
                 "trace_id": payload.get("trace_id", ""),
             })
             queued = True
-            # Opening events are a prerequisite for participant identity and
-            # call-state requests. Try them synchronously after the durable
-            # write; a failed delivery safely remains in the outbox.
-            if event in ("call_in", "call_out"):
+            # Call-routing boundaries are prerequisites for participant identity
+            # and real-time media handling. Try them synchronously after the
+            # durable write; a failed delivery safely remains in the outbox.
+            if event in ("call_in", "call_out", "call_active"):
                 event_outbox.deliver_file(queued_path)
         except Exception as error:
             if diagnostics_enabled:

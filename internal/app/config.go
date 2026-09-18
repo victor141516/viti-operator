@@ -27,11 +27,13 @@ type TelephonyConfig struct {
 }
 
 type AMIConfig struct {
-	Address    string `json:"address,omitempty"`
-	Username   string `json:"username,omitempty"`
-	Secret     string `json:"secret,omitempty"`
-	FromNumber string `json:"from_number,omitempty"`
-	Realm      string `json:"realm,omitempty"`
+	Address           string `json:"address,omitempty"`
+	Username          string `json:"username,omitempty"`
+	Secret            string `json:"secret,omitempty"`
+	FromNumber        string `json:"from_number,omitempty"`
+	Realm             string `json:"realm,omitempty"`
+	SMSC              string `json:"smsc,omitempty"`
+	AccessNetworkInfo string `json:"access_network_info,omitempty"`
 }
 
 type SIMAuthConfig struct {
@@ -137,6 +139,27 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if value := os.Getenv("VITI_AMI_REALM"); value != "" {
 		cfg.Telephony.AMI.Realm = value
+	}
+	if value := os.Getenv("VITI_AMI_SMSC"); value != "" {
+		cfg.Telephony.AMI.SMSC = value
+	}
+	if value := os.Getenv("VITI_AMI_ACCESS_NETWORK_INFO"); value != "" {
+		cfg.Telephony.AMI.AccessNetworkInfo = value
+	}
+	if strings.TrimSpace(cfg.Telephony.AMI.SMSC) == "" {
+		if path := strings.TrimSpace(os.Getenv("VITI_AMI_INSTANCE_CONFIG")); path != "" {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return Config{}, fmt.Errorf("read AMI carrier defaults: %w", err)
+			}
+			var carrier struct {
+				SMSC string `json:"smsc"`
+			}
+			if err := json.Unmarshal(data, &carrier); err != nil {
+				return Config{}, fmt.Errorf("parse AMI carrier defaults: %w", err)
+			}
+			cfg.Telephony.AMI.SMSC = strings.TrimSpace(carrier.SMSC)
+		}
 	}
 	if value := os.Getenv("VITI_VOICE_WS_URL"); value != "" {
 		cfg.Voice.WebSocketURL = value

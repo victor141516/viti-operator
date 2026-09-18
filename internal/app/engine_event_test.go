@@ -143,7 +143,10 @@ func TestRuntimeStatusTracksOpenStickAndTunnelTransitions(t *testing.T) {
 	server := httptest.NewServer(app.Handler())
 	defer server.Close()
 
-	assertRuntimeReady(t, server.URL, false)
+	status := runtimeStatusForTest(t, server.URL)
+	if !status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+		t.Fatalf("usable carrier path must remain ready without SIM authentication: %#v", status)
+	}
 	readiness.ready = true
 	assertRuntimeReady(t, server.URL, true)
 	postTunnelEvent(t, server.URL, "process-one", 1, true, time.Now().UTC(), http.StatusNoContent)
@@ -153,8 +156,8 @@ func TestRuntimeStatusTracksOpenStickAndTunnelTransitions(t *testing.T) {
 	}
 
 	readiness.ready = false
-	status := runtimeStatusForTest(t, server.URL)
-	if status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+	status = runtimeStatusForTest(t, server.URL)
+	if !status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
 		t.Fatalf("SIM loss must preserve independent session evidence: %#v", status)
 	}
 	stillActive, _ := app.store.GetCall("active-before-disconnect")
@@ -910,6 +913,68 @@ func TestEngineCallEventsCreateAndFinalizeHistory(t *testing.T) {
 	}
 	if calls[0].State != "missed" || calls[0].EndedAt == nil {
 		t.Fatalf("call was not finalized: %#v", calls[0])
+	}
+}
+
+func TestIncomingEngineEventResolvesContactBeforeScreening(t *testing.T) {
+	cfg := Config{
+		DataFile:          filepath.Join(t.TempDir(), "state.json"),
+		Telephony:         TelephonyConfig{Type: "memory"},
+		SIMAuth:           SIMAuthConfig{Type: "disabled"},
+		Voice:             VoiceConfig{EngineEventToken: "test-token"},
+		ScreeningPipeline: []string{"commercial-screener"},
+	}
+	app, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.store.ReplaceContactSource("phone-a", "Alice's phone", "ES", 1, []ContactSourceRecord{{
+		SourceContactID: "alice", Names: []string{"Alice"}, Numbers: []ContactNumber{{Original: "+34612345678"}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	claimScreeningService(t, app.integrations, "commercial-screener", "screener-connection", screeningCapabilityOptions{})
+	streamID, sequence := app.events.StreamState()
+	_, events, cancelEvents := app.events.Subscribe(streamID, sequence)
+	defer cancelEvents()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "native", "call_id": "known-contact-call", "event": "call_in", "args": []string{"+34612345678"},
+	}, http.StatusOK)
+
+	offer := waitForScreeningEvent(t, events, "screening.offer")
+	payload := offer.Payload.(map[string]any)
+	callPayload := payload["call"].(map[string]any)
+	if payload["target_service"] != "commercial-screener" || callPayload["contact_id"] == "" || callPayload["contact_name"] != "Alice" {
+		t.Fatalf("screening offer did not contain the resolved contact: %#v", payload)
+	}
+}
+
+func TestDiagnosticIncomingEventBypassesScreening(t *testing.T) {
+	cfg := Config{
+		DataFile:          filepath.Join(t.TempDir(), "state.json"),
+		Telephony:         TelephonyConfig{Type: "memory"},
+		SIMAuth:           SIMAuthConfig{Type: "disabled"},
+		Voice:             VoiceConfig{EngineEventToken: "test-token"},
+		ScreeningPipeline: []string{"commercial-screener"},
+	}
+	app, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	postEngineEvent(t, server.URL, "test-token", map[string]any{
+		"instance": "native", "call_id": "diagnostic-call", "event": "call_in",
+		"args": []string{"Viti test call", "diagnostic"},
+	}, http.StatusOK)
+
+	call := app.store.Calls()[0]
+	if call.Screening != nil {
+		t.Fatalf("diagnostic call entered the screening pipeline: %#v", call.Screening)
 	}
 }
 

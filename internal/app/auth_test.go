@@ -205,6 +205,7 @@ func TestOpenStickReadinessDoesNotProbeDuringAKAActivityLifecycle(t *testing.T) 
 		called = true
 		return nil, errors.New("readiness must not race authentication")
 	}}
+	auth.lastReady = time.Now()
 	auth.mu.Lock()
 	defer auth.mu.Unlock()
 
@@ -213,6 +214,17 @@ func TestOpenStickReadinessDoesNotProbeDuringAKAActivityLifecycle(t *testing.T) 
 	}
 	if called {
 		t.Fatal("readiness probe raced the bridge activity lifecycle")
+	}
+}
+
+func TestOpenStickReadinessDoesNotTrustUnprovenAKAActivity(t *testing.T) {
+	auth := &OpenStickAuthenticator{}
+	auth.mu.Lock()
+	defer auth.mu.Unlock()
+
+	err := auth.CheckSIMReady(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "has not been confirmed") {
+		t.Fatalf("unproven in-flight AKA readiness error = %v", err)
 	}
 }
 

@@ -146,7 +146,7 @@ func TestRemoteAgentLossPreservesEstablishedSessionAndRecoversReadiness(t *testi
 	a.clients[client.ID] = client
 	a.stateMu.Unlock()
 	status, statusErr := a.runtimeStatus(context.Background())
-	if statusErr == nil || status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
+	if statusErr != nil || !status.Ready || status.SIMReady || !status.TunnelReady || !status.IMSReady {
 		t.Fatalf("remote loss status = %#v, error = %v", status, statusErr)
 	}
 	call, _ := a.store.GetCall("active-call")

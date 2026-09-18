@@ -119,6 +119,73 @@ type unexpectedHTTPStatus struct {
 	want int
 }
 
+type debugSMSFixture struct {
+	MemoryGateway
+	received chan SMSDebugPreview
+}
+
+func (fixture *debugSMSFixture) SendDebugSMS(_ context.Context, _ string, preview SMSDebugPreview) (SMSSubmitResult, error) {
+	fixture.received <- preview
+	return SMSSubmitResult{State: "submitted", DeliveryReportExpected: true}, nil
+}
+
+func TestSMSDebugPreviewAndSendUseSeparateExpertEndpoint(t *testing.T) {
+	cfg := Config{
+		DataFile: filepath.Join(t.TempDir(), "state.json"), Telephony: TelephonyConfig{Type: "memory", AMI: AMIConfig{
+			FromNumber: "+34111222333", Realm: "ims.example.test", SMSC: "+34123456789",
+		}}, SIMAuth: SIMAuthConfig{Type: "disabled"},
+	}
+	application, err := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &debugSMSFixture{received: make(chan SMSDebugPreview, 1)}
+	application.gateway = fixture
+	server := httptest.NewServer(application.Handler())
+	defer server.Close()
+	payload := []byte(`{"to":"+34987654321","text":"hello"}`)
+
+	response, err := http.Post(server.URL+"/api/v1/messages/debug/preview", "application/json", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("preview status=%d body=%s", response.StatusCode, body)
+	}
+	var preview SMSDebugPreview
+	if err := json.NewDecoder(response.Body).Decode(&preview); err != nil {
+		t.Fatal(err)
+	}
+	if len(preview.Parts) != 1 || preview.Parts[0].RPDUHex == "" {
+		t.Fatalf("preview=%+v", preview)
+	}
+
+	debugPayload, _ := json.Marshal(preview.Request)
+	response, err = http.Post(server.URL+"/api/v1/messages/debug/send", "application/json", bytes.NewReader(debugPayload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(response.Body)
+		t.Fatalf("send status=%d body=%s", response.StatusCode, body)
+	}
+	select {
+	case sent := <-fixture.received:
+		if sent.Parts[0].RPDUHex != preview.Parts[0].RPDUHex {
+			t.Fatalf("sent RPDU=%s want=%s", sent.Parts[0].RPDUHex, preview.Parts[0].RPDUHex)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("debug payload did not reach the gateway")
+	}
+	messages := application.store.Messages()
+	if len(messages) != 1 || !messages[0].ProtocolDebug {
+		t.Fatalf("debug message history=%+v", messages)
+	}
+}
+
 func (status *unexpectedHTTPStatus) Error() string {
 	return http.StatusText(status.got) + ", want " + http.StatusText(status.want)
 }

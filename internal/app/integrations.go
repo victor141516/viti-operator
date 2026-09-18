@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -77,10 +78,13 @@ type integrationDelivery struct {
 }
 
 type integrationConnection struct {
-	id           string
-	name         string
-	capabilities map[string]json.RawMessage
-	connectedAt  time.Time
+	id              string
+	name            string
+	capabilities    map[string]json.RawMessage
+	connectedAt     time.Time
+	auxiliaryActive atomic.Bool
+	auxiliaryReady  atomic.Bool
+	activation      chan struct{}
 }
 
 type integrationCommandRecord struct {
@@ -134,10 +138,49 @@ func (r *integrationRegistry) snapshot() []map[string]any {
 		services = append(services, map[string]any{
 			"name": connection.name, "connection_id": connection.id,
 			"capabilities": connection.capabilities, "connected_at": connection.connectedAt,
+			"auxiliary_active": connection.auxiliaryActive.Load(),
 		})
 	}
 	sort.Slice(services, func(i, j int) bool { return services[i]["name"].(string) < services[j]["name"].(string) })
 	return services
+}
+
+func (r *integrationRegistry) setAuxiliaryActive(name, connectionID string, enabled bool) (*integrationConnection, bool, error) {
+	r.mu.Lock()
+	connection := r.connections[name]
+	if connection == nil || connection.id != connectionID {
+		r.mu.Unlock()
+		return nil, false, errors.New("bot connection is no longer available")
+	}
+	if !integrationAuxiliaryCapable(connection) {
+		r.mu.Unlock()
+		return nil, false, errors.New("bot does not advertise call.media")
+	}
+	changed := connection.auxiliaryActive.Swap(enabled) != enabled
+	if !enabled {
+		connection.auxiliaryReady.Store(false)
+	}
+	r.mu.Unlock()
+	if changed {
+		select {
+		case connection.activation <- struct{}{}:
+		default:
+		}
+	}
+	return connection, changed, nil
+}
+
+func integrationAuxiliaryCapable(connection *integrationConnection) bool {
+	_, capable := connection.capabilities["call.media"]
+	return capable
+}
+
+func integrationEventsEnabled(connection *integrationConnection) bool {
+	if !integrationAuxiliaryCapable(connection) {
+		return true
+	}
+	_, screener := connection.capabilities["call.screen"]
+	return screener || connection.auxiliaryReady.Load()
 }
 
 func (r *integrationRegistry) beginCommand(service, connectionID string, command integrationCommand) (integrationCommandResult, bool, error) {
@@ -261,7 +304,7 @@ func (a *App) integrationWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	connection := &integrationConnection{
-		id: connectionID, name: hello.Name, capabilities: hello.Capabilities, connectedAt: time.Now().UTC(),
+		id: connectionID, name: hello.Name, capabilities: hello.Capabilities, connectedAt: time.Now().UTC(), activation: make(chan struct{}, 1),
 	}
 	if !a.integrations.claim(connection) {
 		_ = socket.WriteJSON(map[string]any{"type": "service.error", "version": integrationProtocolVersion, "message": "service name is already connected"})
@@ -369,19 +412,21 @@ func (a *App) integrationWriter(socket *websocket.Conn, connection *integrationC
 	ready := map[string]any{
 		"type": "service.ready", "version": integrationProtocolVersion,
 		"service": a.integrationServicePayload(connection), "stream_id": replay.StreamID,
-		"latest_sequence": replay.LatestSequence,
+		"latest_sequence": replay.LatestSequence, "auxiliary_active": connection.auxiliaryActive.Load(),
 	}
 	if !writeIntegrationJSON(socket, ready) {
 		return
 	}
-	if replay.SnapshotRequired {
-		if !writeIntegrationJSON(socket, a.integrationSnapshot(replay)) {
-			return
-		}
-	} else {
-		for _, event := range replay.Events {
-			if !writeIntegrationJSON(socket, event) {
+	if integrationEventsEnabled(connection) {
+		if replay.SnapshotRequired {
+			if !writeIntegrationJSON(socket, a.integrationSnapshot(replay)) {
 				return
+			}
+		} else {
+			for _, event := range replay.Events {
+				if !writeIntegrationJSON(socket, event) {
+					return
+				}
 			}
 		}
 	}
@@ -394,8 +439,21 @@ func (a *App) integrationWriter(socket *websocket.Conn, connection *integrationC
 				a.writeIntegrationClose(socket, websocket.ClosePolicyViolation, "outbound event queue exceeded")
 				return
 			}
-			if !writeIntegrationJSON(socket, event) {
+			if integrationEventsEnabled(connection) && !writeIntegrationJSON(socket, event) {
 				return
+			}
+		case <-connection.activation:
+			enabled := connection.auxiliaryActive.Load()
+			if !writeIntegrationJSON(socket, map[string]any{"type": "service.access.updated", "version": integrationProtocolVersion, "auxiliary_active": enabled}) {
+				return
+			}
+			if enabled {
+				streamID, sequence := a.events.StreamState()
+				connection.auxiliaryReady.Store(true)
+				if !writeIntegrationJSON(socket, a.integrationSnapshot(EventReplay{StreamID: streamID, LatestSequence: sequence, SnapshotRequired: true})) {
+					connection.auxiliaryReady.Store(false)
+					return
+				}
 			}
 		case delivery := <-results:
 			written := writeIntegrationJSON(socket, delivery.value)
@@ -431,6 +489,7 @@ func (a *App) integrationServicePayload(connection *integrationConnection) map[s
 	return map[string]any{
 		"name": connection.name, "connection_id": connection.id,
 		"capabilities": connection.capabilities, "connected_at": connection.connectedAt,
+		"auxiliary_active": connection.auxiliaryActive.Load(),
 	}
 }
 
@@ -447,6 +506,7 @@ func (a *App) integrationSnapshot(replay EventReplay) map[string]any {
 			"known_clients": a.store.KnownClients(), "services": a.integrations.snapshot(),
 			"contacts":            map[string]any{"contacts": contacts, "version": contactsVersion},
 			"recording":           RecordingSettings{Enabled: a.store.CallRecordingEnabled()},
+			"bot_configuration":   a.store.BotConfiguration(),
 			"sim_auth_assignment": a.store.SIMAuthAssignment(),
 			"ims_registration":    map[string]any{"enabled": a.store.IMSRegistrationEnabled(), "registered": status.IMSReady},
 			"runtime_status":      status,
@@ -482,6 +542,13 @@ func (a *App) handleIntegrationCommand(ctx context.Context, connection *integrat
 		base.Status = "rejected"
 		base.ErrorCode = "capability_not_granted"
 		base.Message = "the service did not advertise the required capability"
+		a.integrations.finishCommand(connection.name, base)
+		return queueIntegrationResult(results, base)
+	}
+	if !integrationCommandEnabled(connection, command) {
+		base.Status = "rejected"
+		base.ErrorCode = "bot_inactive"
+		base.Message = "activate this bot before it can control calls or auxiliary media"
 		a.integrations.finishCommand(connection.name, base)
 		return queueIntegrationResult(results, base)
 	}
@@ -552,6 +619,23 @@ func integrationCommandGranted(connection *integrationConnection, command integr
 	return granted
 }
 
+func integrationCommandEnabled(connection *integrationConnection, command integrationCommand) bool {
+	if !integrationAuxiliaryCapable(connection) || connection.auxiliaryActive.Load() {
+		return true
+	}
+	if _, screener := connection.capabilities["call.screen"]; !screener {
+		return false
+	}
+	if command.Type == "screening.decision" || command.Type == "media.ice" {
+		return true
+	}
+	if command.Type != "media.attach" {
+		return false
+	}
+	var payload integrationMediaAttachPayload
+	return decodeIntegrationPayload(command.Payload, &payload) == nil && strings.TrimSpace(payload.Purpose) == "controller"
+}
+
 func integrationCommandAffectsCallLifecycle(commandType string) bool {
 	return commandType == "call.start" || commandType == "call.hangup"
 }
@@ -618,7 +702,7 @@ func validateIntegrationCommand(command integrationCommand) (string, string) {
 			return "invalid_payload", "revision is required"
 		}
 		if !screeningDecisionAction(strings.ToLower(strings.TrimSpace(payload.Action))) {
-			return "invalid_payload", "action must be take_control, next, ring_clients, or hangup"
+			return "invalid_payload", "action must be take_control, next, ring_clients, delegate, or hangup"
 		}
 		if len(payload.Output) > screeningOutputLimit {
 			return "output_too_large", "output exceeds 64 KiB"

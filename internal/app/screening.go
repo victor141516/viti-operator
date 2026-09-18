@@ -144,15 +144,28 @@ func newScreeningManager(pipeline []string, store *Store, events *EventHub, serv
 	}
 }
 
+func (m *screeningManager) SetPipeline(pipeline []string) {
+	m.mu.Lock()
+	m.pipeline = append([]string(nil), pipeline...)
+	m.mu.Unlock()
+}
+
+func (m *screeningManager) Pipeline() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]string(nil), m.pipeline...)
+}
+
 func (m *screeningManager) StartIncoming(call Call) {
 	if call.Direction != DirectionIncoming || call.EndedAt != nil {
 		return
 	}
+	m.mu.Lock()
 	if len(m.pipeline) == 0 {
+		m.mu.Unlock()
 		m.events.Publish("call.incoming", screeningCallPayload(call))
 		return
 	}
-	m.mu.Lock()
 	if _, exists := m.sessions[call.ID]; exists {
 		m.mu.Unlock()
 		return
@@ -178,6 +191,7 @@ func screeningCallPayload(call Call) map[string]any {
 		"call_id": call.ID, "trace_id": call.TraceID, "engine_call_id": call.EngineCallID,
 		"instance": call.Instance, "direction": call.Direction, "peer": call.Peer,
 		"state": call.State, "started_at": call.StartedAt,
+		"contact_id": call.ContactID, "contact_name": call.ContactName,
 	}
 }
 
@@ -235,7 +249,7 @@ func (m *screeningManager) failOpen(callID, reason string) {
 func (m *screeningManager) Decide(serviceName, connectionID, commandID, callID string, payload screeningDecisionPayload, canHangup bool) (screeningDecisionReceipt, error) {
 	payload.Action = strings.ToLower(strings.TrimSpace(payload.Action))
 	if !screeningDecisionAction(payload.Action) {
-		return screeningDecisionReceipt{}, screeningError("invalid_payload", "action must be take_control, next, ring_clients, or hangup")
+		return screeningDecisionReceipt{}, screeningError("invalid_payload", "action must be take_control, next, ring_clients, delegate, or hangup")
 	}
 	if len(payload.Output) > screeningOutputLimit {
 		return screeningDecisionReceipt{}, screeningError("output_too_large", "output exceeds 64 KiB")
@@ -293,10 +307,13 @@ func (m *screeningManager) Decide(serviceName, connectionID, commandID, callID s
 	if session.phase == "waiting_media" || session.phase == "waiting_active" {
 		return screeningDecisionReceipt{}, screeningError("controller_not_ready", "the controlling media session is not active yet")
 	}
-	if session.phase == "controlling" && payload.Action == "take_control" {
+	if (session.phase == "controlling" || session.phase == "delegated") && payload.Action == "take_control" {
 		return screeningDecisionReceipt{}, screeningError("invalid_action", "the stage already controls the call")
 	}
-	if session.phase != "offering" && session.phase != "controlling" {
+	if payload.Action == "delegate" && session.phase != "controlling" && session.phase != "delegated" {
+		return screeningDecisionReceipt{}, screeningError("controller_not_ready", "delegate requires an active screening controller")
+	}
+	if session.phase != "offering" && session.phase != "controlling" && session.phase != "delegated" {
 		return screeningDecisionReceipt{}, screeningError("invalid_state", "stage cannot accept a decision in its current state")
 	}
 	m.applyCurrentDecisionLocked(session, cachedScreeningDecision{
@@ -308,7 +325,7 @@ func (m *screeningManager) Decide(serviceName, connectionID, commandID, callID s
 
 func screeningDecisionAction(action string) bool {
 	switch action {
-	case "take_control", "next", "ring_clients", "hangup":
+	case "take_control", "next", "ring_clients", "delegate", "hangup":
 		return true
 	default:
 		return false
@@ -357,6 +374,18 @@ func (m *screeningManager) applyCurrentDecisionLocked(session *screeningSession,
 	case "ring_clients":
 		m.completeCurrentStageLocked(session, "ring_clients", now)
 		m.finishRingLocked(session, decision.serviceName, "service_requested")
+	case "delegate":
+		session.phase = "delegated"
+		session.record.State = "delegated"
+		stage := m.currentStageLocked(session)
+		stage.Outcome = "delegated"
+		m.persistLocked(session)
+		m.events.Publish("screening.delegated", map[string]any{
+			"call_id": session.call.ID, "trace_id": session.call.TraceID,
+			"service_name": decision.serviceName, "stage_index": session.current,
+			"revision": session.record.ContextRevision,
+			"output":   append(json.RawMessage(nil), decision.payload.Output...),
+		})
 	case "hangup":
 		m.completeCurrentStageLocked(session, "hangup", now)
 		m.finishHangupLocked(session, decision.serviceName, "service_requested")
@@ -474,9 +503,10 @@ func (m *screeningManager) currentStageLocked(session *screeningSession) *Screen
 }
 
 func (m *screeningManager) completeCurrentStageLocked(session *screeningSession, outcome string, at time.Time) {
+	wasDelegated := session.phase == "delegated"
 	stage := m.currentStageLocked(session)
 	stage.Outcome, stage.CompletedAt = outcome, &at
-	if session.phase == "controlling" || session.phase == "waiting_active" || session.phase == "waiting_media" {
+	if session.phase == "controlling" || session.phase == "delegated" || session.phase == "waiting_active" || session.phase == "waiting_media" {
 		serviceName, callID := stage.ServiceName, session.call.ID
 		if m.callbacks.closeController != nil {
 			go m.callbacks.closeController(serviceName, callID, "screening_"+outcome)
@@ -485,6 +515,13 @@ func (m *screeningManager) completeCurrentStageLocked(session *screeningSession,
 	m.stopTimer(&session.mediaTimer)
 	m.stopTimer(&session.processingTimer)
 	session.processingDeadline = time.Time{}
+	if wasDelegated {
+		m.events.Publish("screening.delegation.ended", map[string]any{
+			"call_id": session.call.ID, "trace_id": session.call.TraceID,
+			"service_name": stage.ServiceName, "stage_index": session.current,
+			"revision": session.record.ContextRevision, "outcome": outcome,
+		})
+	}
 	session.current++
 	session.record.CurrentStage = session.current
 	session.targetConnectionID = ""
@@ -523,7 +560,7 @@ func (m *screeningManager) processingTimeout(callID string, stageIndex int, revi
 	defer m.mu.Unlock()
 	session := m.sessions[callID]
 	if session == nil || session.terminal || session.current != stageIndex || session.record.ContextRevision != revision ||
-		(session.phase != "controlling" && session.phase != "waiting_media") {
+		(session.phase != "controlling" && session.phase != "delegated" && session.phase != "waiting_media") {
 		return
 	}
 	now := time.Now().UTC()
@@ -544,7 +581,7 @@ func (m *screeningManager) ControllerAttachAllowed(serviceName, connectionID, ca
 	if session.targetConnectionID != connectionID {
 		return screeningError("stale_connection_generation", "controller belongs to a stale service connection")
 	}
-	if session.phase != "waiting_media" && session.phase != "waiting_active" && session.phase != "controlling" {
+	if session.phase != "waiting_media" && session.phase != "waiting_active" && session.phase != "controlling" && session.phase != "delegated" {
 		return screeningError("controller_not_reserved", "take_control must be accepted before controller media attaches")
 	}
 	return nil
@@ -562,12 +599,13 @@ func (m *screeningManager) MediaState(callID, serviceName, connectionID, session
 		return
 	}
 	if state == "connected" {
-		if session.phase != "waiting_media" && session.phase != "waiting_active" && session.phase != "controlling" {
+		if session.phase != "waiting_media" && session.phase != "waiting_active" && session.phase != "controlling" && session.phase != "delegated" {
 			return
 		}
+		wasDelegated := session.phase == "delegated"
 		m.stopTimer(&session.mediaTimer)
 		session.controllerSessionID = sessionID
-		if session.record.Answered {
+		if session.record.Answered && !wasDelegated {
 			session.phase = "controlling"
 			session.record.State = "controlled"
 			m.startProcessingTimerLocked(session)
@@ -582,7 +620,7 @@ func (m *screeningManager) MediaState(callID, serviceName, connectionID, session
 		m.persistLocked(session)
 		return
 	}
-	if state == "disconnected" && session.controllerSessionID == sessionID && (session.phase == "controlling" || session.phase == "waiting_active") {
+	if state == "disconnected" && session.controllerSessionID == sessionID && (session.phase == "controlling" || session.phase == "delegated" || session.phase == "waiting_active") {
 		session.controllerSessionID = ""
 		session.phase = "waiting_media"
 		session.record.State = "waiting_media"

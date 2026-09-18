@@ -23,6 +23,7 @@ type diskState struct {
 	ContactSourceRevisions map[string]int64                  `json:"contact_source_revisions,omitempty"`
 	ContactsVersion        uint64                            `json:"contacts_version,omitempty"`
 	EngineTunnels          map[string]EngineTunnelCheckpoint `json:"engine_tunnels,omitempty"`
+	BotConfiguration       *BotConfiguration                 `json:"bot_configuration,omitempty"`
 }
 
 type Store struct {
@@ -39,6 +40,8 @@ type Store struct {
 	contactView            []Contact
 	contactsVersion        uint64
 	engineTunnels          map[string]EngineTunnelCheckpoint
+	botConfiguration       BotConfiguration
+	botConfigurationSet    bool
 	diag                   *DiagnosticRecorder
 }
 
@@ -85,6 +88,10 @@ func OpenStore(path string) (*Store, error) {
 		checkpoint.RetiredGenerations = append([]string(nil), checkpoint.RetiredGenerations...)
 		s.engineTunnels[instance] = checkpoint
 	}
+	if state.BotConfiguration != nil {
+		s.botConfiguration = cloneBotConfiguration(*state.BotConfiguration)
+		s.botConfigurationSet = true
+	}
 	s.simAuthAssignment = state.SIMAuthAssignment
 	if state.IMSRegistrationEnabled != nil {
 		s.imsRegistrationEnabled = *state.IMSRegistrationEnabled
@@ -114,6 +121,52 @@ func (s *Store) SetCallRecordingEnabled(enabled bool) error {
 	}
 	s.callRecordingEnabled = enabled
 	return s.flushLocked()
+}
+
+func cloneBotConfiguration(configuration BotConfiguration) BotConfiguration {
+	configuration.ScreeningPipeline = append([]string(nil), configuration.ScreeningPipeline...)
+	return configuration
+}
+
+func (s *Store) EnsureBotConfiguration(pipeline []string) (BotConfiguration, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.botConfigurationSet {
+		return cloneBotConfiguration(s.botConfiguration), nil
+	}
+	s.botConfiguration = BotConfiguration{Revision: 1, ScreeningPipeline: append([]string(nil), pipeline...)}
+	s.botConfigurationSet = true
+	if err := s.flushLocked(); err != nil {
+		s.botConfiguration = BotConfiguration{}
+		s.botConfigurationSet = false
+		return BotConfiguration{}, err
+	}
+	return cloneBotConfiguration(s.botConfiguration), nil
+}
+
+func (s *Store) BotConfiguration() BotConfiguration {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return cloneBotConfiguration(s.botConfiguration)
+}
+
+func (s *Store) UpdateScreeningPipeline(expectedRevision uint64, pipeline []string) (BotConfiguration, bool, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.botConfigurationSet && reflect.DeepEqual(s.botConfiguration.ScreeningPipeline, pipeline) {
+		return cloneBotConfiguration(s.botConfiguration), true, false, nil
+	}
+	if !s.botConfigurationSet || expectedRevision != s.botConfiguration.Revision {
+		return cloneBotConfiguration(s.botConfiguration), false, false, nil
+	}
+	previous := cloneBotConfiguration(s.botConfiguration)
+	s.botConfiguration.Revision++
+	s.botConfiguration.ScreeningPipeline = append([]string(nil), pipeline...)
+	if err := s.flushLocked(); err != nil {
+		s.botConfiguration = previous
+		return BotConfiguration{}, false, false, err
+	}
+	return cloneBotConfiguration(s.botConfiguration), true, true, nil
 }
 
 func (s *Store) RememberClient(client KnownClient) error {
@@ -790,6 +843,10 @@ func (s *Store) flushLocked() error {
 	enabled := s.imsRegistrationEnabled
 	recordingEnabled := s.callRecordingEnabled
 	state := diskState{IMSRegistrationEnabled: &enabled, CallRecordingEnabled: &recordingEnabled, SIMAuthAssignment: s.simAuthAssignment}
+	if s.botConfigurationSet {
+		configuration := cloneBotConfiguration(s.botConfiguration)
+		state.BotConfiguration = &configuration
+	}
 	for _, item := range s.messages {
 		state.Messages = append(state.Messages, item)
 	}

@@ -15,6 +15,37 @@ import org.junit.Test
 @OptIn(ExperimentalCoroutinesApi::class)
 class VoiceProvisioningSupervisorTest {
     @Test
+    fun reportsNativeServerReachabilityWhileTheUiIsAbsent() = runTest(UnconfinedTestDispatcher()) {
+        val settings = MutableStateFlow(ServerSettings("http://server", "key"))
+        val reachability = mutableListOf<Boolean>()
+        var attempts = 0
+
+        val job = launchVoiceProvisioningSupervisor(
+            settings = settings,
+            load = {
+                attempts += 1
+                if (attempts == 1) error("offline")
+                VoiceProvisioning(enabled = true, websocketUrl = "ws://voice")
+            },
+            apply = {},
+            onReachabilityChanged = reachability::add,
+            retryDelayMs = 5_000,
+            refreshDelayMs = 10_000,
+        )
+        runCurrent()
+        assertEquals(listOf(false), reachability)
+
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertEquals(listOf(false, true), reachability)
+
+        advanceTimeBy(10_000)
+        runCurrent()
+        assertEquals(listOf(false, true, true), reachability)
+        job.cancel()
+    }
+
+    @Test
     fun retriesAfterFailureWithoutNeedingAnActivityOrCarSession() = runTest(UnconfinedTestDispatcher()) {
         val settings = MutableStateFlow(ServerSettings("http://first", "key"))
         val applied = mutableListOf<VoiceProvisioning>()

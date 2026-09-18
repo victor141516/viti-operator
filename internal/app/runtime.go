@@ -271,7 +271,10 @@ func (a *App) runtimeStatus(ctx context.Context) (RuntimeStatus, error) {
 			gatewayErr = errors.Join(gatewayErr, errRuntimeUnavailable)
 		}
 	}
-	status.Ready = registrationEnabled && status.SIMReady && status.TunnelReady && status.IMSReady
+	// An unavailable AKA provider prevents the next authentication exchange,
+	// but it does not invalidate an already-established SWu tunnel or IMS
+	// registration. Keep the line usable until the carrier path itself fails.
+	status.Ready = registrationEnabled && establishedCarrierPathReady(status)
 	status.Detail = strings.Join(uniqueStrings(details), " | ")
 	if !status.Ready {
 		resultErr := errors.Join(errRuntimeUnavailable, gatewayErr)
@@ -283,13 +286,17 @@ func (a *App) runtimeStatus(ctx context.Context) (RuntimeStatus, error) {
 }
 
 func runtimeUnavailableMessage(status RuntimeStatus) string {
-	if !status.SIMReady {
-		return "No authentication phone or USB modem with a SIM is available"
-	}
 	if !status.TunnelReady {
-		return "The modem is connected, but the network tunnel is not ready yet"
+		return "The carrier network tunnel is not ready yet"
 	}
-	return "IMS registration is not ready yet"
+	if !status.IMSReady {
+		return "IMS registration is not ready yet"
+	}
+	return "The carrier line is not ready yet"
+}
+
+func establishedCarrierPathReady(status RuntimeStatus) bool {
+	return status.TunnelReady && status.IMSReady
 }
 
 func uniqueStrings(values []string) []string {

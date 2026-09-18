@@ -43,7 +43,9 @@ same => n,Gosub(viti-start-carrier-recording,s,1)
 ; returns ring_clients. A verified controller enters the conference before Answer(), so
 ; optional automation can never consume a call without a live media path.
 same => n,WaitForPrecondition(10,2000)
-same => n,Set(VITI_SCREEN_ACTION=${SHELL(python3 /usr/local/bin/screen_call.py "${VITI_CALL_ID}")})
+; SHELL() preserves the command's trailing newline. Normalize it before comparing
+; the action, otherwise a valid "take_control\n" silently falls through to clients.
+same => n,Set(VITI_SCREEN_ACTION=${TRIM(${SHELL(python3 /usr/local/bin/screen_call.py "${VITI_CALL_ID}")})})
 same => n,GotoIf($["${VITI_SCREEN_ACTION}" = "hangup"]?screen_hangup)
 same => n,GotoIf($["${VITI_SCREEN_ACTION}" = "take_control"]?screen_control)
 same => n,Ringing()
@@ -218,7 +220,7 @@ same => n,Hangup()
 ; registered clients, so `channel originate` does not cancel the test after its setup
 ; timeout. This never reaches the carrier or the SIM and is safe to run repeatedly.
 [viti-diagnostic]
-exten => inbound,1,Set(CALLPEER=Prueba local)
+exten => inbound,1,Set(CALLPEER=Viti test call)
 same => n,Set(VITI_CALL_ID=${CHANNEL(linkedid)})
 same => n,Set(VITI_TRACE_ID=${VITI_CALL_ID})
 same => n,Set(VITI_LOCKED=${TRYLOCK(viti-line)})
@@ -233,7 +235,7 @@ same => n,Set(GLOBAL(VITI_ACTIVE_TRACE)=${VITI_TRACE_ID})
 same => n,Set(GLOBAL(VITI_ACTIVE_PEER)=${CALLPEER})
 same => n,Set(GLOBAL(VITI_ACTIVE_DIRECTION)=in)
 same => n,Answer()
-same => n,TrySystem(python3 /usr/local/bin/notify.py call_in "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLPEER}")
+same => n,TrySystem(python3 /usr/local/bin/notify.py call_in "${VITI_CALL_ID}" "${VITI_TRACE_ID}" "${CALLPEER}" diagnostic)
 same => n,Gosub(viti-start-carrier-recording,s,1)
 same => n,Ringing()
 {% if dialstr %}
@@ -242,10 +244,30 @@ same => n,Dial({{ dialstr }},120,b(viti-add-trace^s^1(${VITI_TRACE_ID}))G(viti-i
 same => n,Wait(120)
 {% endif %}
 same => n,Hangup()
+
 same => n(busy),Busy()
 same => n,Hangup()
 exten => h,1,Gosub(viti-clear-active-call,s,1(${VITI_CALL_ID}))
 same => n,TrySystem(python3 /usr/local/bin/notify.py call_result "${VITI_CALL_ID}" "${VITI_TRACE_ID}" in "${CALLPEER}" "${DIALSTATUS}" "${HANGUPCAUSE}")
+same => n,Hangup()
+
+; Local service-health alarm. It deliberately bypasses the carrier call lock,
+; history, recording and screening pipeline. The manager originates it only
+; when no real call is open, and it remains usable while SWu/IMS is down.
+[viti-service-alert]
+exten => down,1,NoOp(Viti carrier service outage alert)
+same => n,Set(CALLERID(name)=Viti Server down)
+same => n,Set(CALLERID(num)=viti-server-down)
+same => n,Set(VITI_TRACE_ID=service-alert-${CHANNEL(linkedid)})
+same => n,Set(__VITI_TRACE_ID=${VITI_TRACE_ID})
+same => n,Set(__VITI_SERVICE_ALERT=carrier-down)
+same => n,Answer()
+same => n,Ringing()
+{% if dialstr %}
+same => n,Dial({{ dialstr }},40,b(viti-add-trace^s^1(${VITI_TRACE_ID})))
+{% else %}
+same => n,Wait(40)
+{% endif %}
 same => n,Hangup()
 
 ; ===== Multiparty carrier conference =====

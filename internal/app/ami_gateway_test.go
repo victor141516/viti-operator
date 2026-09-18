@@ -16,7 +16,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	requests := make(chan map[string][]string, 32)
+	requests := make(chan map[string][]string, 40)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -62,6 +62,12 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if err := gateway.RingClients(ctx, Call{EngineCallID: "asterisk-call-42", TraceID: "trace-42", Peer: "+34987654321"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := gateway.TestIncomingCall(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := gateway.NotifyCarrierOutage(ctx); err != nil {
+		t.Fatal(err)
+	}
 	mediaRequest := serviceMediaBridgeRequest{
 		SessionID: "media-42", EngineCallID: "asterisk-call-42", TraceID: "trace-42",
 		ServiceName: "transcriber", ConnectionID: "integration-42", RecordingID: "track-42", RTPHost: "manager", RTPPort: 32000, Codec: "opus",
@@ -86,11 +92,13 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	var sawDirectedHangup bool
 	var sawConferenceEnd bool
 	var sawScreenedRing bool
+	var sawIncomingCallTest bool
+	var sawCarrierOutageAlert bool
 	var sawMediaJoin bool
 	var sawServiceCall bool
 	var sawMediaDTMF bool
 	var sawMediaLeave bool
-	for range 31 {
+	for range 36 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -113,8 +121,16 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		}
 		if first(request, "Action") == "Originate" {
 			if first(request, "Channel") == "Local/s@viti-ring-clients" {
-				sawScreenedRing = first(request, "Application") == "Wait" && first(request, "Data") == "1" &&
+				sawScreenedRing = first(request, "Application") == "Wait" && first(request, "Data") == "65" &&
 					strings.Contains(first(request, "Variable"), "__VITI_CALL_ID=asterisk-call-42")
+			}
+			if first(request, "Channel") == "Local/inbound@viti-diagnostic" {
+				sawIncomingCallTest = first(request, "Application") == "Wait" && first(request, "Data") == "10" &&
+					first(request, "Timeout") == "15000" && first(request, "Async") == "true"
+			}
+			if first(request, "Channel") == "Local/down@viti-service-alert" {
+				sawCarrierOutageAlert = first(request, "Application") == "Wait" && first(request, "Data") == "45" &&
+					first(request, "Timeout") == "50000" && first(request, "Async") == "true"
 			}
 			if first(request, "Context") == "viti-service-conference" {
 				sawMediaJoin = first(request, "Channel") == "UnicastRTP/manager:32000/c(opus)" &&
@@ -140,11 +156,56 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	if !sawUnregister || !sawRegister {
 		t.Fatalf("IMS commands missing: unregister=%t register=%t", sawUnregister, sawRegister)
 	}
-	if !sawDirectedHangup || !sawConferenceEnd || !sawScreenedRing {
-		t.Fatalf("conference controls missing: directed=%t end=%t screened_ring=%t", sawDirectedHangup, sawConferenceEnd, sawScreenedRing)
+	if !sawDirectedHangup || !sawConferenceEnd || !sawScreenedRing || !sawIncomingCallTest || !sawCarrierOutageAlert {
+		t.Fatalf("conference controls missing: directed=%t end=%t screened_ring=%t incoming_test=%t outage_alert=%t", sawDirectedHangup, sawConferenceEnd, sawScreenedRing, sawIncomingCallTest, sawCarrierOutageAlert)
 	}
 	if !sawMediaJoin || !sawServiceCall || !sawMediaDTMF || !sawMediaLeave {
 		t.Fatalf("service media actions missing: join=%t call=%t dtmf=%t leave=%t", sawMediaJoin, sawServiceCall, sawMediaDTMF, sawMediaLeave)
+	}
+}
+
+func TestAMIGatewaySendsThePreviewedRawRPDUAndOverrides(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	requests := make(chan map[string][]string, 8)
+	go func() {
+		conn, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			serveFakeAMI(conn, requests)
+		}
+	}()
+	gateway, err := NewAMIGateway(AMIConfig{Address: listener.Addr().String(), Username: "manager", Secret: "secret", FromNumber: "+34111222333", Realm: "ims.example.test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	preview, err := buildSMSDebugPreview(SMSDebugRequest{To: "+34987654321", Text: "hello"}, SMSDebugDefaults{FromNumber: "+34111222333", Realm: "ims.example.test", SMSC: "+34123456789", AccessNetworkInfo: "IEEE-802.11;country=ES"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := gateway.SendDebugSMS(ctx, "sms-debug", preview); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		select {
+		case request := <-requests:
+			if first(request, "Action") != "MessageSend" {
+				continue
+			}
+			variables := first(request, "Variable")
+			for _, required := range []string{"VITI_MESSAGE_ID=sms-debug", "VITI_SMS_DEBUG_RAW=", "VITI_SMS_DEBUG_REQUEST_URI=", "VITI_SMS_DEBUG_FROM_URI=", "VITI_SMS_DEBUG_PANI="} {
+				if !strings.Contains(variables, required) {
+					t.Fatalf("AMI variables %q do not contain %q", variables, required)
+				}
+			}
+			return
+		case <-ctx.Done():
+			t.Fatal("fake AMI did not receive debug MessageSend")
+		}
 	}
 }
 

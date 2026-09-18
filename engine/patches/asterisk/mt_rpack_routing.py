@@ -1,6 +1,6 @@
 import re, sys
 
-# PATCH_RPACK_ROUTING2: fix MT (mobile-terminated) SMS RP-ACK so the carrier accepts it.
+# PATCH_RPACK_ROUTING3: fix MT (mobile-terminated) SMS RP-ACK so the carrier accepts it.
 #
 # The stock sysmocom send_rpack() sends the RP-ACK to endpoint->smsc_uri and lets PJSIP
 # resolve/open a transport. Against a real ePDG this fails several ways (all verified on live
@@ -8,24 +8,21 @@ import re, sys
 #   1. Wrong target: the RP-ACK must go to the SMSC signalling address that DELIVERED the
 #      SMS = the P-Asserted-Identity of the incoming MESSAGE, not the SMSC E.164 URI.
 #      Sending to smsc_uri gets "400 SIP Parser Error" (Telus).
-#   2. EADDRINUSE (120098): with a raw-IP request-URI, PJSIP opens a NEW connection from the
-#      IMS local port, colliding with the registered IMS socket. Must pin the tdata to the
-#      transport the SMS arrived on (pjsip_tx_data_set_transport) so it reuses the open socket.
-#   3. FQDN P-Asserted-Identity (EE UK and similar): the SMSC identity is an IMS-INTERNAL FQDN
-#      (e.g. smg101wvn.ims.mnc030.mcc234.3gppnetwork.org) that only resolves inside the carrier
-#      IMS -> NXDOMAIN on our resolver. PJSIP tries to DNS-resolve the request-URI host BEFORE
-#      the pinned transport can carry it, resolution fails, and the RP-ACK is NEVER transmitted
-#      -> no delivery confirmation -> the SMSC re-pushes the unacked backlog on every new inbound
-#      (the "same SMS repeats" symptom). Fix: when the PAI host is NOT an IP literal, pre-seed
-#      tdata->dest_info with the arrival transport's connected peer (the P-CSCF) so
-#      pjsip_endpt_send_request skips DNS entirely and sends the RP-ACK back on the incoming IMS
-#      link to the P-CSCF, which then loose-routes it onward to the SMSC -- exactly how a native
-#      UE writes the RP-ACK back. Raw-IP PAIs (Telus) keep the existing path untouched.
+#   2. The request must follow the registered outbound Service-Route. An incoming MESSAGE may
+#      arrive from the P-CSCF's protected client port while UE-originated requests are accepted
+#      only by its protected server port. Pinning the response to the arrival transport sends it
+#      to the wrong port on such networks (observed with DIGI: delivery from 32781, submission to
+#      6000), where it is silently discarded and the SMSC keeps redelivering the message.
+#   3. FQDN P-Asserted-Identity values are IMS-internal and need not resolve on the host DNS.
+#      Once the Service-Route headers are present, PJSIP routes the request to their first hop;
+#      do not override that decision with the arrival peer in tdata->dest_info. For the raw-IP
+#      P-Asserted-Identity used by some networks, retain the arrival transport pin that avoids
+#      opening a colliding connection from the registered local IMS port.
 # With these fixes the carrier returns 200 OK / 202 Accepted and stops re-pushing the queue.
 
 FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char ack_ref)
 {
-	/* PATCH_RPACK_ROUTING2 */
+	/* PATCH_RPACK_ROUTING3 */
 	pj_status_t status;
 	char buf[7];
 	char pai_buf[512];
@@ -86,22 +83,10 @@ FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char
 		return status;
 	}
 
-	/* Pin to the transport the SMS arrived on -> reuse the open IMS socket (no EADDRINUSE). */
-	{
-		pjsip_tpselector tp_sel;
-		memset(&tp_sel, 0, sizeof(tp_sel));
-		tp_sel.type = PJSIP_TPSELECTOR_TRANSPORT;
-		tp_sel.u.transport = rdata->tp_info.transport;
-		pjsip_tx_data_set_transport(tdata, &tp_sel);
-	}
-
-	/* If the SMSC identity (P-Asserted-Identity) is an FQDN (IMS-internal, unresolvable on our
-	 * resolver -> NXDOMAIN), do NOT let PJSIP DNS-resolve the request-URI host: that fails and the
-	 * RP-ACK never leaves, so the SMSC re-pushes the unacked backlog on every new inbound (the
-	 * "same SMS repeats" bug). Instead pre-seed tdata->dest_info with the arrival transport's
-	 * connected peer (the P-CSCF) so pjsip_endpt_send_request skips resolution and sends the RP-ACK
-	 * back on the incoming IMS link to the P-CSCF, which loose-routes it onward to the SMSC --
-	 * exactly how a native UE writes the RP-ACK back. Raw-IP PAIs (e.g. Telus) are left untouched. */
+	/* A raw-IP IP-SM-GW can be reached directly on the arrival transport, which also avoids
+	 * opening another connection from the registered local IMS port. For an IMS-internal FQDN,
+	 * leave transport selection to the registered Service-Route: the arrival peer can be the
+	 * P-CSCF client port while UE-originated requests belong on its server port. */
 	{
 		pj_bool_t pai_is_ip = PJ_FALSE;
 		pjsip_uri *pu = pjsip_parse_uri(tdata->pool, (char *)base_uri,
@@ -111,16 +96,12 @@ FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char
 			pj_sockaddr tmp;
 			pai_is_ip = (pj_sockaddr_parse(pj_AF_UNSPEC(), 0, &su->host, &tmp) == PJ_SUCCESS);
 		}
-		if (!pai_is_ip && rdata->tp_info.transport) {
-			pjsip_transport *itp = rdata->tp_info.transport;
-			tdata->dest_info.name = itp->remote_name.host;
-			tdata->dest_info.cur_addr = 0;
-			tdata->dest_info.addr.count = 1;
-			tdata->dest_info.addr.entry[0].type = (pjsip_transport_type_e) itp->key.type;
-			tdata->dest_info.addr.entry[0].priority = 0;
-			tdata->dest_info.addr.entry[0].weight = 0;
-			pj_sockaddr_cp(&tdata->dest_info.addr.entry[0].addr, &itp->key.rem_addr);
-			tdata->dest_info.addr.entry[0].addr_len = itp->addr_len;
+		if (pai_is_ip && rdata->tp_info.transport) {
+			pjsip_tpselector tp_sel;
+			memset(&tp_sel, 0, sizeof(tp_sel));
+			tp_sel.type = PJSIP_TPSELECTOR_TRANSPORT;
+			tp_sel.u.transport = rdata->tp_info.transport;
+			pjsip_tx_data_set_transport(tdata, &tp_sel);
 		}
 	}
 
@@ -182,7 +163,7 @@ FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char
 
 f = '/home/asterisk-build/asterisk/res/res_pjsip_messaging.c'
 s = open(f).read()
-if 'PATCH_RPACK_ROUTING2' in s:
+if 'PATCH_RPACK_ROUTING3' in s:
     print("already patched"); sys.exit(0)
 
 start = s.find('static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char ack_ref)')

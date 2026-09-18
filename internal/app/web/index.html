@@ -40,7 +40,7 @@
             <input id="message-to" name="to" inputmode="tel" autocomplete="tel" list="contact-options" placeholder="+34…" required>
             <label for="message-text">Message</label>
             <textarea id="message-text" name="text" rows="5" maxlength="1000" placeholder="Write a message" required></textarea>
-            <div class="form-footer"><span id="message-count">0/1000</span><button class="primary" type="submit">Send</button></div>
+            <div class="form-footer"><span><span id="message-count">0/1000</span><small class="debug-send-hint">Shift-click Send to inspect the protocol</small></span><button class="primary" id="send-message" type="submit">Send</button></div>
             <p class="form-status" id="message-status" role="status"></p>
           </form>
         </div>
@@ -150,6 +150,44 @@
               <div id="topology-error" class="topology-embed-error" role="status" hidden></div>
             </div>
           </article>
+          <article class="bot-editor" id="screening-bots" aria-labelledby="screening-bots-title">
+            <header class="bot-editor-heading">
+              <div>
+                <p class="eyebrow">Call screening</p>
+                <h2 id="screening-bots-title" tabindex="-1">Screening pipeline</h2>
+                <p>Choose which screeners run and arrange the order used for new incoming calls.</p>
+              </div>
+              <span class="bot-count" id="screening-bot-count">0 stages</span>
+            </header>
+            <section class="bot-lane" aria-labelledby="available-screeners-title" data-bot-dropzone="screening-available">
+              <div class="bot-lane-heading"><h3 id="available-screeners-title">Available screeners</h3><span>Drag a bot into the pipeline to enable it</span></div>
+              <div class="bot-canvas available" id="available-screeners"></div>
+            </section>
+            <section class="bot-lane active" aria-labelledby="active-pipeline-title" data-bot-dropzone="screening-pipeline">
+              <div class="bot-lane-heading"><h3 id="active-pipeline-title">Active pipeline</h3><span>Runs in the displayed order</span></div>
+              <div class="bot-canvas pipeline" id="screening-pipeline"></div>
+            </section>
+            <p class="form-status bot-editor-status" id="screening-bots-status" role="status" aria-live="polite"></p>
+          </article>
+          <article class="bot-editor" id="call-bots" aria-labelledby="call-bots-title">
+            <header class="bot-editor-heading">
+              <div>
+                <p class="eyebrow">Live call services</p>
+                <h2 id="call-bots-title" tabindex="-1">Call bots</h2>
+                <p>Control which connected bots receive events and can join calls through WebRTC.</p>
+              </div>
+              <span class="bot-count" id="call-bot-count">0 active</span>
+            </header>
+            <section class="bot-lane" aria-labelledby="inactive-call-bots-title" data-bot-dropzone="auxiliary-inactive">
+              <div class="bot-lane-heading"><h3 id="inactive-call-bots-title">Inactive bots</h3><span>New connections start here</span></div>
+              <div class="bot-canvas available" id="inactive-call-bots"></div>
+            </section>
+            <section class="bot-lane active" aria-labelledby="active-call-bots-title" data-bot-dropzone="auxiliary-active">
+              <div class="bot-lane-heading"><h3 id="active-call-bots-title">Active bots</h3><span>Receiving events and allowed to join calls</span></div>
+              <div class="bot-canvas" id="active-call-bots"></div>
+            </section>
+            <p class="form-status bot-editor-status" id="call-bots-status" role="status" aria-live="polite"></p>
+          </article>
           <article class="status-card"><span>SIM</span><strong id="sim-state">—</strong></article>
           <article class="status-card"><span>ePDG tunnel</span><strong id="tunnel-state">—</strong></article>
           <article class="status-card"><span>IMS</span><strong id="ims-state">—</strong></article>
@@ -192,10 +230,64 @@
     <p class="form-status" id="recording-player-status" role="status"></p>
     <div class="recording-dialog-actions"><button class="primary" id="download-recording" type="button">Download selected WAV</button></div>
   </dialog>
+  <dialog class="sms-debug-dialog" id="sms-debug-dialog" aria-labelledby="sms-debug-title">
+    <form id="sms-debug-form">
+      <header class="sms-debug-header">
+        <div><p class="eyebrow">SMS over IMS</p><h2 id="sms-debug-title">Protocol editor</h2><p>Inspect or override the RPDU and supported SIP envelope fields before sending.</p></div>
+        <button class="dialog-close" id="sms-debug-close" type="button" aria-label="Close">×</button>
+      </header>
+      <div class="sms-debug-warning" role="note"><strong>Live carrier traffic</strong><span>Sending from this window can create chargeable SMS traffic. Invalid protocol values may be rejected.</span></div>
+      <div class="sms-debug-tabs" role="tablist" aria-label="Editor mode">
+        <button type="button" role="tab" id="sms-debug-structured-tab" aria-selected="true" aria-controls="sms-debug-structured">Structured</button>
+        <button type="button" role="tab" id="sms-debug-raw-tab" aria-selected="false" aria-controls="sms-debug-raw">Raw RPDU</button>
+      </div>
+      <section id="sms-debug-structured" class="sms-debug-pane" role="tabpanel" aria-labelledby="sms-debug-structured-tab">
+        <div class="sms-debug-grid">
+          <label>Destination<input id="sms-debug-to" inputmode="tel" required></label>
+          <label>SMSC address<input id="sms-debug-smsc" inputmode="tel" required></label>
+          <label class="wide">Message<textarea id="sms-debug-text" rows="3" maxlength="1000" required></textarea></label>
+          <label>Encoding<select id="sms-debug-encoding"><option value="auto">Automatic</option><option value="gsm7">GSM 7-bit</option><option value="8bit">8-bit</option><option value="ucs2">UCS-2</option></select></label>
+          <label>TP-DCS<input id="sms-debug-dcs" inputmode="numeric" placeholder="Auto"></label>
+          <label>TP-PID<input id="sms-debug-pid" inputmode="numeric" value="0"></label>
+          <label>Validity period<input id="sms-debug-validity" inputmode="numeric" value="255"></label>
+          <label>RP reference<input id="sms-debug-rp-ref" inputmode="numeric" value="1"></label>
+          <label>TP reference<input id="sms-debug-tp-ref" inputmode="numeric" value="0"></label>
+          <label>Concatenation reference<input id="sms-debug-concat-ref" inputmode="numeric" value="0"></label>
+          <label class="sms-debug-check"><input id="sms-debug-report" type="checkbox" checked><span>Request a delivery status report</span></label>
+        </div>
+        <details class="sms-debug-envelope" open>
+          <summary>SIP envelope</summary>
+          <div class="sms-debug-grid">
+            <label class="wide">Request URI<input id="sms-debug-request-uri"></label>
+            <label class="wide">From URI<input id="sms-debug-from-uri"></label>
+            <label class="wide">P-Preferred-Identity<input id="sms-debug-identity"></label>
+            <label class="wide">P-Access-Network-Info<input id="sms-debug-pani" placeholder="Use registered transport value"></label>
+          </div>
+          <p class="sms-debug-locked"><strong>Generated by Asterisk:</strong> <span id="sms-debug-locked-fields">Via, Route, Security-Verify, Call-ID, CSeq, Contact, Content-Length and User-Agent</span></p>
+        </details>
+      </section>
+      <section id="sms-debug-raw" class="sms-debug-pane" role="tabpanel" aria-labelledby="sms-debug-raw-tab" hidden>
+        <p class="sms-debug-pane-help">One complete RP-DATA frame is sent per part. Whitespace in the hexadecimal value is ignored.</p>
+        <div id="sms-debug-parts" class="sms-debug-parts"></div>
+      </section>
+      <section class="sms-debug-summary" aria-live="polite">
+        <span><small>Encoding</small><strong id="sms-debug-summary-encoding">—</strong></span>
+        <span><small>Segments</small><strong id="sms-debug-summary-parts">—</strong></span>
+        <span><small>Content length</small><strong id="sms-debug-summary-length">—</strong></span>
+      </section>
+      <p class="form-status sms-debug-status" id="sms-debug-status" role="status" aria-live="polite"></p>
+      <footer class="sms-debug-actions">
+        <button type="button" id="sms-debug-copy">Copy JSON</button>
+        <span></span>
+        <button type="button" id="sms-debug-recalculate">Recalculate</button>
+        <button class="primary" id="sms-debug-send" type="submit">Send debug SMS</button>
+      </footer>
+    </form>
+  </dialog>
     <script src="/voice.bundle.js?v=20260910-live-call-quality" defer></script>
     <script src="/recording-presence.js?v=20260909-presence" defer></script>
     <script src="/audio-preferences.bundle.js?v=20260909-audio-preferences" defer></script>
     <script src="/country-detector.bundle.js?v=20260910-country-session" defer></script>
-    <script src="/app.js?v=20260910-live-call-quality" defer></script>
+    <script src="/app.js?v=20260916-sms-protocol-editor" defer></script>
 </body>
 </html>

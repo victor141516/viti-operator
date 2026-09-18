@@ -3,6 +3,7 @@ package app
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
@@ -79,6 +80,39 @@ func (g *AMIGateway) SendSMS(ctx context.Context, messageID, to, text string) (S
 	return SMSSubmitResult{State: "submitted", DeliveryReportExpected: true, Detail: "Submitted to Asterisk; awaiting carrier acknowledgement."}, nil
 }
 
+func (g *AMIGateway) SendDebugSMS(ctx context.Context, messageID string, preview SMSDebugPreview) (SMSSubmitResult, error) {
+	for _, part := range preview.Parts {
+		raw, err := decodeDebugHex(part.RPDUHex)
+		if err != nil {
+			return SMSSubmitResult{State: "failed"}, err
+		}
+		variables := strings.Join([]string{
+			"VITI_MESSAGE_ID=" + messageID,
+			"VITI_SMS_DEBUG_RAW=" + base64.StdEncoding.EncodeToString(raw),
+			"VITI_SMS_DEBUG_DESTINATION=" + preview.Request.To,
+			"VITI_SMS_DEBUG_PART=" + strconv.Itoa(part.Part),
+			"VITI_SMS_DEBUG_PARTS=" + strconv.Itoa(part.Parts),
+			"VITI_SMS_DEBUG_RP_REFERENCE=" + strconv.Itoa(part.RPReference),
+			"VITI_SMS_DEBUG_TP_REFERENCE=" + strconv.Itoa(part.TPReference),
+			"VITI_SMS_DEBUG_REQUEST_URI=" + base64.StdEncoding.EncodeToString([]byte(preview.Request.RequestURI)),
+			"VITI_SMS_DEBUG_FROM_URI=" + base64.StdEncoding.EncodeToString([]byte(preview.Request.FromURI)),
+			"VITI_SMS_DEBUG_PREFERRED_IDENTITY=" + base64.StdEncoding.EncodeToString([]byte(preview.Request.PreferredIdentity)),
+			"VITI_SMS_DEBUG_PANI=" + base64.StdEncoding.EncodeToString([]byte(preview.Request.AccessNetworkInfo)),
+		}, ",")
+		response, actionErr := g.action(ctx, map[string]string{
+			"Action": "MessageSend", "To": "pjsip:volte_ims/" + preview.Request.To + "@volte_ims",
+			"From": preview.Request.FromURI, "Body": preview.Request.Text, "Variable": variables,
+		})
+		if actionErr != nil {
+			return SMSSubmitResult{State: "failed"}, actionErr
+		}
+		if first(response, "Response") != "Success" {
+			return SMSSubmitResult{State: "failed"}, fmt.Errorf("Asterisk rejected debug SMS part %d: %s", part.Part, first(response, "Message"))
+		}
+	}
+	return SMSSubmitResult{State: "submitted", DeliveryReportExpected: true, Detail: "Edited RPDU submitted to Asterisk; awaiting carrier acknowledgement."}, nil
+}
+
 func (g *AMIGateway) StartCall(context.Context, string, string) error {
 	return errors.New("interactive calls must be placed through the WebRTC endpoint")
 }
@@ -126,13 +160,47 @@ func (g *AMIGateway) RingClients(ctx context.Context, call Call) error {
 	}, ",")
 	response, err := g.action(ctx, map[string]string{
 		"Action": "Originate", "Channel": "Local/s@viti-ring-clients",
-		"Application": "Wait", "Data": "1", "Timeout": "60000", "Async": "true", "Variable": variables,
+		// Keep the other half of the Local channel alive for the complete ring
+		// window. A one-second Wait cancels Dial before clients can answer.
+		"Application": "Wait", "Data": "65", "Timeout": "60000", "Async": "true", "Variable": variables,
 	})
 	if err != nil {
 		return err
 	}
 	if first(response, "Response") != "Success" {
 		return fmt.Errorf("Asterisk rejected screened client ringing: %s", first(response, "Message"))
+	}
+	return nil
+}
+
+func (g *AMIGateway) TestIncomingCall(ctx context.Context) error {
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Originate", "Channel": "Local/inbound@viti-diagnostic",
+		// Keep the opposite Local-channel half alive long enough to exercise the
+		// incoming-call UI, then end the diagnostic call automatically.
+		"Application": "Wait", "Data": "10", "Timeout": "15000", "Async": "true",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		return fmt.Errorf("Asterisk rejected the incoming-call test: %s", first(response, "Message"))
+	}
+	return nil
+}
+
+func (g *AMIGateway) NotifyCarrierOutage(ctx context.Context) error {
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Originate", "Channel": "Local/down@viti-service-alert",
+		// The Local channel owns only the alert. Answering or rejecting one
+		// client ends the local presentation without touching a carrier call.
+		"Application": "Wait", "Data": "45", "Timeout": "50000", "Async": "true",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" {
+		return fmt.Errorf("Asterisk rejected the carrier outage alert: %s", first(response, "Message"))
 	}
 	return nil
 }

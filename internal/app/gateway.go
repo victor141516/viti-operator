@@ -20,6 +20,13 @@ type TelephonyGateway interface {
 	HangupCall(context.Context, string) error
 }
 
+// SMSDebugGateway accepts already encoded RP-DATA frames. Keeping this out of
+// TelephonyGateway prevents the expert protocol editor from becoming a hidden
+// requirement for ordinary or command-based providers.
+type SMSDebugGateway interface {
+	SendDebugSMS(context.Context, string, SMSDebugPreview) (SMSSubmitResult, error)
+}
+
 // ConferenceCallController performs generation-scoped call control. It is
 // intentionally separate from TelephonyGateway so non-interactive providers do
 // not pretend they can address an Asterisk conference or one concrete leg.
@@ -30,6 +37,19 @@ type ConferenceCallController interface {
 
 type ScreeningCallController interface {
 	RingClients(context.Context, Call) error
+}
+
+// IncomingCallTester originates a local-only call through the production SIP
+// client path. It is optional because non-Asterisk gateways cannot provide a
+// representative incoming-call presentation test.
+type IncomingCallTester interface {
+	TestIncomingCall(context.Context) error
+}
+
+// CarrierOutageNotifier originates a local-only alert through the registered
+// SIP clients. It must not depend on the carrier tunnel it is reporting.
+type CarrierOutageNotifier interface {
+	NotifyCarrierOutage(context.Context) error
 }
 
 type IMSRegistrationController interface {

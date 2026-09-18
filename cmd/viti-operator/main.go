@@ -44,6 +44,7 @@ func main() {
 	defer stop()
 	service.StartIMSPreferenceReconciler(ctx)
 	service.StartSMSDeliveryReconciler(ctx)
+	service.StartCarrierOutageNotifier(ctx)
 	if err := service.StartRTPProxy(ctx); err != nil {
 		logger.Error("RTP proxy startup failed", "error", err)
 		os.Exit(1)

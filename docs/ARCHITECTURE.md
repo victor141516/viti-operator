@@ -52,6 +52,15 @@ health; `/api/v1/status` describes line availability. This distinction lets
 clients display and recover from a disconnected SIM without treating the
 server as down.
 
+The manager separately watches the usable carrier path. If SWu or IMS remains
+unavailable for 45 seconds, it originates one local SIP call per outage to all
+registered clients with the display name `Viti Server down`. The alert is
+deferred while a real call is open, does not consume the carrier line, and is
+rearmed only after the path recovers. Temporary loss of the SIM/AKA provider is
+not itself an outage while the established tunnel and IMS registration remain
+usable. Because the manager originates this signal, it detects carrier-path
+failure rather than failure of the manager process or host itself.
+
 ### Carrier engine
 
 The engine image comes from the bundled `engine/` directory. It
@@ -249,8 +258,9 @@ small, explicit privileged service.
 Browsers use ICE to find a usable media path. Some WebViews deliberately hide
 local host candidates and can therefore fail even when every device is on the
 same tailnet. A private coturn instance supplies a deterministic relay
-candidate. Only UDP 3479 is published on the selected Tailscale address; relay
-ports remain on the Compose network between coturn and Asterisk.
+candidate. UDP 3479 is published on loopback for same-host browsers and on the
+selected Tailscale address for remote clients; relay ports remain on the
+Compose network between coturn and Asterisk.
 
 ### Loopback proxy
 
@@ -284,11 +294,16 @@ does not corrupt history.
 Trusted local integrations use one persistent manager WebSocket each. A stable
 service name owns at most one live socket and advertises automatically granted
 call capabilities plus capability-specific timeouts. The connection receives
-the same complete event stream as every other integration; capabilities govern
-commands, not visibility. A reconnect supplies its previous stream generation
-and sequence. The manager atomically installs the live subscription while
-capturing replay state, preventing a gap between history and live delivery; a
-new generation or an evicted gap produces a current-state snapshot instead.
+the same complete event stream as every other event-enabled integration. A pure
+auxiliary `call.media` connection starts inactive and is withheld from replay,
+snapshots, domain events, commands, and media until the web-managed ephemeral
+activation gate is opened. Screening delivery and controller media remain
+independent when one service advertises both roles. A reconnect starts auxiliary
+access inactive again. Once event-enabled, a reconnect may supply its previous
+stream generation and sequence. The manager atomically installs the live
+subscription while capturing replay state, preventing a gap between history and
+live delivery; a new generation or an evicted gap produces a current-state
+snapshot instead.
 
 Each integration has a bounded event queue and ping/pong lease. A blocked
 writer loses its connection rather than delaying producers or other services.
@@ -317,15 +332,31 @@ they never enter the human-participant ownership registry. Recording labels use
 the stable service name, but SDP, ICE, socket IDs, and transport generations are
 never persisted.
 
+The bundled OpenAI Realtime bot is an ordinary auxiliary service, not a manager
+special case. It negotiates PCMU with the service-media endpoint and transports
+the same G.711 bytes in base64 Realtime WebSocket events. Model output is paced
+back into WebRTC rather than burst-written. Each call owns an independent model
+session, playback queue, peer connection, and cancellation context; terminal
+call state or control-socket loss tears down that complete subtree. The API key
+exists only in the bot process environment, and an absent key keeps the process
+idle before either network connection is opened.
+
 ### Incoming-call screening pipeline
 
 `screening_pipeline` is an ordered list of stable integration names. The
 manager snapshots it when an incoming carrier call arrives and advances one
 stage at a time. It broadcasts every offer for observability, while the current
 target and exact context revision determine which `take_control`, `next`, or
-`ring_clients` decision is authoritative. An authorized `hangup` remains global.
+`ring_clients` decision is authoritative. A controlling stage may also
+`delegate`: its output is persisted and broadcast without the manager
+interpreting a target. An authorized `hangup` remains global.
 Opaque service output is appended to the persisted call history, increments the
 revision, and is included with every later offer.
+
+The manager resolves the caller against the current merged contact snapshot
+before it creates that pipeline snapshot, and includes the resolved `contact_id`
+and `contact_name` in screening offers. Services remain responsible for deciding
+how known contacts move through the configured pipeline.
 
 A metadata-only `next` leaves the carrier unanswered. `take_control` first
 reserves the stage and verifies its controller WebRTC session; only then does
@@ -340,6 +371,24 @@ stage remains, human clients ring for 60 seconds. A manager that observes a
 surviving active screened call after restart does not reconstruct ownership; it
 rings humans once. The exact pipeline snapshot and append-only JSON history are
 audit data, not resumable transport or coordination state.
+
+The bundled commercial screener inspects the resolved contact metadata first.
+It immediately requests human ringing for a known contact without taking
+control, answering the carrier call, attaching media, or playing the greeting.
+Unknown callers are answered only after controller WebRTC connects, hear a local
+prerecorded greeting, and are classified by a text-output OpenAI Realtime
+session. Commercial results are delegated through opaque JSON to a separately
+activated targeted auxiliary bot. If any optional component fails or that
+participant does not join, the screener rings humans. Neither routing target
+names nor commercial policy are hardcoded in the manager.
+
+The ordered pipeline is stored with a monotonic configuration revision in
+manager state. Web updates use an optimistic revision precondition, are
+idempotent when the requested order is already current, and change only the
+snapshot used by later incoming calls. Connected service inventory and
+auxiliary activation are not persisted. A disconnected bot therefore disappears
+from the live inventory, while a stable name retained by the pipeline remains
+visible as an offline configuration stage.
 
 ## Contact synchronization and resolution
 
@@ -431,8 +480,8 @@ Authentication mode is dynamic:
    fallback is selected.
 3. The normal fallback is OpenStick over ADB; an external JSON command adapter
    can be configured instead.
-4. If no provider is available, line status becomes unavailable while the
-   manager and histories remain usable.
+4. If no provider is available, fresh AKA exchanges become unavailable while
+   an already-established carrier path remains usable.
 
 The same selected provider handles challenges originating from both the SWu
 EAP-AKA exchange and IMS SIP AKA. Role changes are persisted and published to
@@ -443,10 +492,11 @@ fabricated AKA result substitutes for a fresh SIM calculation.
 
 Authentication availability is not evidence about an established carrier
 session. Losing the selected phone, unplugging OpenStick, or removing its SIM
-makes overall line readiness false and blocks operations that may need fresh AKA,
-but it does not overwrite the last observed ePDG, IMS, or call state. An already
-established call continues until the carrier or engine supplies actual terminal
-transport evidence.
+makes fresh AKA unavailable, but it does not overwrite the last observed ePDG,
+IMS, or call state. Overall line readiness remains true, and calls and SMS may
+start and continue, while both the tunnel and IMS registration remain
+operational. They fail normally if the carrier requests fresh authentication
+before the SIM provider returns.
 
 Cellular observations describe only the selected phone subscription. They do
 not participate in authentication arbitration and do not imply that the
@@ -824,11 +874,11 @@ a webhook retry cannot create a second conversation row.
   compensated by a durable abort event; connection/channel fencing, timestamps,
   predecessor history, and tombstones make duplicate or reordered compensation
   converge without stale ownership or duplicate conference legs.
-- Removing the modem or losing a remote SIM agent changes authentication and
-  overall line readiness but does not stop the manager or terminate an
-  established call. New outgoing calls and outgoing SMS submissions remain
-  blocked until fresh AKA is available again. Incoming traffic may continue
-  while the existing tunnel and IMS registration remain valid.
+- Removing the modem or losing a remote SIM agent changes authentication
+  readiness but does not stop the manager or invalidate an established carrier
+  path. Incoming and outgoing calls and SMS remain available while the tunnel
+  and IMS registration remain valid. A later authentication challenge cannot
+  complete until a SIM provider returns.
 - The adaptive authenticator probes for the configured ADB serial and resumes
   when it returns. OpenStick is advertised only after ADB reports `device`, the
   SIM property is exactly `READY`, and the bridge package, executable helper,

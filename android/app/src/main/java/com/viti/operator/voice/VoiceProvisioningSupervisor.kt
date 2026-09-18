@@ -19,6 +19,7 @@ internal fun CoroutineScope.launchVoiceProvisioningSupervisor(
     load: suspend (ServerSettings) -> VoiceProvisioning,
     apply: (VoiceProvisioning) -> Unit,
     onFailure: (Throwable) -> Unit = {},
+    onReachabilityChanged: (Boolean) -> Unit = {},
     retryDelayMs: Long = 5_000,
     refreshDelayMs: Long = 30_000,
 ): Job = launch {
@@ -28,6 +29,7 @@ internal fun CoroutineScope.launchVoiceProvisioningSupervisor(
             try {
                 val provisioning = load(currentSettings)
                 currentCoroutineContext().ensureActive()
+                onReachabilityChanged(true)
                 if (provisioning != appliedProvisioning) {
                     apply(provisioning)
                     appliedProvisioning = provisioning
@@ -36,6 +38,7 @@ internal fun CoroutineScope.launchVoiceProvisioningSupervisor(
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Throwable) {
+                onReachabilityChanged(false)
                 onFailure(error)
                 delay(retryDelayMs)
             }

@@ -487,6 +487,12 @@ func (m *serviceMediaManager) CloseConnection(connectionID, reason string) {
 	m.closeMatching(func(session *serviceMediaSession) bool { return session.connectionID == connectionID }, reason)
 }
 
+func (m *serviceMediaManager) CloseConnectionNonController(connectionID, reason string) {
+	m.closeMatching(func(session *serviceMediaSession) bool {
+		return session.connectionID == connectionID && session.purpose != "controller"
+	}, reason)
+}
+
 func (m *serviceMediaManager) CloseCall(callID, reason string) {
 	m.closeMatching(func(session *serviceMediaSession) bool { return session.call.ID == callID }, reason)
 }

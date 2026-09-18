@@ -33,12 +33,29 @@ Runtime files and secrets must not be committed. Important environment values:
 | `VITI_VOICE_PASSWORD` | Local SIP and TURN credential source |
 | `VITI_LINE_NUMBER` | Physical line in E.164 format |
 | `VITI_IMS_REALM` | Carrier IMS realm |
+| `VITI_SMSC` | SMS service-centre number used to seed the expert protocol editor |
+| `VITI_ACCESS_NETWORK_INFO` | Optional P-Access-Network-Info default shown by the expert protocol editor; empty uses the registered Asterisk transport value |
 | `VITI_ADB_SERIAL` | Stable OpenStick ADB serial |
 | `VITI_ADB_SERVER_SOCKET` | Restricted host ADB bridge address |
 | `VITI_DIAGNOSTICS_DIR` | Absolute diagnostic directory outside the repo |
 | `VITI_DIAGNOSTICS_ENABLED` | Explicit opt-in for unredacted high-volume diagnostics; default `0` |
 | `VITI_DOCKER_SUBNET` | Explicit non-overlapping private Compose subnet |
 | `VITI_SCREENING_PIPELINE` | Ordered comma-separated stable screening service names; empty disables screening |
+| `OPENAI_API_KEY` | OpenAI project key for the optional Realtime bot; keep it only in `.env`; empty leaves the bot idle |
+| `VITI_OPENAI_SERVICE_NAME` | Stable integration name for the Realtime bot, default `openai-realtime` |
+| `VITI_OPENAI_JOIN_MODE` | `all` joins every active call; `targeted` joins only matching delegated calls |
+| `OPENAI_REALTIME_MODEL` | Realtime model, default `gpt-realtime` |
+| `OPENAI_REALTIME_VOICE` | Realtime output voice, default `marin` |
+| `OPENAI_REALTIME_INSTRUCTIONS` | Call behavior instructions sent in `session.update` |
+| `OPENAI_REALTIME_URL` | Realtime WebSocket endpoint override for local protocol tests |
+| `VITI_BOT_MEDIA_DIR` | Host directory containing the greeting; defaults to ignored `deploy/bot-media` |
+| `VITI_SCREENING_SERVICE_NAME` | Stable commercial screener name, default `commercial-screening` |
+| `VITI_COMMERCIAL_HANDLER_SERVICE` | Delegation target and targeted handler name, default `openai-commercial-handler` |
+| `VITI_SCREENING_GREETING_PATH` | Greeting path inside the screener container, default `/bot-media/hello.wav` |
+| `OPENAI_SCREENING_MODEL` | Text-only classifier model, default `gpt-realtime-mini` |
+| `OPENAI_SCREENING_INSTRUCTIONS` | Optional replacement classifier instructions |
+| `VITI_SCREENING_CLASSIFICATION_TIMEOUT_MS` | Maximum listening time before fail-open human ringing, default 20000 |
+| `VITI_SCREENING_HANDLER_TIMEOUT_MS` | Maximum delegated-handler join wait before fail-open, default 8000 |
 
 ## Build and start
 
@@ -52,6 +69,58 @@ is `http://127.0.0.1:<VITI_LOCAL_HTTP_PORT>`.
 
 All application processes listen on all interfaces inside their containers.
 Host exposure is restricted by the `ports` mappings in `compose.yml`.
+
+### OpenAI Realtime bot
+
+The `openai-realtime-bot` Compose service is installed by default but remains
+idle until a key is present. Add the secret only to the untracked `.env` file:
+
+```dotenv
+OPENAI_API_KEY=your-project-key
+```
+
+Then recreate only the bot:
+
+```powershell
+docker compose up -d --no-deps --force-recreate openai-realtime-bot
+docker compose logs -f --tail 50 openai-realtime-bot
+```
+
+It joins calls only after `call.active`, does not participate in screening, and
+does not keep a call alive. Each active call creates one billable Realtime API
+session, so leave `OPENAI_API_KEY` empty when the bot is not intentionally in
+use. The bot sends no transcript or audio to its logs. See
+[INTEGRATIONS.md](INTEGRATIONS.md) for the media and interruption behavior.
+
+### Commercial-call screening bot
+
+Create the ignored default media directory and place the user's greeting there:
+
+```powershell
+New-Item -ItemType Directory -Force deploy/bot-media
+Copy-Item C:\path\to\recorded-hello.wav deploy/bot-media/hello.wav
+docker compose up -d --no-deps --force-recreate commercial-screening-bot openai-commercial-handler
+```
+
+For production, set `VITI_BOT_MEDIA_DIR` to an absolute directory outside the
+checkout. The greeting may be raw 8 kHz PCMU (`.ulaw` or `.pcmu`), an 8 kHz
+PCMU WAV, or a 16-bit PCM mono/stereo WAV; PCM is downmixed and resampled to
+8 kHz in memory. Do not commit the recording.
+
+Add `commercial-screening` to the pipeline in the web bot editor. It receives
+resolved contact metadata and immediately rings human clients for known contacts
+without taking control or playing the greeting. Unknown callers hear the local
+greeting and are classified through text-only Realtime output. Activate
+`openai-commercial-handler` in the auxiliary-bot editor so it can react to a
+commercial delegation. The generic `openai-realtime` bot is independent and
+should remain inactive unless it is intentionally meant to join every call.
+
+The commercial screener and handler open no OpenAI connection while idle. The
+screener creates a classifier session only after controller media has connected;
+the handler creates a speech session only after a matching delegation. Both
+close their OpenAI WebSocket as soon as the call, media, service access, or
+control connection ends. Missing media, missing credentials, model errors, and
+timeouts fall open to human ringing.
 
 ## Build individual artifacts
 
@@ -90,7 +159,7 @@ assets before compilation.
 |---|---|---|
 | `manager` | Tailscale TCP 18787 and UDP 8790 by default | Web, JSON API, integration/SIP WebSockets, and the trusted-service WebRTC ICE mux |
 | `loopback-proxy` | 127.0.0.1 TCP 18788 by default | Local desktop convenience endpoint |
-| `turn` | Tailscale UDP 3479 | Private ICE relay listener |
+| `turn` | Loopback and Tailscale UDP 3479 | Private ICE relay listener |
 | `engine` | Tailscale UDP 5060, TCP 5061, UDP 10000–10059 | Optional native SIP and media; carrier tunnel stays internal |
 | `capture-manager` | none | Shares manager network namespace and writes PCAP |
 | `capture-engine` | none | Shares engine network namespace and writes PCAP |
@@ -178,6 +247,19 @@ $wslAddress = Get-NetIPAddress -AddressFamily IPv4 |
 .\viti-adb-bridge.exe -listen "${wslAddress}:5038"
 ```
 
+For a persistent Windows Docker Desktop installation, prefer a loopback-only
+per-user scheduled task:
+
+```powershell
+.\Install-VitiAdbBridge.ps1 -BridgeExecutable .\viti-adb-bridge.exe
+```
+
+The task starts host ADB before the bridge at logon and restarts after process failure. It
+never binds a wildcard or public address. Set
+`VITI_ADB_SERVER_SOCKET=tcp:host.docker.internal:5038`; Docker Desktop forwards
+that special hostname to Windows loopback without a firewall exception or a
+stable WSL interface address.
+
 Set `VITI_ADB_SERVER_SOCKET=tcp:<address>:5038`. The bridge rejects wildcard and
 public listeners and forwards only to the loopback ADB server.
 
@@ -241,6 +323,18 @@ capabilities:
 - the current importance of the **Incoming calls** notification channel;
 - the full-screen call-alert grant exposed by Android 14 and later.
 
+The foreground voice service separately monitors whether this device is
+registered with Viti Server. It also performs a native authenticated API probe
+every 10 seconds, so background WebView throttling cannot leave a stale
+connected notification behind. An initial connection receives a 30-second grace
+period; a previously established connection receives 15 seconds to recover.
+If registration is still unavailable, Android shows an ongoing **No
+connection** notification and plays the configured ringtone for up to 30
+seconds. The notification and any remaining ringtone are removed as soon as
+voice registration returns. This uses voice registration rather than generic
+Internet reachability because registration is the capability required to
+receive calls on that device.
+
 Use the actions on that card to open the corresponding Android settings. A
 high-priority call channel and notification access are needed for a prominent
 visible alert. The full-screen grant makes the call eligible for lock-screen
@@ -250,6 +344,13 @@ not permitted, Android normally presents the same call as an expanded heads-up
 notification. The service-owned ringtone is independent of notification sound
 and continues only while the local leg is ringing.
 
+Use **Test incoming call** on the same card to schedule a local-only call after
+two seconds. Leave the app or lock the phone during that interval to verify the
+heads-up and lock-screen behavior. The test traverses the normal Asterisk SIP,
+WebRTC, Telecom, ringtone, and CallStyle path for every connected client, but it
+does not use the SIM, contact the carrier, or enter the screening pipeline. It
+ends automatically after ten seconds if nobody acts on it.
+
 The quiet **Call service** notification means the process-owned SIP service is
 ready in the background. An active call uses the high-priority **Incoming
 calls** channel and exposes answer/reject/end actions supported by that Android
@@ -257,6 +358,20 @@ version. Android notification-channel sound choices are persistent system
 settings: if incoming calls are visible but silent, open Viti's notification
 settings and verify that the Incoming calls channel has sound and vibration
 enabled.
+
+### Carrier outage call alert
+
+If the SWu tunnel or IMS registration remains unavailable for 45 seconds, the
+manager rings every registered web and Android client once with the caller name
+`Viti Server down`. This is a local SIP call: it does not use the carrier line,
+does not enter call history, recording, or screening, and ends after 40 seconds.
+The manager defers the alert while a real call is open and rearms it only after
+SWu and IMS recover. A temporary loss of the SIM/AKA provider alone does not
+trigger the alert while the existing carrier path is still usable. Deliberately
+disabling IMS registration suppresses it.
+
+This is not an external host watchdog. If the manager process, Docker, the host,
+or the local network is itself down, it cannot originate the notification.
 
 Audio routes shown during a call come from Telecom on supported devices. A
 route change is reported as successful only after Android accepts it. Wired and
@@ -549,11 +664,11 @@ advertised as ready only when ADB reports `device`, the SIM state is exactly
 respond.
 
 An established carrier call survives loss of the authentication source. New
-operations that may require fresh AKA remain blocked. A real tunnel-down event,
-a newer engine-process boundary, a carrier hangup, or a later authentication
-challenge that cannot be answered may still end the carrier session. Reconnecting
-the modem restores future AKA service; the manager never fabricates or replays
-authentication material.
+calls and SMS remain available while the existing tunnel and IMS registration
+are operational. A real tunnel-down event, a newer engine-process boundary, a
+carrier hangup, or a later authentication challenge that cannot be answered may
+still end the carrier session. Reconnecting the modem restores future AKA
+service; the manager never fabricates or replays authentication material.
 
 ### Client network changed or local audio disappeared
 
@@ -665,7 +780,9 @@ changing the carrier tunnel.
    decline.
 4. Disable battery restrictions for Viti Operator if the foreground call
    service is being killed by the device vendor.
-5. Test on the intended locked and unlocked device. A compiled instrumentation
+5. Use **Test incoming call**, then leave the app or lock the phone during its
+   two-second delay. End the local test from any connected client.
+6. Test on the intended locked and unlocked device. A compiled instrumentation
    test cannot prove an OEM's full-screen or heads-up policy.
 
 ### SMS remains submitted or delivery is unconfirmed

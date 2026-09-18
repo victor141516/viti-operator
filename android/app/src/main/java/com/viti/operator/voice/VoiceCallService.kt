@@ -27,7 +27,10 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -46,9 +49,12 @@ class VoiceCallService : Service() {
     private val settingsStore by lazy { SettingsStore(applicationContext) }
     private val notificationManager by lazy { getSystemService(NotificationManager::class.java) }
     private val ringer by lazy { IncomingCallRinger(applicationContext, CALL_CHANNEL_ID) }
+    private val serverConnectionAlert by lazy { ServerConnectionAlert(applicationContext, serviceScope) }
+    private val serverApiReachable = MutableStateFlow<Boolean?>(null)
     private val claimedParticipants = mutableSetOf<String>()
     private val callActionIntents = mutableSetOf<PendingIntent>()
     private var callActionToken = ""
+    private var presentationRingerToken = ""
 
     lateinit var runtime: VoiceCallRuntime
         private set
@@ -139,6 +145,23 @@ class VoiceCallService : Service() {
             load = { settings -> VitiApi(settings).voice() },
             apply = runtime::start,
             onFailure = { error -> Log.w(TAG, "Could not refresh voice provisioning; retrying", error) },
+            onReachabilityChanged = ::onServerApiReachabilityChanged,
+            refreshDelayMs = SERVER_PROBE_INTERVAL_MS,
+        )
+        serviceScope.launchServerConnectionAlertMonitor(
+            connectionAvailable = combine(
+                runtime.snapshot.map { it.serverConnectionAvailable },
+                serverApiReachable,
+                ::effectiveServerConnection,
+            ),
+            showAlert = {
+                Log.w(TAG, "Voice registration unavailable; showing the local connection alert")
+                serverConnectionAlert.show(ring = runtime.snapshot.value.legToken.isBlank())
+            },
+            dismissAlert = {
+                if (serverConnectionAlert.visible) Log.i(TAG, "Voice registration restored; dismissing the local connection alert")
+                serverConnectionAlert.dismiss()
+            },
         )
     }
 
@@ -157,14 +180,37 @@ class VoiceCallService : Service() {
 
     override fun onDestroy() {
         ringer.stop()
+        serverConnectionAlert.dismiss()
         invalidateCallActions("")
         notificationManager.cancel(CALL_NOTIFICATION_ID)
+        notificationManager.cancel(SERVICE_NOTIFICATION_ID)
         runtime.close()
         serviceScope.cancel()
         super.onDestroy()
     }
 
     fun detachVoiceView() = voiceClient.detachFromUi()
+
+    /** Transfers ringtone ownership after the full-screen surface is visible. */
+    fun takeOverIncomingRingtone(token: String) {
+        val current = runtime.snapshot.value
+        if (!shouldShowIncomingCall(current, token) || presentationRingerToken == token) return
+        presentationRingerToken = token
+        // First silence the alerting notification, then start the one
+        // continuous app-owned stream so the two sources never overlap.
+        showCallForeground(current)
+        serviceScope.launch {
+            // ColorOS applies the silent notification asynchronously. Leave a
+            // short handoff margin before opening the app-owned audio stream.
+            kotlinx.coroutines.delay(RINGTONE_HANDOFF_MS)
+            if (
+                presentationRingerToken == token &&
+                shouldShowIncomingCall(runtime.snapshot.value, token)
+            ) {
+                ringer.start()
+            }
+        }
+    }
 
     private fun onVoiceEvent(event: VoiceEngineEvent) {
         runtime.onVoiceEvent(event)
@@ -209,18 +255,45 @@ class VoiceCallService : Service() {
     }
 
     private fun onSnapshot(snapshot: VoiceCallSnapshot) {
+        val connectionAvailable = effectiveServerConnection(
+            snapshot.serverConnectionAvailable,
+            serverApiReachable.value,
+        )
         if (snapshot.legToken.isBlank()) {
 			claimedParticipants.clear()
+            presentationRingerToken = ""
             ringer.stop()
+            if (serverConnectionAlert.visible && !connectionAvailable) {
+                serverConnectionAlert.startRinging()
+            }
             invalidateCallActions("")
-            showIdleForegroundNotification()
+            showIdleForegroundNotification(connectionAvailable)
+            notificationManager.cancel(CALL_NOTIFICATION_ID)
             return
         }
-        if (snapshot.direction == VoiceCallDirection.INCOMING && snapshot.phase == VoiceCallPhase.RINGING) {
-            ringer.start()
-        } else {
+        val incoming = snapshot.direction == VoiceCallDirection.INCOMING && snapshot.phase == VoiceCallPhase.RINGING
+        if (!incoming) {
+            presentationRingerToken = ""
+            ringer.stop()
+        } else if (presentationRingerToken.isNotBlank() && presentationRingerToken != snapshot.legToken) {
+            presentationRingerToken = ""
             ringer.stop()
         }
+        showCallForeground(snapshot)
+    }
+
+    private fun onServerApiReachabilityChanged(reachable: Boolean) {
+        if (serverApiReachable.value == reachable) return
+        serverApiReachable.value = reachable
+        val current = runtime.snapshot.value
+        if (current.legToken.isBlank()) {
+            showIdleForegroundNotification(
+                effectiveServerConnection(current.serverConnectionAvailable, reachable),
+            )
+        }
+    }
+
+    private fun showCallForeground(snapshot: VoiceCallSnapshot) {
         val notification = callNotification(snapshot)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
@@ -233,6 +306,7 @@ class VoiceCallService : Service() {
         } else {
             startForeground(CALL_NOTIFICATION_ID, notification)
         }
+        notificationManager.cancel(SERVICE_NOTIFICATION_ID)
     }
 
     private fun callNotification(snapshot: VoiceCallSnapshot): Notification {
@@ -255,8 +329,9 @@ class VoiceCallService : Service() {
             serviceAction(ACTION_ANSWER, token, ANSWER_REQUEST)
         }
         val incoming = snapshot.direction == VoiceCallDirection.INCOMING && snapshot.phase == VoiceCallPhase.RINGING
+        val presentationOwnsRingtone = incoming && presentationRingerToken == token
         val incomingScreen = if (incoming) incomingCallScreen(token, peer) else null
-        return NotificationCompat.Builder(this, CALL_CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, CALL_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle(if (incoming) "Incoming service call" else peer)
             .setContentText(snapshot.voice.detail)
@@ -267,7 +342,6 @@ class VoiceCallService : Service() {
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setSilent(true)
             .setOngoing(true)
             .setContentIntent(incomingScreen ?: openApp)
             .apply {
@@ -275,7 +349,14 @@ class VoiceCallService : Service() {
                 // to launch it or show its persistent/expanded heads-up fallback.
                 if (incomingScreen != null) setFullScreenIntent(incomingScreen, true)
             }
-            .build()
+        if (presentationOwnsRingtone) {
+            builder.setSilent(true)
+        } else {
+            builder.setOnlyAlertOnce(true)
+        }
+        return builder.build().apply {
+            if (incoming && !presentationOwnsRingtone) flags = flags or Notification.FLAG_INSISTENT
+        }
     }
 
     private fun incomingCallScreen(
@@ -315,7 +396,7 @@ class VoiceCallService : Service() {
         callActionToken = nextToken
     }
 
-    private fun showIdleForegroundNotification() {
+    private fun showIdleForegroundNotification(connectionAvailable: Boolean? = null) {
         val openApp = PendingIntent.getActivity(
             this,
             OPEN_REQUEST,
@@ -325,7 +406,13 @@ class VoiceCallService : Service() {
         val notification = NotificationCompat.Builder(this, SERVICE_CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("Viti Operator")
-            .setContentText("Service calls are ready")
+            .setContentText(
+                when (connectionAvailable) {
+                    true -> "Service calls are ready"
+                    false -> "No connection to Viti Server"
+                    null -> "Connecting to Viti Server…"
+                },
+            )
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
@@ -334,18 +421,20 @@ class VoiceCallService : Service() {
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             startForeground(
-                CALL_NOTIFICATION_ID,
+                SERVICE_NOTIFICATION_ID,
                 notification,
                 ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
             )
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(CALL_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE)
+            startForeground(SERVICE_NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_NONE)
         } else {
-            startForeground(CALL_NOTIFICATION_ID, notification)
+            startForeground(SERVICE_NOTIFICATION_ID, notification)
         }
     }
 
     private fun recordDiagnostic(payload: String) {
+        val kind = runCatching { JSONObject(payload).optString("kind") }.getOrDefault("")
+        if (kind.startsWith("telecom.")) Log.d(TAG, payload)
         serviceScope.launch {
             runCatching { VitiApi(settingsStore.settings.first()).recordDiagnostic(JSONObject(payload)) }
         }
@@ -388,14 +477,17 @@ class VoiceCallService : Service() {
         const val ACTION_OPEN_INCOMING = "com.viti.operator.voice.action.OPEN_INCOMING"
         const val EXTRA_LEG_TOKEN = "com.viti.operator.voice.extra.LEG_TOKEN"
         const val EXTRA_CALLER_NAME = "com.viti.operator.voice.extra.CALLER_NAME"
-        const val CALL_CHANNEL_ID = "incoming_calls_v2"
+        const val CALL_CHANNEL_ID = "incoming_calls_v4"
         private const val SERVICE_CHANNEL_ID = "call_service_v1"
         private const val CALL_NOTIFICATION_ID = 4402
+        private const val SERVICE_NOTIFICATION_ID = 4407
         private const val OPEN_REQUEST = 4401
         private const val ANSWER_REQUEST = 4403
         private const val REJECT_REQUEST = 4404
         private const val HANGUP_REQUEST = 4405
         private const val INCOMING_SCREEN_REQUEST = 4406
+        private const val RINGTONE_HANDOFF_MS = 600L
+        private const val SERVER_PROBE_INTERVAL_MS = 10_000L
         private const val TAG = "VitiVoiceService"
     }
 }

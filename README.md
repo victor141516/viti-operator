@@ -21,6 +21,13 @@ manager-facing tunnel contract.
 - An ordered, fail-open incoming-call screening pipeline whose trusted services
   can inspect metadata, take WebRTC control, append JSON results, hand off to
   another stage, ring human clients, or reject the call.
+- An optional OpenAI Realtime auxiliary participant that joins active calls,
+  passes PCMU audio through without transcoding, and never owns call lifecycle.
+- An optional contact-aware commercial-call screener that plays a local greeting,
+  classifies caller speech with text-only Realtime output, and delegates detected
+  sales calls to a separately activated conversational handler while failing open
+  to human ringing. It passes callers resolved from synchronized contacts to web
+  and Android clients before taking control or playing media.
 - Explicitly authorized Android contact synchronization with cross-device name
   resolution, phone-number deduplication and source-device provenance.
 - Incoming calls ring connected clients; additional clients can join the active call.
@@ -38,7 +45,8 @@ manager-facing tunnel contract.
   Android 7 devices.
 - Native incoming-call controls use Android CallStyle notifications, an
   eligible lock-screen surface, and the Android-managed heads-up fallback,
-  with stale actions constrained to the exact current service leg.
+  with stale actions constrained to the exact current service leg. A delayed,
+  local-only test call can exercise the same presentation path without the SIM.
 - Compatible phones can project a bounded recent/contact call directory to
   Android Auto; active calls use Android Auto's system in-call surface and car
   audio controls. This beta capability currently has restricted test-only
@@ -50,7 +58,13 @@ manager-facing tunnel contract.
   direct or TURN media route with its transport protocol.
 - Dynamic SIM authentication through a remote Android agent or configured USB fallback.
 - Established carrier sessions survive temporary loss of the SIM authentication
-  source; new operations remain unavailable until fresh AKA can be served.
+  source. Calls and SMS remain available while SWu and IMS stay operational;
+  fresh authentication waits for the SIM to return.
+- A sustained SWu or IMS outage rings every registered client once as a local
+  incoming call labelled `Viti Server down`, without using the carrier line.
+- The Android foreground voice service also raises a local `No connection`
+  warning when that device loses its own Viti voice registration, rings once
+  after a reconnection grace period, and removes the warning on recovery.
 - Shared connection topology with live device presence, selected SIM-auth source,
   and evidence-backed Android carrier, registration, access-technology, and
   signal details when the OS exposes them.
@@ -73,10 +87,28 @@ With Docker Compose, Tailscale and `/dev/net/tun` available:
 docker compose up --build -d
 ```
 
+On Windows with an OpenStick, keep the restricted ADB bridge alive across
+logouts and reboots with a per-user scheduled task:
+
+```powershell
+go build -o viti-adb-bridge.exe ./cmd/viti-adb-bridge
+.\Install-VitiAdbBridge.ps1
+```
+
+The task starts host ADB before the bridge at logon, restarts after failure and binds to
+Windows loopback by default. Docker Desktop reaches it through
+`VITI_ADB_SERVER_SOCKET=tcp:host.docker.internal:5038`; ADB is never exposed to
+the LAN and the setup does not depend on WSL receiving a stable address.
+
 Containers listen on all internal interfaces. Compose limits published ports
 to the configured host address. Open the remote web/API at
 `http://<VITI_BIND_IP>:18787`, or the local web at `http://127.0.0.1:18788`.
 The private TURN service uses UDP; its relay ports stay inside the Docker network.
+The trusted-service protocol and media/screening lifecycle are specified in
+[docs/INTEGRATIONS.md](docs/INTEGRATIONS.md). The bundled OpenAI Realtime bot is
+idle until `OPENAI_API_KEY` is added to the untracked `.env` file. Commercial
+screening also requires an uncommitted `hello.wav`; see
+[docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## SIM prerequisites
 

@@ -34,8 +34,10 @@ Unauthenticated liveness probe. A successful manager returns `200` with
 ### `GET /api/v1/status`
 
 Returns `ready`, `sim_ready`, `tunnel_ready`, `ims_ready`, `contacts_version`,
-`provider`, `detail`, and `updated_at`. `ready` means the complete line is
-available. `contacts_version` is the persisted version of the merged contact
+`provider`, `detail`, and `updated_at`. `ready` means the established SWu and
+IMS carrier path is available; `sim_ready` independently indicates whether the
+next AKA challenge can be answered. Consequently, `ready` may remain true while
+`sim_ready` is false. `contacts_version` is the persisted version of the merged contact
 content; a client that already holds this version need not download `/contacts`.
 
 ### `GET /api/v1/topology`
@@ -154,7 +156,9 @@ adapter that cannot control registration.
 
 Long-polls for events newer than the supplied sequence. Common event types are
 `status.updated`, `contacts.updated`, `message.updated`, `call.updated`, and
-`recording.updated`. Each event uses the versioned envelope documented below.
+`recording.updated`. `carrier.outage.alerted` reports that the manager has sent
+the one-per-outage local `Viti Server down` call alert. Each event uses the
+versioned envelope documented below.
 `at` and `data` remain compatibility aliases for `occurred_at` and `payload`.
 The in-memory buffer is bounded, so clients must refresh the corresponding
 resource after a wake-up instead of treating events as permanent storage.
@@ -191,12 +195,20 @@ soon as the first socket disconnects or fails its heartbeat. Protocol version 1
 recognizes `call.screen`, `call.media`, `call.hangup`, `call.dtmf`, and
 `call.start`, and automatically grants every advertised capability.
 
-The server first sends `service.ready`. If `resume` names the current process
+The server first sends `service.ready`, including `auxiliary_active`. A service
+that advertises `call.media` starts with auxiliary access disabled on every new
+WebSocket connection. Until it is enabled through the bot-management API, a
+pure auxiliary service receives no replay, snapshot, live domain events, or
+accepted commands. It still receives WebSocket pings and activation control
+messages. A service that also advertises `call.screen` keeps the event stream
+needed for screening independently of auxiliary activation.
+
+For an event-enabled service, if `resume` names the current process
 generation and its gap remains in the 256-event buffer, retained events follow
 in sequence. Otherwise, the server sends `system.snapshot` containing current
 calls, messages, known clients, connected services, contacts and their version,
-recording settings, SIM-auth assignment, IMS registration, and complete runtime
-status. Live events then use:
+recording settings, bot configuration, SIM-auth assignment, IMS registration,
+and complete runtime status. Live events then use:
 
 ```json
 {
@@ -217,8 +229,9 @@ be added without changing `version`; an incompatible message shape requires a
 new version. Events are not a durable outbox. A service that cannot drain its
 bounded queue is disconnected so it cannot delay other consumers.
 
-All connected services receive all events regardless of capability. Presence
-uses `service.connected` and `service.disconnected`. Logical call membership
+All event-enabled services receive the same domain events regardless of
+capability. Presence uses `service.connected` and `service.disconnected`.
+Auxiliary access changes are published as `service.activation.updated`. Logical call membership
 uses `call.participant.joined` and `call.participant.left`; individual media
 generations use `call.media.connected` and `call.media.disconnected`.
 
@@ -256,12 +269,13 @@ integration.
 
 For incoming screening, `call.incoming` is broadcast once and each current
 pipeline stage produces a `screening.offer` containing `target_service`,
-`stage_index`, `revision`, `context`, `deadline`, call metadata, and prior stage
-results. Every service sees the offer, but only its target can authoritatively
-send `take_control`, `next`, or `ring_clients`. Any connected service with
-`call.hangup` can send `hangup`, which has global priority. Output is opaque JSON
-limited to 64 KiB per update and increments the context revision. A service may
-reply early for a later stage; the manager uses that reply only if its exact
+`stage_index`, `revision`, `context`, `deadline`, call metadata (including
+`contact_id` and `contact_name` when resolved), and prior stage results. Every
+service sees the offer, but only its target can authoritatively send
+`take_control`, `next`, `ring_clients`, or `delegate`. Any connected service
+with `call.hangup` can send `hangup`, which has global priority. Output is opaque
+JSON limited to 64 KiB per update and increments the context revision. A service
+may reply early for a later stage; the manager uses that reply only if its exact
 revision is still current.
 
 `take_control` reserves the current stage. The target then sends
@@ -271,6 +285,16 @@ an active controlling stage. Decision/media/processing timeouts, service loss,
 or exhaustion fail open to the next stage or human ringing. A
 `processing_timeout_ms` of `-1` has no deadline.
 
+`delegate` is valid only for the current controlling service. It persists the
+opaque output and broadcasts `screening.delegated` with `call_id`, `trace_id`,
+`service_name`, `stage_index`, `revision`, and `output`. The controller remains
+attached and the manager does not interpret values such as `target_service`;
+another event-enabled service may independently decide to attach. The
+controller may later issue `ring_clients` at the returned revision as a
+fail-open fallback. Completing or abandoning that delegated stage broadcasts
+`screening.delegation.ended`; targeted consumers must cancel pending and active
+attachments for the call when they receive it.
+
 The server sends `command.result` with `accepted` before executing a valid
 command and then `completed`, `rejected`, or `failed`. A repeated command ID
 with identical content returns its previous final in-memory result; reuse with
@@ -278,6 +302,59 @@ different content is rejected. Call-affecting commands are serialized for the
 single line, and a new hang-up command against a terminal call returns
 `error_code: "already_ended"`. Idempotency records and event replay disappear
 on manager restart.
+
+### `GET /api/v1/bots`
+
+Returns the current bot-management view:
+
+```json
+{
+  "configuration": {
+    "revision": 4,
+    "screening_pipeline": ["spam-filter", "voice-check"]
+  },
+  "bots": [{
+    "name": "realtime-assistant",
+    "connection_id": "integration-...",
+    "capabilities": {"call.media": {}},
+    "connected_at": "2026-09-12T10:00:00Z",
+    "auxiliary_active": false
+  }]
+}
+```
+
+`bots` contains live WebSocket connections only. Disconnected services are not
+retained. Stable names that remain in `screening_pipeline` are configuration
+references and may therefore be displayed as offline stages.
+
+### `PUT /api/v1/bots/pipeline`
+
+Atomically replaces the ordered pipeline for future incoming calls:
+
+```json
+{"revision":4,"screening_pipeline":["voice-check","spam-filter"]}
+```
+
+`revision` must match the current configuration revision. A conflicting update
+returns `409` with the current complete bot-management view. Repeating an
+already-applied identical pipeline is idempotent. Names must satisfy the service
+name grammar and duplicates are rejected. Calls already in screening retain
+their original pipeline snapshot.
+
+### `PUT /api/v1/bots/{name}/activation`
+
+Enables or disables the auxiliary role for one exact live connection:
+
+```json
+{"connection_id":"integration-...","enabled":true}
+```
+
+The connection ID prevents a stale browser operation from changing a newer
+connection with the same service name. Activation sends
+`service.access.updated` followed by a fresh `system.snapshot`, allowing the
+bot to discover and join a currently active call. Deactivation stops events,
+rejects auxiliary commands, and closes non-controller WebRTC media immediately.
+Activation is never persisted and every reconnect starts inactive.
 
 ## Contacts
 
@@ -321,7 +398,7 @@ Successful replacements return `204`. A content change also publishes
 ### `GET /api/v1/messages`
 
 Returns `{"messages":[...]}` in descending creation order. Records include
-`id`, `direction`, `from`, `to`, `text`, `state`, `delivery_state`,
+`id`, `direction`, `from`, `to`, `text`, `protocol_debug`, `state`, `delivery_state`,
 `delivery_report_requested`, `delivery_report_deadline`, `status_detail`,
 `failure_code`, `failure_reason`, `parts`, `created_at`, and `updated_at`.
 When the peer resolves to a synchronized contact, `contact_id` and
@@ -361,6 +438,40 @@ The manager persists a `sending` record before returning `202`; delivery then
 continues asynchronously. The response only confirms local acceptance of the
 request. All connected clients observe later persisted changes through the
 shared event stream and normal history refresh.
+
+### `POST /api/v1/messages/debug/preview`
+
+Builds the carrier payload used by the web protocol editor without sending it.
+Shift-clicking **Send** in the web client opens this editor. The request accepts
+the ordinary `to` and `text` fields plus optional SMSC, encoding, TP-PID,
+TP-DCS, validity period, status-report flag, RP/TP/concatenation references,
+SIP request URI, From URI, P-Preferred-Identity, and
+P-Access-Network-Info overrides. Omitted fields use the configured carrier
+defaults.
+
+The response returns the normalized request, the selected encoding, and one
+hexadecimal RP-DATA frame per segment. It also describes the SIP MESSAGE
+envelope. `Via`, `Route`, `Security-Verify`, `Call-ID`, `CSeq`, `Contact`,
+`Content-Length`, and `User-Agent` remain runtime-generated and are explicitly
+reported as locked fields.
+
+Set `mode` to `raw` and provide `raw_rpdus` to validate one or more complete
+hexadecimal RP-DATA frames. Whitespace and colons inside the hexadecimal input
+are ignored. Previewing has no carrier side effect.
+
+### `POST /api/v1/messages/debug/send`
+
+Accepts the same contract, validates it again, persists a message marked
+`protocol_debug`, and returns `202`. For structured requests the manager
+rebuilds the RPDU server-side. For raw requests Asterisk sends the validated
+bytes exactly as supplied, one SIP MESSAGE per frame. The normal RP-ACK,
+RP-ERROR, and delivery-report correlation still updates the shared message
+record.
+
+This endpoint requires the Asterisk AMI provider and real IMS availability.
+It is intended for trusted debugging only: malformed values can be rejected by
+the carrier and successful submissions may be billable SMS traffic. It never
+exposes API, AMI, SIM AKA, or subscriber authentication secrets.
 
 ## Calls
 
@@ -405,6 +516,21 @@ track fields atomically; concurrent call or participant updates are preserved.
 
 Calls processed by the screening pipeline include only a compact `screening`
 summary in this collection response.
+
+### `POST /api/v1/calls/test-incoming`
+
+Schedules a local-only incoming call through the real Asterisk-to-client call
+path. The optional delay gives the initiating user time to background the app
+or lock the phone:
+
+```json
+{"delay_ms":2000}
+```
+
+`delay_ms` must be between 250 and 10000 and defaults to 2000. A successful
+request returns `202`; a second pending test or an active call returns `409`.
+The endpoint is available only with the Asterisk AMI gateway and returns `501`
+for other providers. It never reaches the carrier and bypasses screening.
 
 ### `GET /api/v1/calls/{id}`
 

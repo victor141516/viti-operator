@@ -25,6 +25,17 @@ def replace_once(needle, replacement):
     text = text.replace(needle, replacement, 1)
 
 
+def replace_after(anchor, needle, replacement):
+    global text
+    start = text.find(anchor)
+    if start < 0:
+        raise SystemExit("SMS patch anchor not found: %r" % anchor)
+    index = text.find(needle, start)
+    if index < 0:
+        raise SystemExit("SMS patch text not found after anchor: %r" % needle[:100])
+    text = text[:index] + replacement + text[index + len(needle):]
+
+
 replace_once(
     '#include "asterisk/message.h"\n',
     '#include "asterisk/message.h"\n#include "asterisk/manager.h"\n#include <time.h>\n',
@@ -449,6 +460,96 @@ replace_once(
     "\t\t} else {\n"
     "\t\t\tviti_sms_emit(\"submitted\", &viti_track, phone, rp_ref, tp_ref, -1, -1, (time_t)-1);\n"
     "\t\t}\n",
+)
+
+# Expert SMS protocol editor. The manager passes one already encoded RP-DATA
+# frame per AMI MessageSend. The ordinary path above remains unchanged.
+replace_once(
+    "static int volte_send_rp_data(struct msg_data *mdata, const char *orig_uri, struct ast_sip_endpoint *endpoint, const unsigned char *buf, size_t buflen)\n",
+    r'''static const char *viti_sms_decode_override(struct ast_msg *msg, const char *name,
+	char *target, size_t target_size, const char *fallback)
+{
+	const char *encoded = ast_msg_get_var(msg, name);
+	int length;
+	if (ast_strlen_zero(encoded) || target_size < 2) {
+		return fallback;
+	}
+	length = ast_base64decode((unsigned char *)target, encoded, target_size - 1);
+	if (length <= 0 || (size_t)length >= target_size) {
+		return fallback;
+	}
+	target[length] = '\0';
+	return target;
+}
+
+static int volte_send_rp_data(struct msg_data *mdata, const char *orig_uri, struct ast_sip_endpoint *endpoint, const unsigned char *buf, size_t buflen)
+''',
+)
+replace_once(
+    "\tpjsip_tx_data *tdata;\n\tstruct ast_sip_transport *transport;\n\tint registered = 0;\n",
+    "\tpjsip_tx_data *tdata;\n\tstruct ast_sip_transport *transport;\n\tint registered = 0;\n"
+    "\tchar debug_request_uri[512], debug_from_uri[512], debug_identity[512], debug_pani[512];\n"
+    "\tconst char *request_uri = viti_sms_decode_override(mdata->msg, \"VITI_SMS_DEBUG_REQUEST_URI\", debug_request_uri, sizeof(debug_request_uri), endpoint->smsc_uri);\n",
+)
+replace_once(
+    'if (ast_sip_create_request("MESSAGE", NULL, endpoint, endpoint->smsc_uri, NULL, &tdata)) {\n',
+    'if (ast_sip_create_request("MESSAGE", NULL, endpoint, request_uri, NULL, &tdata)) {\n',
+)
+replace_after(
+    "static int volte_send_rp_data(struct msg_data *mdata",
+    "\tif (transport_state->volte.p_access_network_info[0]) {\n"
+    "\t\tast_sip_add_header(tdata, \"P-Access-Network-Info\", transport_state->volte.p_access_network_info);\n"
+    "\t}\n",
+    "\tconst char *pani = viti_sms_decode_override(mdata->msg, \"VITI_SMS_DEBUG_PANI\", debug_pani, sizeof(debug_pani), transport_state->volte.p_access_network_info);\n"
+    "\tif (!ast_strlen_zero(pani)) {\n"
+    "\t\tast_sip_add_header(tdata, \"P-Access-Network-Info\", pani);\n"
+    "\t}\n",
+)
+replace_after(
+    "static int volte_send_rp_data(struct msg_data *mdata",
+    "\tset_preferred_identity(tdata, transport_state->volte.p_associated_uri);\n"
+    "\tast_sip_update_from(tdata, transport_state->volte.p_associated_uri);\n",
+    "\tconst char *preferred_identity = viti_sms_decode_override(mdata->msg, \"VITI_SMS_DEBUG_PREFERRED_IDENTITY\", debug_identity, sizeof(debug_identity), transport_state->volte.p_associated_uri);\n"
+    "\tconst char *from_uri = viti_sms_decode_override(mdata->msg, \"VITI_SMS_DEBUG_FROM_URI\", debug_from_uri, sizeof(debug_from_uri), transport_state->volte.p_associated_uri);\n"
+    "\tset_preferred_identity(tdata, preferred_identity);\n"
+    "\tast_sip_update_from(tdata, (char *)from_uri);\n",
+)
+replace_once(
+    "\tconst char *viti_message_id = ast_msg_get_var(mdata->msg, \"VITI_MESSAGE_ID\");\n\n"
+    "\tconst unsigned char *utf8 = (const unsigned char *) ast_msg_get_body(mdata->msg);\n",
+    r'''	const char *viti_message_id = ast_msg_get_var(mdata->msg, "VITI_MESSAGE_ID");
+	const char *viti_debug_raw = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_RAW");
+
+	if (!ast_strlen_zero(viti_debug_raw)) {
+		const char *destination = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_DESTINATION");
+		const char *part_value = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_PART");
+		const char *parts_value = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_PARTS");
+		const char *rp_value = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_RP_REFERENCE");
+		const char *tp_value = ast_msg_get_var(mdata->msg, "VITI_SMS_DEBUG_TP_REFERENCE");
+		int raw_length = ast_base64decode(buf, viti_debug_raw, sizeof(buf));
+		int part = atoi(S_OR(part_value, "1"));
+		int parts = atoi(S_OR(parts_value, "1"));
+		int rp_ref = atoi(S_OR(rp_value, "-1"));
+		int tp_ref = atoi(S_OR(tp_value, "-1"));
+		struct viti_sms_track track;
+		int status;
+		if (raw_length <= 0 || part <= 0 || parts < part || rp_ref < 0 || rp_ref > 255 || tp_ref < -1 || tp_ref > 255) {
+			ast_log(LOG_WARNING, "Invalid Viti debug SMS RPDU metadata\n");
+			return -1;
+		}
+		track = viti_sms_track_store(viti_message_id, S_OR(destination, ""), part, parts, rp_ref, tp_ref);
+		status = volte_send_rp_data(mdata, orig_uri, endpoint, buf, raw_length);
+		if (status < 0) {
+			viti_sms_emit("local_failure", &track, destination, rp_ref, tp_ref, -1, -1, (time_t)-1);
+			viti_sms_track_finish(rp_ref, tp_ref);
+		} else {
+			viti_sms_emit("submitted", &track, destination, rp_ref, tp_ref, -1, -1, (time_t)-1);
+		}
+		return status;
+	}
+
+	const unsigned char *utf8 = (const unsigned char *) ast_msg_get_body(mdata->msg);
+''',
 )
 
 source.write_text(text, encoding="utf-8")

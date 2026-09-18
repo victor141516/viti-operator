@@ -181,6 +181,7 @@ fun VitiApp(
     onRequestCallNotifications: () -> Unit,
     onOpenFullScreenCallSettings: () -> Unit,
     onOpenCallChannelSettings: () -> Unit,
+	onTestIncomingCall: () -> Unit,
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
     val settings by viewModel.settings.collectAsStateWithLifecycle()
@@ -269,6 +270,7 @@ fun VitiApp(
                         onRequestCallNotifications = onRequestCallNotifications,
                         onOpenFullScreenCallSettings = onOpenFullScreenCallSettings,
                         onOpenCallChannelSettings = onOpenCallChannelSettings,
+						onTestIncomingCall = onTestIncomingCall,
                     )
                 }
             }
@@ -285,13 +287,13 @@ fun VitiApp(
 private fun ConnectionPill(status: RuntimeStatus) {
     val authenticationUnavailable = status.imsReady && !status.simReady
     val background = when {
-        status.ready -> MaterialTheme.colorScheme.tertiaryContainer
         authenticationUnavailable -> MaterialTheme.colorScheme.secondaryContainer
+        status.ready -> MaterialTheme.colorScheme.tertiaryContainer
         else -> MaterialTheme.colorScheme.errorContainer
     }
     val foreground = when {
-        status.ready -> MaterialTheme.colorScheme.onTertiaryContainer
         authenticationUnavailable -> MaterialTheme.colorScheme.onSecondaryContainer
+        status.ready -> MaterialTheme.colorScheme.onTertiaryContainer
         else -> MaterialTheme.colorScheme.onErrorContainer
     }
     Surface(shape = CircleShape, color = background, contentColor = foreground) {
@@ -301,8 +303,8 @@ private fun ConnectionPill(status: RuntimeStatus) {
         ) {
             Icon(
                 when {
-                    status.ready -> Icons.Default.CheckCircle
                     authenticationUnavailable -> Icons.Default.WarningAmber
+                    status.ready -> Icons.Default.CheckCircle
                     else -> Icons.Default.CloudOff
                 },
                 contentDescription = null,
@@ -311,8 +313,8 @@ private fun ConnectionPill(status: RuntimeStatus) {
             Spacer(Modifier.width(5.dp))
             Text(
                 when {
+                    authenticationUnavailable -> "IMS ready · no SIM auth"
                     status.ready -> "IMS"
-                    authenticationUnavailable -> "IMS · no SIM auth"
                     else -> "No network"
                 },
                 style = MaterialTheme.typography.labelMedium,
@@ -1161,7 +1163,8 @@ private fun DialerSheet(
     var number by rememberSaveable(initialNumber) { mutableStateOf(initialNumber) }
     val ending = ui.voice.ending || callSnapshot.phase == com.viti.operator.voice.VoiceCallPhase.ENDING
     val dialRows = if (ui.voice.inCall) listOf("123", "456", "789", "*0#") else listOf("123", "456", "789", "+0⌫")
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             Modifier.fillMaxWidth().widthIn(max = 520.dp).align(Alignment.CenterHorizontally).verticalScroll(rememberScrollState()).padding(horizontal = 24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -1432,6 +1435,7 @@ private fun ConnectionScreen(
     onRequestCallNotifications: () -> Unit,
     onOpenFullScreenCallSettings: () -> Unit,
     onOpenCallChannelSettings: () -> Unit,
+	onTestIncomingCall: () -> Unit,
 ) {
     var url by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
     var token by rememberSaveable(settings.apiKey) { mutableStateOf(settings.apiKey) }
@@ -1474,6 +1478,7 @@ private fun ConnectionScreen(
             onRequestNotifications = onRequestCallNotifications,
             onOpenFullScreenSettings = onOpenFullScreenCallSettings,
             onOpenChannelSettings = onOpenCallChannelSettings,
+			onTestIncomingCall = onTestIncomingCall,
         )
         ElevatedCard {
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -1679,6 +1684,7 @@ private fun IncomingCallAlertsCard(
     onRequestNotifications: () -> Unit,
     onOpenFullScreenSettings: () -> Unit,
     onOpenChannelSettings: () -> Unit,
+	onTestIncomingCall: () -> Unit,
 ) {
     ElevatedCard(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1741,6 +1747,19 @@ private fun IncomingCallAlertsCard(
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+			FilledTonalButton(
+				onClick = onTestIncomingCall,
+				modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+			) {
+				Icon(Icons.Default.Call, contentDescription = null)
+				Spacer(Modifier.width(8.dp))
+				Text("Test incoming call")
+			}
+			Text(
+				"Starts a local-only call after two seconds. It uses the same client, ringtone, notification, and lock-screen flow as a real incoming call.",
+				style = MaterialTheme.typography.labelMedium,
+				color = MaterialTheme.colorScheme.onSurfaceVariant,
+			)
         }
     }
 }
@@ -2081,10 +2100,6 @@ private fun TopologyInsight(topology: ConnectionTopology) {
     val state: String
     val message: String
     when {
-        topology.sim.state == "failed" -> {
-            state = "failed"
-            message = "SIM authentication is unavailable. An established carrier session may continue, but a fresh authentication challenge or new operation cannot."
-        }
         topology.epdg.state == "failed" -> {
             state = "failed"
             message = "Clients remain connected to the server, but the line will be unavailable until the ePDG tunnel recovers."
@@ -2096,6 +2111,10 @@ private fun TopologyInsight(topology: ConnectionTopology) {
         imsState != "healthy" -> {
             state = imsState
             message = "Clients remain connected to the server, but the line will be unavailable until IMS registration recovers."
+        }
+        topology.sim.state == "failed" -> {
+            state = "warning"
+            message = "The carrier line remains operational, but SIM authentication is unavailable. Calls and SMS can continue until the carrier requires a fresh authentication challenge."
         }
         else -> {
             state = "healthy"

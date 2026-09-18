@@ -54,6 +54,46 @@ func TestScreeningPipelineCarriesOutputIntoNextRevision(t *testing.T) {
 	}
 }
 
+func TestKnownContactMetadataIsOfferedToScreeningPipeline(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	claimScreeningService(t, application.integrations, "commercial-screener", "screener-connection", screeningCapabilityOptions{})
+	manager := newScreeningManager([]string{"commercial-screener"}, application.store, application.events, application.integrations, screeningCallbacks{})
+	call := saveIncomingScreeningCall(t, application, "call-known-contact")
+	call.ContactID = "contact-alice"
+	call.ContactName = "Alice"
+	streamID, sequence := application.events.StreamState()
+	_, events, cancel := application.events.Subscribe(streamID, sequence)
+	defer cancel()
+
+	manager.StartIncoming(call)
+	incoming := waitForScreeningEvent(t, events, "call.incoming")
+	payload := incoming.Payload.(map[string]any)
+	if payload["contact_id"] != "contact-alice" || payload["contact_name"] != "Alice" {
+		t.Fatalf("known-contact payload = %#v", payload)
+	}
+	offer := waitForScreeningEvent(t, events, "screening.offer")
+	offerPayload := offer.Payload.(map[string]any)
+	offerCall := offerPayload["call"].(map[string]any)
+	if offerPayload["target_service"] != "commercial-screener" || offerCall["contact_id"] != "contact-alice" || offerCall["contact_name"] != "Alice" {
+		t.Fatalf("known-contact offer = %#v", offerPayload)
+	}
+	if _, err := manager.Decide("commercial-screener", "screener-connection", "known-contact-ring", call.ID, screeningDecisionPayload{
+		Revision: 1, Action: "ring_clients", Output: json.RawMessage(`{"classification":"known_contact","reason":"contact_match"}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if action := manager.WaitInitial(ctx, call.ID); action != "ring_clients" {
+		t.Fatalf("initial action = %q", action)
+	}
+	stored, _ := application.store.GetCall(call.ID)
+	if stored.Screening == nil || len(stored.Screening.Stages) != 1 || stored.Screening.Stages[0].Outcome != "ring_clients" ||
+		len(stored.Screening.Stages[0].Updates) != 1 || string(stored.Screening.Stages[0].Updates[0].Output) != `{"classification":"known_contact","reason":"contact_match"}` {
+		t.Fatalf("known-contact screening record = %#v", stored.Screening)
+	}
+}
+
 func TestScreeningPipelineConsumesCompatibleEarlyDecisionAfterTimeout(t *testing.T) {
 	application, _ := newIntegrationTestServer(t)
 	claimScreeningService(t, application.integrations, "slow", "slow-connection", screeningCapabilityOptions{DecisionTimeoutMS: 25})
@@ -153,6 +193,81 @@ func TestScreeningControllerAdvancesActiveCallAndRingsClients(t *testing.T) {
 	stored, _ := application.store.GetCall(call.ID)
 	if !stored.Screening.Answered || stored.Screening.Stages[0].Outcome != "next" || stored.Screening.Stages[1].Context != "active" {
 		t.Fatalf("active screening record = %#v", stored.Screening)
+	}
+}
+
+func TestScreeningControllerDelegatesWithoutRingingClients(t *testing.T) {
+	application, _ := newIntegrationTestServer(t)
+	claimScreeningService(t, application.integrations, "classifier", "classifier-connection", screeningCapabilityOptions{ProcessingTimeoutMS: -1})
+	ringCalls := make(chan Call, 1)
+	closedControllers := make(chan string, 1)
+	manager := newScreeningManager([]string{"classifier"}, application.store, application.events, application.integrations, screeningCallbacks{
+		closeController: func(serviceName, callID, _ string) { closedControllers <- serviceName + ":" + callID },
+		ringClients: func(_ context.Context, call Call) error {
+			ringCalls <- call
+			return nil
+		},
+	})
+	call := saveIncomingScreeningCall(t, application, "call-delegated")
+	streamID, sequence := application.events.StreamState()
+	_, events, cancelEvents := application.events.Subscribe(streamID, sequence)
+	defer cancelEvents()
+	manager.StartIncoming(call)
+	waitForScreeningEvent(t, events, "call.incoming")
+	waitForScreeningEvent(t, events, "screening.offer")
+	if _, err := manager.Decide("classifier", "classifier-connection", "control", call.ID, screeningDecisionPayload{
+		Revision: 1, Action: "take_control",
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	manager.MediaState(call.ID, "classifier", "classifier-connection", "media-classifier", "controller", "connected")
+	ctx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	if action := manager.WaitInitial(ctx, call.ID); action != "take_control" {
+		t.Fatalf("initial action = %q", action)
+	}
+	answeredAt := time.Now().UTC()
+	call.State, call.AnsweredAt = "active", &answeredAt
+	manager.CallActive(call)
+	receipt, err := manager.Decide("classifier", "classifier-connection", "delegate", call.ID, screeningDecisionPayload{
+		Revision: 1, Action: "delegate", Output: json.RawMessage(`{"classification":"commercial","target_service":"handler"}`),
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Revision != 2 || receipt.State != "delegated" {
+		t.Fatalf("delegate receipt = %#v", receipt)
+	}
+	delegated := waitForScreeningEvent(t, events, "screening.delegated")
+	payload := delegated.Payload.(map[string]any)
+	if payload["service_name"] != "classifier" || payload["revision"] != uint64(2) || string(payload["output"].(json.RawMessage)) != `{"classification":"commercial","target_service":"handler"}` {
+		t.Fatalf("delegated payload = %#v", payload)
+	}
+	select {
+	case call := <-ringCalls:
+		t.Fatalf("delegated call unexpectedly rang clients: %#v", call)
+	case closed := <-closedControllers:
+		t.Fatalf("delegation unexpectedly closed controller: %q", closed)
+	case <-time.After(50 * time.Millisecond):
+	}
+	stored, _ := application.store.GetCall(call.ID)
+	if stored.Screening == nil || stored.Screening.State != "delegated" || stored.Screening.Stages[0].Outcome != "delegated" || stored.Screening.Stages[0].CompletedAt != nil {
+		t.Fatalf("stored delegation = %#v", stored.Screening)
+	}
+	if _, err := manager.Decide("classifier", "classifier-connection", "fallback", call.ID, screeningDecisionPayload{
+		Revision: 2, Action: "ring_clients", Output: json.RawMessage(`{"reason":"handler_timeout"}`),
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	ended := waitForScreeningEvent(t, events, "screening.delegation.ended")
+	endedPayload := ended.Payload.(map[string]any)
+	if endedPayload["outcome"] != "ring_clients" || endedPayload["service_name"] != "classifier" {
+		t.Fatalf("delegation ended payload = %#v", endedPayload)
+	}
+	select {
+	case <-ringCalls:
+	case <-time.After(time.Second):
+		t.Fatal("delegated controller could not fail open to clients")
 	}
 }
 

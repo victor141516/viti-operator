@@ -213,7 +213,11 @@ class VitiApi(private val settings: ServerSettings) {
         }
     }
 
-    suspend fun voice(): VoiceProvisioning = request("/api/v1/voice").let { body ->
+    suspend fun voice(): VoiceProvisioning = request(
+        path = "/api/v1/voice",
+        connectTimeoutMs = 5_000,
+        readTimeoutMs = 5_000,
+    ).let { body ->
         VoiceProvisioning(
             enabled = body.optBoolean("enabled"),
             websocketUrl = body.optString("websocket_url"),
@@ -244,6 +248,15 @@ class VitiApi(private val settings: ServerSettings) {
         body = JSONObject().put("to", to),
         acceptedStatuses = setOf(200, 201),
     ).let(::callFromJson)
+
+    suspend fun scheduleIncomingCallTest(delayMs: Long = 2_000) {
+		rawRequest(
+			path = "/api/v1/calls/test-incoming",
+			method = "POST",
+			body = JSONObject().put("delay_ms", delayMs),
+			acceptedStatuses = setOf(202),
+		)
+	}
 
     suspend fun normalizeCallDestination(number: String, country: String): String {
         val trimmed = number.trim()
@@ -325,8 +338,10 @@ class VitiApi(private val settings: ServerSettings) {
         method: String = "GET",
         body: JSONObject? = null,
         acceptedStatuses: Set<Int> = setOf(200),
+        connectTimeoutMs: Int = 10_000,
+        readTimeoutMs: Int = 15_000,
     ): JSONObject {
-        val response = rawRequest(path, method, body, acceptedStatuses)
+        val response = rawRequest(path, method, body, acceptedStatuses, connectTimeoutMs, readTimeoutMs)
         return if (response.body.isBlank()) JSONObject() else JSONObject(response.body)
     }
 
@@ -335,12 +350,13 @@ class VitiApi(private val settings: ServerSettings) {
         method: String = "GET",
         body: JSONObject? = null,
         acceptedStatuses: Set<Int>,
+        connectTimeoutMs: Int = 10_000,
         readTimeoutMs: Int = 15_000,
     ): HttpResult = withContext(Dispatchers.IO) {
         val connection = URL(normalizeServerUrl(settings.serverUrl) + path).openConnection() as HttpURLConnection
         try {
             connection.requestMethod = method
-            connection.connectTimeout = 10_000
+            connection.connectTimeout = connectTimeoutMs
             connection.readTimeout = readTimeoutMs
             connection.setRequestProperty("Accept", "application/json")
             if (settings.apiKey.isNotBlank()) {
