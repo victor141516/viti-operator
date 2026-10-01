@@ -18,11 +18,49 @@ import re, sys
 #      do not override that decision with the arrival peer in tdata->dest_info. For the raw-IP
 #      P-Asserted-Identity used by some networks, retain the arrival transport pin that avoids
 #      opening a colliding connection from the registered local IMS port.
-# With these fixes the carrier returns 200 OK / 202 Accepted and stops re-pushing the queue.
+# A successful local send is not carrier acceptance. PATCH_RPACK_ROUTING4 records
+# the final SIP response/timeout without logging SMS text or subscriber identities.
 
-FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char ack_ref)
+FIXED_FN = r'''#include <stdint.h>
+
+static void viti_rpack_result(void *token, pjsip_event *event)
 {
-	/* PATCH_RPACK_ROUTING3 */
+	int reference = (int)(uintptr_t)token - 1;
+	int status = 0;
+	const char *source = "unknown";
+	const char *result = "unconfirmed";
+	if (event && event->type == PJSIP_EVENT_TSX_STATE) {
+		if (event->body.tsx_state.tsx) {
+			status = event->body.tsx_state.tsx->status_code;
+		}
+		switch (event->body.tsx_state.type) {
+		case PJSIP_EVENT_RX_MSG:
+			source = "response";
+			if (status >= 200 && status < 300) {
+				result = "accepted";
+			} else if (status >= 300) {
+				result = "rejected";
+			}
+			break;
+		case PJSIP_EVENT_TIMER:
+			source = "timeout";
+			break;
+		case PJSIP_EVENT_TRANSPORT_ERROR:
+			source = "transport_error";
+			break;
+		default:
+			break;
+		}
+	}
+	/* The callback runs after Asterisk's authentication/failover processing.
+	 * Only an actual successful response is evidence of carrier acceptance. */
+	ast_log(LOG_NOTICE, "VITI_MT_SMS_ACK rp_ref=%d result=%s sip_status=%d source=%s\n",
+		reference, result, status, source);
+}
+
+static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char ack_ref)
+{
+	/* PATCH_RPACK_ROUTING4 */
 	pj_status_t status;
 	char buf[7];
 	char pai_buf[512];
@@ -152,18 +190,20 @@ FIXED_FN = r'''static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char
 		return status;
 	}
 
-	status = ast_sip_send_request(tdata, NULL, endpoint, NULL, NULL);
+	status = ast_sip_send_request(tdata, NULL, endpoint,
+		(void *)(uintptr_t)(ack_ref + 1), viti_rpack_result);
 	if (status) {
-		ast_log(LOG_ERROR, "PJSIP MESSAGE - Could not send RP-ACK\n");
+		ast_log(LOG_ERROR, "VITI_MT_SMS_ACK rp_ref=%u result=local_failure pj_status=%d\n", ack_ref, status);
 		return status;
 	}
 
+	ast_log(LOG_NOTICE, "VITI_MT_SMS_ACK rp_ref=%u result=queued\n", ack_ref);
 	return PJ_SUCCESS;
 }'''
 
 f = '/home/asterisk-build/asterisk/res/res_pjsip_messaging.c'
 s = open(f).read()
-if 'PATCH_RPACK_ROUTING3' in s:
+if 'PATCH_RPACK_ROUTING4' in s:
     print("already patched"); sys.exit(0)
 
 start = s.find('static pj_status_t send_rpack(pjsip_rx_data *rdata, unsigned char ack_ref)')

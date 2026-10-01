@@ -190,8 +190,12 @@ func (g *AMIGateway) TestIncomingCall(ctx context.Context) error {
 }
 
 func (g *AMIGateway) NotifyCarrierOutage(ctx context.Context) error {
+	// Clear only earlier service alerts, including an uncertain originate result.
+	if err := g.CancelCarrierOutage(ctx); err != nil {
+		return err
+	}
 	response, err := g.action(ctx, map[string]string{
-		"Action": "Originate", "Channel": "Local/down@viti-service-alert",
+		"Action": "Originate", "Channel": "Local/down@viti-service-alert/n",
 		// The Local channel owns only the alert. Answering or rejecting one
 		// client ends the local presentation without touching a carrier call.
 		"Application": "Wait", "Data": "45", "Timeout": "50000", "Async": "true",
@@ -201,6 +205,21 @@ func (g *AMIGateway) NotifyCarrierOutage(ctx context.Context) error {
 	}
 	if first(response, "Response") != "Success" {
 		return fmt.Errorf("Asterisk rejected the carrier outage alert: %s", first(response, "Message"))
+	}
+	return nil
+}
+
+func (g *AMIGateway) CancelCarrierOutage(ctx context.Context) error {
+	// Keep /n on originate so these exact Local legs survive answering and can
+	// be cancelled without touching a real carrier or diagnostic call.
+	response, err := g.action(ctx, map[string]string{
+		"Action": "Hangup", "Channel": "/^Local/down@viti-service-alert-[0-9a-fA-F]+;[12]$/", "Cause": "16",
+	})
+	if err != nil {
+		return err
+	}
+	if first(response, "Response") != "Success" && !amiTargetAlreadyGone(first(response, "Message")) {
+		return fmt.Errorf("Asterisk rejected service alert cleanup: %s", first(response, "Message"))
 	}
 	return nil
 }

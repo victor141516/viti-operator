@@ -13,10 +13,13 @@ import org.junit.Test
 class ServerConnectionAlertMonitorTest {
     @Test
     fun nativeApiFailureOverridesAStaleRegisteredWebView() {
-        assertEquals(true, effectiveServerConnection(voiceRegistered = true, serverApiReachable = null))
-        assertEquals(true, effectiveServerConnection(voiceRegistered = true, serverApiReachable = true))
-        assertEquals(false, effectiveServerConnection(voiceRegistered = true, serverApiReachable = false))
-        assertEquals(false, effectiveServerConnection(voiceRegistered = false, serverApiReachable = true))
+        assertEquals(CallAvailability.CONNECTING, callAvailability(true, null, CarrierAvailability.UNKNOWN))
+        assertEquals(CallAvailability.READY, callAvailability(true, true, CarrierAvailability.READY))
+        assertEquals(CallAvailability.NO_SERVER, callAvailability(true, false, CarrierAvailability.READY))
+        assertEquals(CallAvailability.NO_VOICE, callAvailability(false, true, CarrierAvailability.READY))
+        assertEquals(CallAvailability.NO_CARRIER, callAvailability(true, true, CarrierAvailability.DOWN))
+        assertEquals(CallAvailability.NO_SERVER, callAvailability(true, true, CarrierAvailability.UNREACHABLE))
+        assertEquals(CallAvailability.CONNECTING, callAvailability(true, true, CarrierAvailability.UNKNOWN))
     }
 
     @Test
@@ -86,6 +89,12 @@ class ServerConnectionAlertMonitorTest {
         advanceTimeBy(15_000)
         runCurrent()
         assertEquals(1, shown)
+
+        // The outage does not expire with a SIP alert or a 30-second ringtone.
+        advanceTimeBy(120_000)
+        runCurrent()
+        assertEquals(1, shown)
+        assertEquals(1, dismissed)
 
         available.value = true
         runCurrent()

@@ -8,16 +8,11 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-internal fun effectiveServerConnection(
-    voiceRegistered: Boolean,
-    serverApiReachable: Boolean?,
-): Boolean = voiceRegistered && serverApiReachable != false
-
 /**
- * Debounces voice-registration loss before escalating it to a local alert.
+ * Debounces this device's server connection loss before a local alert.
  *
- * Registration is the capability that matters here: a device with ordinary
- * Internet access but no Viti voice registration still cannot receive calls.
+ * Carrier-only outages must not enter this monitor: the server rings all
+ * clients through SIP. Local alerts cover loss of voice registration or API.
  */
 internal fun CoroutineScope.launchServerConnectionAlertMonitor(
     connectionAvailable: Flow<Boolean>,

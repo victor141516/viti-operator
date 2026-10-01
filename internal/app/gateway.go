@@ -50,6 +50,7 @@ type IncomingCallTester interface {
 // SIP clients. It must not depend on the carrier tunnel it is reporting.
 type CarrierOutageNotifier interface {
 	NotifyCarrierOutage(context.Context) error
+	CancelCarrierOutage(context.Context) error
 }
 
 type IMSRegistrationController interface {

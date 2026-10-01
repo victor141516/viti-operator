@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-func TestCarrierAlertStateWaitsForSustainedOutageAndAlertsOnce(t *testing.T) {
+func TestCarrierAlertStateRepeatsThroughoutSustainedOutage(t *testing.T) {
 	start := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	state := newCarrierAlertState(45*time.Second, 15*time.Second)
 	if state.shouldAlert(start, false, false) {
@@ -17,9 +17,14 @@ func TestCarrierAlertStateWaitsForSustainedOutageAndAlertsOnce(t *testing.T) {
 	if !state.shouldAlert(start.Add(45*time.Second), false, false) {
 		t.Fatal("sustained outage did not alert")
 	}
-	state.markAlerted()
-	if state.shouldAlert(start.Add(time.Hour), false, false) {
-		t.Fatal("same outage alerted more than once")
+	if state.shouldAlert(start.Add(59*time.Second), false, false) {
+		t.Fatal("alert repeated before the retry interval")
+	}
+	if !state.shouldAlert(start.Add(60*time.Second), false, false) {
+		t.Fatal("same outage did not alert again for late or reconnected clients")
+	}
+	if !state.shouldAlert(start.Add(time.Hour), false, false) {
+		t.Fatal("persistent outage stopped alerting")
 	}
 }
 
@@ -48,7 +53,6 @@ func TestCarrierAlertStateRecoveryStartsANewOutage(t *testing.T) {
 	if !state.shouldAlert(start.Add(time.Second), false, false) {
 		t.Fatal("first outage did not alert")
 	}
-	state.markAlerted()
 	if state.shouldAlert(start.Add(2*time.Second), true, false) {
 		t.Fatal("recovery emitted an alert")
 	}

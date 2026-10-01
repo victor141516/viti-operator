@@ -8,13 +8,13 @@ import (
 const (
 	carrierOutagePollInterval = 10 * time.Second
 	carrierOutageGracePeriod  = 45 * time.Second
-	carrierAlertRetryInterval = 15 * time.Second
+	// Longer than the bounded 45-second local alert leg: never stack calls.
+	carrierAlertRetryInterval = 60 * time.Second
 )
 
 type carrierAlertState struct {
 	outageSince time.Time
 	lastAttempt time.Time
-	alerted     bool
 	grace       time.Duration
 	retry       time.Duration
 }
@@ -32,7 +32,7 @@ func (s *carrierAlertState) shouldAlert(now time.Time, carrierReady, callOpen bo
 		s.outageSince = now
 		return false
 	}
-	if s.alerted || callOpen || now.Sub(s.outageSince) < s.grace {
+	if callOpen || now.Sub(s.outageSince) < s.grace {
 		return false
 	}
 	if !s.lastAttempt.IsZero() && now.Sub(s.lastAttempt) < s.retry {
@@ -42,17 +42,13 @@ func (s *carrierAlertState) shouldAlert(now time.Time, carrierReady, callOpen bo
 	return true
 }
 
-func (s *carrierAlertState) markAlerted() {
-	s.alerted = true
-}
-
 // StartCarrierOutageNotifier watches the live carrier path: SWu, IMS
 // registration and the local Asterisk control plane must all be ready. SIM
 // readiness is intentionally excluded because an already-established tunnel
 // can remain usable while its AKA provider is temporarily unavailable. An
-// intentionally disabled IMS registration is not an outage. One local SIP
-// alert is emitted per sustained outage, after a grace period, and is deferred
-// while a real call is open.
+// intentionally disabled IMS registration is not an outage. Local SIP alerts
+// repeat throughout a sustained outage, including for clients that reconnect
+// later. Recovery or a real call cancels only the service-alert legs.
 func (a *App) StartCarrierOutageNotifier(ctx context.Context) {
 	notifier, ok := a.gateway.(CarrierOutageNotifier)
 	if !ok {
@@ -60,6 +56,8 @@ func (a *App) StartCarrierOutageNotifier(ctx context.Context) {
 	}
 	go func() {
 		state := newCarrierAlertState(carrierOutageGracePeriod, carrierAlertRetryInterval)
+		// Also clean up an alert left by a previous manager process.
+		clearNeeded := true
 		ticker := time.NewTicker(carrierOutagePollInterval)
 		defer ticker.Stop()
 		for {
@@ -68,7 +66,19 @@ func (a *App) StartCarrierOutageNotifier(ctx context.Context) {
 			cancel()
 			registrationEnabled := a.store.IMSRegistrationEnabled()
 			carrierReady := !registrationEnabled || establishedCarrierPathReady(status)
-			if state.shouldAlert(time.Now().UTC(), carrierReady, a.hasOpenCall()) {
+			callOpen := a.hasOpenCall()
+			if clearNeeded && (carrierReady || callOpen) {
+				clearCtx, clearCancel := context.WithTimeout(ctx, 8*time.Second)
+				err := notifier.CancelCarrierOutage(clearCtx)
+				clearCancel()
+				if err == nil {
+					clearNeeded = false
+				} else {
+					a.logger.Warn("could not clear carrier outage alert; retrying", "error", err)
+				}
+			}
+			if state.shouldAlert(time.Now().UTC(), carrierReady, callOpen) {
+				clearNeeded = true
 				alertCtx, alertCancel := context.WithTimeout(ctx, 8*time.Second)
 				err := notifier.NotifyCarrierOutage(alertCtx)
 				alertCancel()
@@ -76,8 +86,7 @@ func (a *App) StartCarrierOutageNotifier(ctx context.Context) {
 					a.logger.Warn("carrier outage alert failed; retrying", "error", err)
 					a.diag.RecordEvent("manager.runtime", "carrier-outage-alert.failed", map[string]any{"error": err.Error()})
 				} else {
-					state.markAlerted()
-					a.logger.Warn("carrier outage alert sent")
+					a.logger.Warn("carrier outage alert requested; repeating until recovery")
 					a.diag.RecordEvent("manager.runtime", "carrier-outage-alert.sent", map[string]any{"outage_since": state.outageSince})
 					a.events.Publish("carrier.outage.alerted", map[string]any{"state": "down", "label": "Viti Server down", "outage_since": state.outageSince})
 				}

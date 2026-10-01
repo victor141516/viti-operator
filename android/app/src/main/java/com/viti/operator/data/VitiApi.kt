@@ -9,7 +9,9 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class VitiApi(private val settings: ServerSettings) {
-    suspend fun status(): RuntimeStatus = request("/api/v1/status").let { body ->
+    suspend fun status(): RuntimeStatus = request(
+        "/api/v1/status", connectTimeoutMs = 3_000, readTimeoutMs = 7_000,
+    ).let { body ->
         RuntimeStatus(
             ready = body.optBoolean("ready"),
             simReady = body.optBoolean("sim_ready"),

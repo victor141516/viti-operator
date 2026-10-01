@@ -254,8 +254,10 @@ per-user scheduled task:
 .\Install-VitiAdbBridge.ps1 -BridgeExecutable .\viti-adb-bridge.exe
 ```
 
-The task starts host ADB before the bridge at logon and restarts after process failure. It
-never binds a wildcard or public address. Set
+The installer creates a bridge task and a separate ADB server watch task. The
+watch task checks the local ADB daemon every 30 seconds and restarts it if it
+exits while the bridge remains active. Neither task binds a wildcard or public
+address. Set
 `VITI_ADB_SERVER_SOCKET=tcp:host.docker.internal:5038`; Docker Desktop forwards
 that special hostname to Windows loopback without a firewall exception or a
 stable WSL interface address.
@@ -324,16 +326,25 @@ capabilities:
 - the full-screen call-alert grant exposed by Android 14 and later.
 
 The foreground voice service separately monitors whether this device is
-registered with Viti Server. It also performs a native authenticated API probe
-every 10 seconds, so background WebView throttling cannot leave a stale
-connected notification behind. An initial connection receives a 30-second grace
-period; a previously established connection receives 15 seconds to recover.
-If registration is still unavailable, Android shows an ongoing **No
-connection** notification and plays the configured ringtone for up to 30
-seconds. The notification and any remaining ringtone are removed as soon as
-voice registration returns. This uses voice registration rather than generic
-Internet reachability because registration is the capability required to
-receive calls on that device.
+registered with Viti Server. Native authenticated probes check voice provisioning
+and `/api/v1/status`, waiting 10 seconds between completed probes, so background
+WebView throttling cannot leave a stale connected notification behind. Readiness
+requires local registration, a reachable API, and an operational carrier tunnel
+and IMS registration. SIM availability alone is not sufficient; conversely, a
+temporarily missing SIM does not invalidate an established carrier connection.
+
+Local voice/API connection loss receives a 30-second initial grace period, or
+15 seconds after a previously established connection. Android then shows an
+ongoing **No connection** notification and loops the ringtone until its server
+connection recovers. Tap **Silence** to stop the sound for the current outage
+while keeping the warning visible and the app running. Recovery clears the
+silence state, so a later outage rings again. The sound pauses during calls and
+resumes afterwards if the local outage remains and has not been silenced;
+silent mode and connection-alert sound settings are respected.
+Carrier-only outages never start this local ringtone: the server
+originates the SIP alerts described below. The quiet foreground notification
+still reports carrier unavailability as soon as the native probe detects it,
+so a working local SIP connection is not advertised as a working carrier line.
 
 Use the actions on that card to open the corresponding Android settings. A
 high-priority call channel and notification access are needed for a prominent
@@ -351,8 +362,8 @@ WebRTC, Telecom, ringtone, and CallStyle path for every connected client, but it
 does not use the SIM, contact the carrier, or enter the screening pipeline. It
 ends automatically after ten seconds if nobody acts on it.
 
-The quiet **Call service** notification means the process-owned SIP service is
-ready in the background. An active call uses the high-priority **Incoming
+The quiet **Call service** notification reports end-to-end call availability,
+not just the process-owned SIP service's local registration. An active call uses the high-priority **Incoming
 calls** channel and exposes answer/reject/end actions supported by that Android
 version. Android notification-channel sound choices are persistent system
 settings: if incoming calls are visible but silent, open Viti's notification
@@ -362,11 +373,18 @@ enabled.
 ### Carrier outage call alert
 
 If the SWu tunnel or IMS registration remains unavailable for 45 seconds, the
-manager rings every registered web and Android client once with the caller name
+manager rings every registered web and Android client with the caller name
 `Viti Server down`. This is a local SIP call: it does not use the carrier line,
 does not enter call history, recording, or screening, and ends after 40 seconds.
-The manager defers the alert while a real call is open and rearms it only after
-SWu and IMS recover. A temporary loss of the SIM/AKA provider alone does not
+The manager retries every 60 seconds throughout the outage, including if no
+client was connected for an earlier attempt. Answering or rejecting an alert
+does not acknowledge the outage permanently. Attempts cannot stack: each alert
+is bounded and earlier service-alert legs are cleared before originating another.
+Recovery, disabling IMS registration, or an open real call cancels the local
+service-alert legs on the next server check (normally within 10 seconds), without
+hanging up unrelated calls. An AMI originate acknowledgement means the request
+was queued, not proof that a particular device received or played the alert.
+A temporary loss of the SIM/AKA provider alone does not
 trigger the alert while the existing carrier path is still usable. Deliberately
 disabling IMS registration suppresses it.
 
@@ -808,6 +826,36 @@ does not resend it because doing so could duplicate a real SMS. A later queued
 status report can still update the row if its persisted RP/TP evidence identifies
 exactly one message. An ambiguous reused reference is intentionally not guessed;
 the affected messages eventually remain or become unconfirmed.
+
+### Incoming SMS messages keep repeating
+
+Incoming SMS confirmation has two separate exchanges: the SIP response to the
+incoming MESSAGE and a new outbound MESSAGE containing the mobile-to-network
+RP-ACK. Successfully accepting the first exchange, or queuing the second one
+locally, does not prove that the carrier accepted the RP-ACK.
+
+The engine logs privacy-safe `VITI_MT_SMS_ACK` records at notice level even when
+full SIP capture is disabled. `result=queued` means local submission only. A
+final `result=accepted source=response sip_status=2xx` records SIP acceptance of
+the RP-ACK request; `rejected` records a final negative response. `unconfirmed`
+with `source=timeout` or `transport_error` must not be treated as success.
+Immediate submission failures have `result=local_failure`. The records contain
+the one-byte RP reference and status, never the SMS text or subscriber identity.
+RP references can be reused, so inspect timing as well as the reference. A 2xx
+response alone does not prove that the SMSC has permanently removed the message
+from its queue; continued redelivery still needs protocol investigation.
+
+Check for a final result after each queued record before changing ACK routing.
+The existing routing follows the registered Service-Route for IMS-internal
+hostnames. The incoming peer port need not accept UE-originated requests.
+Do not hide repeated deliveries by deduplicating message text alone: distinct
+legitimate messages can have identical content.
+
+If the carrier tunnel itself is down, diagnose it first. In particular, an
+unanswered initial IKE request occurs before SIM authentication and before SMS
+exchange. Check the host's effective route, including any VPN exit node, rather
+than assuming a missing SMS ACK caused the tunnel failure. A VPN bypass test
+changes the traffic's privacy/routing boundary and must be explicitly approved.
 
 ## Backup and retention
 

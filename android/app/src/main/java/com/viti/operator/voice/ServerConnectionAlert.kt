@@ -8,62 +8,62 @@ import android.content.Context
 import android.content.Intent
 import android.media.AudioAttributes
 import android.media.RingtoneManager
+import android.net.Uri
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import com.viti.operator.IncomingCallRinger
 import com.viti.operator.MainActivity
 import com.viti.operator.R
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 
 /** Owns the local, non-call alert shown while this device cannot receive calls. */
 internal class ServerConnectionAlert(
     context: Context,
-    private val scope: CoroutineScope,
 ) {
     private val applicationContext = context.applicationContext
     private val notificationManager = applicationContext.getSystemService(NotificationManager::class.java)
     private val ringer = IncomingCallRinger(applicationContext, CHANNEL_ID)
-    private var stopRingingJob: Job? = null
-    private var hasRungForCurrentAlert = false
+    private val state = ServerConnectionAlertState()
+    private var availability: CallAvailability? = null
+    private var silenceAction: PendingIntent? = null
 
-    var visible: Boolean = false
-        private set
+    val visible: Boolean get() = state.visible
 
     init {
         createChannel()
     }
 
-    fun show(ring: Boolean) {
-        if (!visible) {
-            visible = true
-            notificationManager.notify(NOTIFICATION_ID, notification())
+    fun show(reason: CallAvailability, ring: Boolean) {
+        if (!visible || availability != reason) {
+            state.show()
+            availability = reason
+            notificationManager.notify(NOTIFICATION_ID, notification(reason))
         }
-        if (ring) startRinging()
+        if (ring) startRinging() else pauseRinging()
     }
 
     fun startRinging() {
-        if (!visible || hasRungForCurrentAlert) return
-        hasRungForCurrentAlert = true
+        if (!state.shouldRing) return
         ringer.start()
-        stopRingingJob = scope.launch {
-            delay(MAX_RING_DURATION_MS)
-            ringer.stop()
-        }
+    }
+
+    fun pauseRinging() = ringer.stop()
+
+    fun silence(outageToken: String?) {
+        if (!state.silence(outageToken)) return
+        ringer.stop()
+        availability?.let { notificationManager.notify(NOTIFICATION_ID, notification(it)) }
     }
 
     fun dismiss() {
-        visible = false
-        hasRungForCurrentAlert = false
-        stopRingingJob?.cancel()
-        stopRingingJob = null
+        state.dismiss()
+        availability = null
+        silenceAction?.cancel()
+        silenceAction = null
         ringer.stop()
         notificationManager.cancel(NOTIFICATION_ID)
     }
 
-    private fun notification(): Notification {
+    private fun notification(reason: CallAvailability): Notification {
         val openApp = PendingIntent.getActivity(
             applicationContext,
             OPEN_REQUEST,
@@ -71,10 +71,14 @@ internal class ServerConnectionAlert(
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val detail = "Viti cannot reach the server. Calls may not arrive on this device."
-        return NotificationCompat.Builder(applicationContext, CHANNEL_ID)
+        val detail = if (state.silenced) {
+            "${reason.detail} Sound silenced until connection recovers."
+        } else {
+            reason.detail
+        }
+        val builder = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
-            .setContentTitle("No connection")
+            .setContentTitle(reason.title)
             .setContentText(detail)
             .setStyle(NotificationCompat.BigTextStyle().bigText(detail))
             .setCategory(NotificationCompat.CATEGORY_ERROR)
@@ -82,11 +86,24 @@ internal class ServerConnectionAlert(
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
-            // Audio is owned by IncomingCallRinger so it can be stopped after
-            // a bounded interval without removing the persistent warning.
+            // The app-owned ringtone stops on recovery or Silence. A real call
+            // pauses its audio without clearing the persistent outage warning.
             .setSilent(true)
             .setContentIntent(openApp)
-            .build()
+        if (!state.silenced) {
+            val token = checkNotNull(state.outageToken)
+            val action = silenceAction ?: PendingIntent.getService(
+                applicationContext,
+                SILENCE_REQUEST,
+                Intent(applicationContext, VoiceCallService::class.java)
+                    .setAction(VoiceCallService.ACTION_SILENCE_CONNECTION_ALERT)
+                    .setData(Uri.parse("viti://connection-alert/$token"))
+                    .putExtra(VoiceCallService.EXTRA_CONNECTION_ALERT_TOKEN, token),
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            ).also { silenceAction = it }
+            builder.addAction(android.R.drawable.ic_lock_silent_mode, "Silence", action)
+        }
+        return builder.build()
     }
 
     private fun createChannel() {
@@ -110,6 +127,6 @@ internal class ServerConnectionAlert(
         const val CHANNEL_ID = "server_connection_alerts_v1"
         const val NOTIFICATION_ID = 4411
         const val OPEN_REQUEST = 4412
-        const val MAX_RING_DURATION_MS = 30_000L
+        const val SILENCE_REQUEST = 4413
     }
 }

@@ -16,7 +16,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	requests := make(chan map[string][]string, 40)
+	requests := make(chan map[string][]string, 44)
 	go func() {
 		for {
 			conn, err := listener.Accept()
@@ -94,11 +94,12 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	var sawScreenedRing bool
 	var sawIncomingCallTest bool
 	var sawCarrierOutageAlert bool
+	var sawCarrierOutageCleanup bool
 	var sawMediaJoin bool
 	var sawServiceCall bool
 	var sawMediaDTMF bool
 	var sawMediaLeave bool
-	for range 36 {
+	for range 39 {
 		request := <-requests
 		if first(request, "Action") == "MessageSend" {
 			sawMessage = first(request, "Body") == "hello" &&
@@ -116,6 +117,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 		if first(request, "Action") == "Hangup" && first(request, "Channel") == "PJSIP/webrtc-0000002a" {
 			sawDirectedHangup = true
 		}
+		if first(request, "Action") == "Hangup" && first(request, "Channel") == "/^Local/down@viti-service-alert-[0-9a-fA-F]+;[12]$/" {
+			sawCarrierOutageCleanup = true
+		}
 		if first(request, "Action") == "ConfbridgeKick" {
 			sawConferenceEnd = first(request, "Conference") == "asterisk-call-42" && first(request, "Channel") == "all"
 		}
@@ -128,7 +132,7 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 				sawIncomingCallTest = first(request, "Application") == "Wait" && first(request, "Data") == "10" &&
 					first(request, "Timeout") == "15000" && first(request, "Async") == "true"
 			}
-			if first(request, "Channel") == "Local/down@viti-service-alert" {
+			if first(request, "Channel") == "Local/down@viti-service-alert/n" {
 				sawCarrierOutageAlert = first(request, "Application") == "Wait" && first(request, "Data") == "45" &&
 					first(request, "Timeout") == "50000" && first(request, "Async") == "true"
 			}
@@ -155,6 +159,9 @@ func TestAMIGatewayStatusAndSMS(t *testing.T) {
 	}
 	if !sawUnregister || !sawRegister {
 		t.Fatalf("IMS commands missing: unregister=%t register=%t", sawUnregister, sawRegister)
+	}
+	if !sawCarrierOutageCleanup {
+		t.Fatal("carrier alert did not clean up only earlier service-alert Local legs")
 	}
 	if !sawDirectedHangup || !sawConferenceEnd || !sawScreenedRing || !sawIncomingCallTest || !sawCarrierOutageAlert {
 		t.Fatalf("conference controls missing: directed=%t end=%t screened_ring=%t incoming_test=%t outage_alert=%t", sawDirectedHangup, sawConferenceEnd, sawScreenedRing, sawIncomingCallTest, sawCarrierOutageAlert)

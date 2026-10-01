@@ -60,11 +60,14 @@ manager-facing tunnel contract.
 - Established carrier sessions survive temporary loss of the SIM authentication
   source. Calls and SMS remain available while SWu and IMS stay operational;
   fresh authentication waits for the SIM to return.
-- A sustained SWu or IMS outage rings every registered client once as a local
-  incoming call labelled `Viti Server down`, without using the carrier line.
-- The Android foreground voice service also raises a local `No connection`
-  warning when that device loses its own Viti voice registration, rings once
-  after a reconnection grace period, and removes the warning on recovery.
+- A sustained SWu or IMS outage repeatedly rings registered clients with
+  server-originated local calls labelled `Viti Server down`, without using the
+  carrier line, until recovery. Real calls take priority over these alerts.
+- The Android foreground voice service checks both local voice registration
+  and carrier readiness, even while the UI is suspended. After a reconnection
+  grace period, losing its own server connection starts a persistent local
+  `No connection` warning. Carrier-only outages update its status text but
+  ring exclusively through the server-originated calls.
 - Shared connection topology with live device presence, selected SIM-auth source,
   and evidence-backed Android carrier, registration, access-technology, and
   signal details when the OS exposes them.

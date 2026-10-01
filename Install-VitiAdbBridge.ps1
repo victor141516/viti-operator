@@ -5,7 +5,8 @@ param(
     [string]$ListenAddress,
     [ValidateRange(1025, 65535)]
     [int]$Port = 5038,
-    [string]$TaskName = 'Viti Operator ADB Bridge'
+    [string]$TaskName = 'Viti Operator ADB Bridge',
+    [string]$WatchTaskName = 'Viti Operator ADB Server Watch'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,18 @@ $settings = New-ScheduledTaskSettingsSet `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -StartWhenAvailable
 
+# The ADB daemon can exit while the bridge keeps listening. Keep its local
+# upstream available independently of the bridge task's process lifetime.
+$watchLauncher = @"
+while (`$true) {
+    & '$quotedAdb' start-server | Out-Null
+    Start-Sleep -Seconds 30
+}
+"@
+$encodedWatchLauncher = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($watchLauncher))
+$watchAction = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" `
+    -Argument "-NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encodedWatchLauncher"
+
 $existingTask = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 if ($existingTask) {
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
@@ -69,7 +82,20 @@ Register-ScheduledTask `
     -Description 'Starts host ADB before the private Viti Operator proxy for Docker.' `
     -Force | Out-Null
 
-Start-ScheduledTask -TaskName $TaskName
+Register-ScheduledTask `
+    -TaskName $WatchTaskName `
+    -Action $watchAction `
+    -Trigger $trigger `
+    -Principal $principal `
+    -Settings $settings `
+    -Description 'Restarts the loopback ADB daemon if it exits while Viti Operator is running.' `
+    -Force | Out-Null
+
+$listener = Get-NetTCPConnection -State Listen -LocalAddress $ListenAddress -LocalPort $Port -ErrorAction SilentlyContinue
+if (-not $listener) {
+    Start-ScheduledTask -TaskName $TaskName
+}
+Start-ScheduledTask -TaskName $WatchTaskName
 $deadline = (Get-Date).AddSeconds(15)
 do {
     Start-Sleep -Milliseconds 250
@@ -82,6 +108,7 @@ if (-not $listener) {
 
 [pscustomobject]@{
     TaskName = $TaskName
+    WatchTaskName = $WatchTaskName
     Executable = $resolvedExecutable
     AdbExecutable = $resolvedAdb
     ListenAddress = $ListenAddress
