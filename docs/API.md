@@ -150,7 +150,73 @@ Requests registration or unregistration:
 Unregistration returns `409` while a call is open and `501` for a telephony
 adapter that cannot control registration.
 
-## Events
+## Incremental client history
+
+### `GET /api/v1/history?cursor=<opaque-checkpoint>`
+
+Authenticated, `Cache-Control: no-store`. Omit the cursor for a complete baseline.
+The response is one version-1 `history.sync` batch:
+
+```json
+{
+  "type": "history.sync",
+  "version": 1,
+  "mode": "delta",
+  "base_cursor": "history-example:10",
+  "cursor": "history-example:11",
+  "messages": [],
+  "calls": [],
+  "deleted_messages": [],
+  "deleted_calls": [],
+  "contacts_version": 0
+}
+```
+
+Treat cursors as opaque. `delta` contains complete replacement rows for changed
+IDs, including modifications to older records; unchanged rows are absent.
+Apply the batch only against its `base_cursor`, then commit rows and `cursor`
+together. Deletions are ID tombstones. Repeated checks at the current cursor
+return empty arrays and the same cursor. Calls use the existing call-list view,
+including screening summaries rather than detailed opaque pipeline results.
+
+An absent, malformed, future, expired, or previous-process cursor returns
+`mode: "full"`. Invalid supplied cursors also include `reason: "cursor_invalid"`.
+A full batch replaces both cached histories; its base cursor need not match.
+The server retains at most 256 change batches and 4 MiB of replay row data in
+memory. Eviction or restart causes a full replacement, not silent data loss.
+
+### `GET /api/v1/history/ws?cursor=<opaque-checkpoint>`
+
+Authenticated WebSocket using the same API-key headers, without bot capabilities,
+SIP credentials, or media. It sends an initial `history.sync` batch and then
+pushes batches only when the stored public history changes. Subscription and
+snapshot ordering ensure mutations cannot fall between the baseline and live
+delivery. Slow consumers reconnect and replay from their last committed cursor.
+
+To check again when opening the app, send:
+
+```json
+{"type":"sync","cursor":"history-example:11"}
+```
+
+Send an empty cursor to request a full replacement after detecting divergence.
+The server also sends small `history.invalidate` messages with a `resource`
+name when status, contacts, recording settings, SIM assignment or bot inventory
+configuration changes. These are metadata invalidations, not history rows or
+replay checkpoints; reconnecting clients refresh visible metadata once.
+Server pings every 30 seconds and a 75-second pong deadline bound dead sockets.
+Application requests are limited to 4 KiB; arbitrary commands are unsupported.
+
+The legacy `/messages`, `/calls` and `/events` contracts remain available for
+existing web/integration consumers. Android no longer polls the full histories.
+
+### `GET /api/v1/calls/active?trace_id=<trace-id>`
+
+Authenticated, no-store, compact `{"active":true}` or `{"active":false}` response.
+True requires a matching non-ended call in the `active` state. Native media
+recovery uses this endpoint instead of downloading every call record.
+
+## General event feed
 
 ### `GET /api/v1/events?after=<sequence>`
 
@@ -718,6 +784,30 @@ deadlines while a wedged manager path still fails open to human ringing.
 Engine-only endpoint authenticated with `X-Viti-Engine-Token`. Asterisk checks
 this shared setting when each carrier or local participant channel starts and
 fails closed if the manager cannot be reached.
+
+## Restricted Android signaling probe
+
+`POST /api/v1/diagnostics/events` also accepts `source: "android-signaling"`,
+`kind: "signaling.snapshot"`, and an allowlisted `data` object even when the
+full development recorder is disabled. This probe is separate from unredacted
+diagnostic capture. Invalid client hashes or runtime session UUIDs return 400.
+Unknown fields, raw causes, and arbitrary string values are not retained.
+
+`GET /api/v1/diagnostics/voice` requires the normal client API authentication
+and returns `{"snapshots": [...]}` with `Cache-Control: no-store`. An optional
+`client_hash` query selects one pseudonymous client. The in-memory buffer holds
+at most 256 snapshots across clients; records older than six hours are omitted.
+A manager restart clears it. There is no diagnostic download on a public port.
+
+Snapshots contain server receipt time, a hashed client ID, a random service
+runtime session, a fixed build marker, native tick/JavaScript dispatch counts,
+service uptime, age of the last JavaScript acknowledgement and signaling event,
+remaining SIP lease, process importance, WebView attachment/visibility/readiness,
+boolean API/registration/wake-lock states, and native socket frame counters/state.
+The `native-voice-20261007` build uses native dispatch counters and reports
+`webview_owned: false`; JavaScript/attachment fields apply only to older builds.
+Only fixed signaling categories are accepted. There are no phone numbers, audio, SIP payloads, network addresses,
+credentials, or free-form exception messages.
 
 ## Compatibility policy
 

@@ -37,6 +37,7 @@ type App struct {
 	adaptiveAuth      *AdaptiveAuthenticator
 	broker            *AuthBroker
 	diag              *DiagnosticRecorder
+	voiceDiagnostics  voiceDiagnosticBuffer
 	mux               *http.ServeMux
 	smsMu             sync.Mutex
 	imsMu             sync.Mutex
@@ -197,6 +198,8 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/ims-registration", a.authorized(http.HandlerFunc(a.imsRegistration)))
 	a.mux.Handle("PUT /api/v1/ims-registration", a.authorized(http.HandlerFunc(a.setIMSRegistration)))
 	a.mux.Handle("GET /api/v1/events", a.authorized(http.HandlerFunc(a.waitEvents)))
+	a.mux.Handle("GET /api/v1/history", a.authorized(http.HandlerFunc(a.historySnapshot)))
+	a.mux.Handle("GET /api/v1/history/ws", a.authorized(http.HandlerFunc(a.historyWebSocket)))
 	a.mux.Handle("GET /api/v1/integrations/ws", a.authorized(http.HandlerFunc(a.integrationWebSocket)))
 	a.mux.Handle("GET /api/v1/bots", a.authorized(http.HandlerFunc(a.bots)))
 	a.mux.Handle("PUT /api/v1/bots/pipeline", a.authorized(http.HandlerFunc(a.setBotPipeline)))
@@ -206,6 +209,7 @@ func (a *App) routes() {
 	a.mux.Handle("POST /api/v1/messages/debug/preview", a.authorized(http.HandlerFunc(a.previewDebugMessage)))
 	a.mux.Handle("POST /api/v1/messages/debug/send", a.authorized(http.HandlerFunc(a.sendDebugMessage)))
 	a.mux.Handle("GET /api/v1/calls", a.authorized(http.HandlerFunc(a.calls)))
+	a.mux.Handle("GET /api/v1/calls/active", a.authorized(http.HandlerFunc(a.activeCallState)))
 	a.mux.Handle("GET /api/v1/calls/{id}", a.authorized(http.HandlerFunc(a.callDetails)))
 	a.mux.Handle("POST /api/v1/calls/normalize", a.authorized(http.HandlerFunc(a.normalizeCallDestination)))
 	a.mux.Handle("GET /api/v1/contacts", a.authorized(http.HandlerFunc(a.contacts)))
@@ -220,6 +224,7 @@ func (a *App) routes() {
 	a.mux.Handle("GET /api/v1/calls/{id}/recording", a.authorized(http.HandlerFunc(a.callRecording)))
 	a.mux.Handle("GET /api/v1/voice", a.authorized(http.HandlerFunc(a.voiceProvisioning)))
 	a.mux.Handle("POST /api/v1/diagnostics/events", a.authorized(http.HandlerFunc(a.diagnosticEvent)))
+	a.mux.Handle("GET /api/v1/diagnostics/voice", a.authorized(http.HandlerFunc(a.voiceDiagnosticSnapshots)))
 	a.mux.HandleFunc("GET /sipws", a.voiceWebSocket)
 	a.mux.HandleFunc("POST /api/engine/event", a.engineEvent)
 	a.mux.HandleFunc("POST /api/engine/screen", a.engineScreen)

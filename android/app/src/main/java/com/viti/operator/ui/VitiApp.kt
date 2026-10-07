@@ -121,6 +121,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -140,7 +143,6 @@ import com.viti.operator.data.VoiceCallQuality
 import com.viti.operator.voice.VoiceCallRuntime
 import com.viti.operator.voice.IncomingCallPresentationStatus
 import com.viti.operator.voice.VoiceCallSnapshot
-import com.viti.operator.voice.VoiceWebViewClient
 import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -163,7 +165,6 @@ private enum class Destination(val label: String, val icon: ImageVector) {
 fun VitiApp(
     viewModel: MainViewModel,
     voiceRuntime: VoiceCallRuntime,
-    voiceClient: VoiceWebViewClient,
     onPlaceCall: (String) -> Unit,
     onAnswerCall: () -> Unit,
     onRejectCall: () -> Unit,
@@ -181,6 +182,8 @@ fun VitiApp(
     onRequestCallNotifications: () -> Unit,
     onOpenFullScreenCallSettings: () -> Unit,
     onOpenCallChannelSettings: () -> Unit,
+    onOpenCallRingtoneSettings: () -> Unit,
+    onOpenBackgroundCallSettings: () -> Unit,
 	onTestIncomingCall: () -> Unit,
 ) {
     val ui by viewModel.uiState.collectAsStateWithLifecycle()
@@ -270,16 +273,14 @@ fun VitiApp(
                         onRequestCallNotifications = onRequestCallNotifications,
                         onOpenFullScreenCallSettings = onOpenFullScreenCallSettings,
                         onOpenCallChannelSettings = onOpenCallChannelSettings,
+                        onOpenCallRingtoneSettings = onOpenCallRingtoneSettings,
+                        onOpenBackgroundCallSettings = onOpenBackgroundCallSettings,
 						onTestIncomingCall = onTestIncomingCall,
                     )
                 }
             }
         }
       }
-      AndroidView(
-          factory = { voiceClient.view },
-          modifier = Modifier.size(1.dp).alpha(0f).align(Alignment.TopStart),
-      )
     }
 }
 
@@ -1435,6 +1436,8 @@ private fun ConnectionScreen(
     onRequestCallNotifications: () -> Unit,
     onOpenFullScreenCallSettings: () -> Unit,
     onOpenCallChannelSettings: () -> Unit,
+    onOpenCallRingtoneSettings: () -> Unit,
+    onOpenBackgroundCallSettings: () -> Unit,
 	onTestIncomingCall: () -> Unit,
 ) {
     var url by rememberSaveable(settings.serverUrl) { mutableStateOf(settings.serverUrl) }
@@ -1471,13 +1474,15 @@ private fun ConnectionScreen(
             SectionTitle("Connection", "Real-time line status", Modifier.weight(1f))
             TopologyOverallChip(topologyOverallState(ui.topology))
         }
-        TopologyViewerCard(settings, ui.clientId)
+        TopologyViewerCard(settings, ui.clientId, ui.topology.generatedAt)
         CellularDetailsPermissionCard()
         IncomingCallAlertsCard(
             status = callPresentationStatus,
             onRequestNotifications = onRequestCallNotifications,
             onOpenFullScreenSettings = onOpenFullScreenCallSettings,
             onOpenChannelSettings = onOpenCallChannelSettings,
+            onOpenRingtoneSettings = onOpenCallRingtoneSettings,
+            onOpenBackgroundSettings = onOpenBackgroundCallSettings,
 			onTestIncomingCall = onTestIncomingCall,
         )
         ElevatedCard {
@@ -1684,6 +1689,8 @@ private fun IncomingCallAlertsCard(
     onRequestNotifications: () -> Unit,
     onOpenFullScreenSettings: () -> Unit,
     onOpenChannelSettings: () -> Unit,
+    onOpenRingtoneSettings: () -> Unit,
+    onOpenBackgroundSettings: () -> Unit,
 	onTestIncomingCall: () -> Unit,
 ) {
     ElevatedCard(Modifier.fillMaxWidth()) {
@@ -1724,7 +1731,29 @@ private fun IncomingCallAlertsCard(
                 available = status.callChannelEnabled && status.prominentCallChannel,
             )
             OutlinedButton(onClick = onOpenChannelSettings, modifier = Modifier.fillMaxWidth()) {
-                Text("Manage call alert channel")
+                Text("Manage floating call alerts")
+            }
+            CallAlertCapabilityRow(
+                icon = Icons.Default.NotificationsActive,
+                title = "Call ringtone",
+                detail = if (status.callSoundEnabled) "Sound enabled" else "Check silent mode, ring volume, and the call channel sound",
+                available = status.callSoundEnabled,
+            )
+            OutlinedButton(onClick = onOpenRingtoneSettings, modifier = Modifier.fillMaxWidth()) {
+                Text("Manage call ringtone")
+            }
+            CallAlertCapabilityRow(
+                icon = Icons.Default.Call,
+                title = "Background calls",
+                detail = if (status.backgroundCallsUnrestricted) "Battery optimization disabled" else "Battery optimization may delay calls while the screen is off",
+                available = status.backgroundCallsUnrestricted,
+            )
+            if (!status.backgroundCallsUnrestricted) {
+                OutlinedButton(onClick = onOpenBackgroundSettings, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp)) {
+                    Text("Manage background call access")
+                }
+                Text("In Android app settings, allow background activity and select unrestricted battery use. Keep Tailscale unrestricted too.",
+                    style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             CallAlertCapabilityRow(
                 icon = Icons.Default.Fullscreen,
@@ -1794,11 +1823,14 @@ private data class TopologyViewerConfig(
     val viewerUrl: String,
     val token: String,
     val currentClientId: String,
+    val refreshKey: String,
+    val lifecycle: Lifecycle,
 )
 
 @Composable
-private fun TopologyViewerCard(serverSettings: ServerSettings, currentClientId: String) {
+private fun TopologyViewerCard(serverSettings: ServerSettings, currentClientId: String, refreshKey: String) {
     val context = LocalContext.current
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     val viewerUrl = remember(serverSettings.serverUrl) {
         "${normalizeServerUrl(serverSettings.serverUrl)}/topology.html?embed=android"
     }
@@ -1839,8 +1871,16 @@ private fun TopologyViewerCard(serverSettings: ServerSettings, currentClientId: 
         }
     }
 
-    DisposableEffect(webView) {
+    DisposableEffect(webView, lifecycle) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) {
+                webView.onResume()
+                configureTopologyViewer(webView, force = true)
+            } else if (event == Lifecycle.Event.ON_STOP) webView.onPause()
+        }
+        lifecycle.addObserver(observer)
         onDispose {
+            lifecycle.removeObserver(observer)
             webView.stopLoading()
             webView.destroy()
         }
@@ -1864,7 +1904,7 @@ private fun TopologyViewerCard(serverSettings: ServerSettings, currentClientId: 
                 factory = { webView },
                 modifier = Modifier.fillMaxWidth().height(620.dp),
                 update = { view ->
-                    view.tag = TopologyViewerConfig(viewerUrl, serverSettings.apiKey, currentClientId)
+                    view.tag = TopologyViewerConfig(viewerUrl, serverSettings.apiKey, currentClientId, refreshKey, lifecycle)
                     if (view.url != viewerUrl) view.loadUrl(viewerUrl) else configureTopologyViewer(view)
                 },
             )
@@ -1872,11 +1912,14 @@ private fun TopologyViewerCard(serverSettings: ServerSettings, currentClientId: 
     }
 }
 
-private fun configureTopologyViewer(view: WebView) {
+private fun configureTopologyViewer(view: WebView, force: Boolean = false) {
     val config = view.tag as? TopologyViewerConfig ?: return
+    if (!config.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)) return
     val payload = JSONObject()
         .put("token", config.token)
         .put("currentClientId", config.currentClientId)
+        .put("refreshKey", config.refreshKey)
+        .put("force", force)
         .toString()
     view.evaluateJavascript("if (window.vitiTopology) window.vitiTopology.configure($payload);", null)
 }

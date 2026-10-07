@@ -28,7 +28,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
-import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.lifecycle.lifecycleScope
 import com.viti.operator.auth.RemoteAuthService
@@ -38,7 +37,6 @@ import com.viti.operator.data.VitiApi
 import com.viti.operator.data.SessionCountryDetector
 import com.viti.operator.data.ContactsRepository
 import com.viti.operator.data.PhoneRoutingSettings
-import com.viti.operator.data.Message
 import com.viti.operator.data.vitiClientIdentity
 import com.viti.operator.ui.VitiApp
 import com.viti.operator.ui.VitiTheme
@@ -58,7 +56,7 @@ internal fun isInternalCallTarget(value: String): Boolean = value.trim() in setO
 class MainActivity : ComponentActivity() {
     private val settingsStore by lazy { SettingsStore(applicationContext) }
     private val viewModel by viewModels<MainViewModel> {
-        MainViewModel.Factory(settingsStore, SessionCountryDetector(applicationContext))
+        MainViewModel.Factory(settingsStore, SessionCountryDetector(applicationContext), com.viti.operator.data.HistoryRepository.get(applicationContext))
     }
     private var voiceService by mutableStateOf<VoiceCallService?>(null)
     private var voiceServiceBound = false
@@ -75,7 +73,6 @@ class MainActivity : ComponentActivity() {
             voiceService = service
             voiceServiceBound = true
             refreshCallPresentationStatus()
-            service.detachVoiceView()
             voiceSnapshotJob?.cancel()
             voiceSnapshotJob = lifecycleScope.launch {
                 service.snapshot.collect { viewModel.setVoiceState(it.voice) }
@@ -117,9 +114,6 @@ class MainActivity : ComponentActivity() {
         publishClientIdentity()
         createNotificationChannels()
         refreshCallPresentationStatus()
-        lifecycleScope.launch {
-            viewModel.incomingMessages.collect(::showIncomingMessageNotification)
-        }
         ContextCompat.startForegroundService(this, Intent(this, VoiceCallService::class.java))
         setContent {
             VitiTheme {
@@ -127,7 +121,6 @@ class MainActivity : ComponentActivity() {
                     VitiApp(
                         viewModel = viewModel,
                         voiceRuntime = service.runtime,
-                        voiceClient = service.voiceClient,
                         onPlaceCall = ::placeCall,
                         onAnswerCall = { answerCall() },
                         onRejectCall = { service.runtime.reject() },
@@ -145,6 +138,8 @@ class MainActivity : ComponentActivity() {
                         onRequestCallNotifications = ::requestCallNotificationAccess,
                         onOpenFullScreenCallSettings = ::openFullScreenCallSettings,
                         onOpenCallChannelSettings = ::openCallChannelSettings,
+                        onOpenCallRingtoneSettings = ::openCallRingtoneSettings,
+                        onOpenBackgroundCallSettings = ::openBackgroundCallSettings,
 						onTestIncomingCall = ::testIncomingCall,
                     )
                 }
@@ -191,6 +186,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
+        viewModel.setVisible(true)
         bindService(Intent(this, VoiceCallService::class.java), voiceConnection, Context.BIND_AUTO_CREATE)
         publishClientIdentity()
         // Existing installs may have granted READ_CONTACTS for the old local-only
@@ -211,12 +207,12 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        viewModel.setVisible(false)
         contactsObserver?.let(contentResolver::unregisterContentObserver)
         contactsObserver = null
         contactReloadJob?.cancel()
         voiceSnapshotJob?.cancel()
         voiceSnapshotJob = null
-        voiceService?.detachVoiceView()
         if (voiceServiceBound) {
             unbindService(voiceConnection)
             voiceServiceBound = false
@@ -320,6 +316,16 @@ class MainActivity : ComponentActivity() {
             callChannelImportance = channelImportance,
             fullScreenIntentAllowed = fullScreenIntentAllowed(Build.VERSION.SDK_INT, platformAllowsFullScreen),
             fullScreenSettingAvailable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE,
+            backgroundCallsUnrestricted = getSystemService(android.os.PowerManager::class.java)
+                .isIgnoringBatteryOptimizations(packageName),
+            callSoundEnabled = getSystemService(android.media.AudioManager::class.java).let { audio ->
+                audio.ringerMode == android.media.AudioManager.RINGER_MODE_NORMAL &&
+                    audio.getStreamVolume(android.media.AudioManager.STREAM_RING) > 0 &&
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.O ||
+                        manager.getNotificationChannel(VoiceCallService.RINGTONE_CHANNEL_ID)?.let {
+                            it.sound != null && it.importance != NotificationManager.IMPORTANCE_NONE
+                        } == true)
+            },
         )
     }
 
@@ -342,14 +348,27 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun openCallChannelSettings() {
+        openNotificationChannelSettings(VoiceCallService.CALL_CHANNEL_ID)
+    }
+
+    private fun openCallRingtoneSettings() {
+        openNotificationChannelSettings(VoiceCallService.RINGTONE_CHANNEL_ID)
+    }
+
+    private fun openNotificationChannelSettings(channelId: String) {
         val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
                 .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                .putExtra(Settings.EXTRA_CHANNEL_ID, VoiceCallService.CALL_CHANNEL_ID)
+                .putExtra(Settings.EXTRA_CHANNEL_ID, channelId)
         } else {
             appNotificationSettingsIntent()
         }
         openSettings(intent)
+    }
+
+    private fun openBackgroundCallSettings() {
+        openSettings(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.parse("package:$packageName")))
     }
 
 	private fun testIncomingCall() {
@@ -377,34 +396,6 @@ class MainActivity : ComponentActivity() {
     private fun openSettings(intent: Intent) {
         runCatching { startActivity(intent) }
             .onFailure { viewModel.showNotice("Android did not provide this settings screen") }
-    }
-
-    private fun showIncomingMessageNotification(message: Message) {
-        if (Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) return
-        val notificationId = SMS_NOTIFICATION_BASE_ID + (message.id.hashCode() and 0x7fff)
-        val openApp = PendingIntent.getActivity(
-            this,
-            notificationId,
-            Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-        )
-        val senderNumber = message.from.ifBlank { "Unknown number" }
-        val sender = message.contactName.ifBlank { senderNumber }
-        val notification = NotificationCompat.Builder(this, MESSAGE_CHANNEL_ID)
-            .setSmallIcon(com.viti.operator.R.drawable.ic_launcher_foreground)
-            .setSound(RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION))
-            .setContentTitle(sender)
-            .setContentText(if (message.contactName.isBlank()) message.text else "$senderNumber · ${message.text}")
-            .setStyle(NotificationCompat.BigTextStyle().setSummaryText(if (message.contactName.isBlank()) null else senderNumber).bigText(message.text))
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setAutoCancel(true)
-            .setContentIntent(openApp)
-            .build()
-        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(notificationId, notification)
     }
 
     private fun withMicrophonePermission(action: () -> Unit) {
@@ -569,7 +560,6 @@ class MainActivity : ComponentActivity() {
     companion object {
         private const val MESSAGE_CHANNEL_ID = "incoming_messages_v1"
         private const val LEGACY_CALL_CHANNEL_ID = "incoming_calls"
-        private const val SMS_NOTIFICATION_BASE_ID = 5000
         private const val DEBUG_SERVER_URL = "com.viti.operator.test.SERVER_URL"
         private const val DEBUG_API_KEY = "com.viti.operator.test.API_KEY"
         const val ACTION_ANSWER_CALL = "com.viti.operator.action.ANSWER_CALL"

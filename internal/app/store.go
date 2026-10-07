@@ -43,6 +43,7 @@ type Store struct {
 	botConfiguration       BotConfiguration
 	botConfigurationSet    bool
 	diag                   *DiagnosticRecorder
+	history                *historyJournal
 }
 
 const clientLastSeenPersistInterval = time.Minute
@@ -879,5 +880,11 @@ func (s *Store) flushLocked() error {
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	if err := os.Rename(tmp, s.path); err != nil {
+		return err
+	}
+	if s.history != nil {
+		s.recordHistoryLocked()
+	}
+	return nil
 }

@@ -38,15 +38,7 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
-    sourceSets["main"].assets.srcDir(layout.buildDirectory.dir("generated/voiceAssets"))
 }
-
-val generateVoiceAssets by tasks.registering(Copy::class) {
-    from(rootProject.file("../internal/app/web/voice.bundle.js"))
-    into(layout.buildDirectory.dir("generated/voiceAssets"))
-}
-
-tasks.named("preBuild").configure { dependsOn(generateVoiceAssets) }
 
 val verifyDebugCarManifest by tasks.registering {
     dependsOn("processDebugManifest")
@@ -115,14 +107,22 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.10.0")
     implementation("androidx.datastore:datastore-preferences:1.1.7")
     implementation("androidx.webkit:webkit:1.14.0")
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("io.github.webrtc-sdk:android:150.7871.01")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
+    androidTestImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
-    androidTestImplementation("androidx.car.app:app-testing:1.7.0")
+    androidTestImplementation("androidx.car.app:app-testing:1.7.0") {
+        // Instrumented tests run on Android, not inside a Robolectric sandbox.
+        // Its service-loaded thread checker otherwise hijacks the device runner.
+        exclude(group = "org.robolectric")
+    }
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.7.0")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")

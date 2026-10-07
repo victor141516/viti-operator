@@ -39,7 +39,9 @@ internal class IncomingCallRinger(
     fun start() {
         if (ringtone?.isPlaying == true || !soundIsAllowed()) return
         stop()
-        val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
+        val channelSound = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O)
+            notificationManager.getNotificationChannel(channelId)?.sound else null
+        val uri = channelSound ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
             ?: return
         val next = RingtoneManager.getRingtone(applicationContext, uri) ?: return
@@ -65,6 +67,11 @@ internal class IncomingCallRinger(
 
     private fun soundIsAllowed(): Boolean {
         if (audioManager.ringerMode != AudioManager.RINGER_MODE_NORMAL) return false
+        if (audioManager.getStreamVolume(AudioManager.STREAM_RING) == 0) return false
+        if (notificationManager.currentInterruptionFilter in setOf(
+                NotificationManager.INTERRUPTION_FILTER_NONE,
+                NotificationManager.INTERRUPTION_FILTER_ALARMS,
+            )) return false
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return true
         val channel = notificationManager.getNotificationChannel(channelId) ?: return true
         return channel.importance != NotificationManager.IMPORTANCE_NONE && channel.sound != null

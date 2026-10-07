@@ -13,6 +13,8 @@ data class IncomingCallPresentationStatus(
     val callChannelImportance: Int? = null,
     val fullScreenIntentAllowed: Boolean = false,
     val fullScreenSettingAvailable: Boolean = false,
+    val backgroundCallsUnrestricted: Boolean = false,
+    val callSoundEnabled: Boolean = false,
 ) {
     val callChannelEnabled: Boolean
         get() = callChannelImportance == null || callChannelImportance > NotificationManager.IMPORTANCE_NONE

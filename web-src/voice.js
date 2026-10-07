@@ -479,18 +479,26 @@ export function createVoice(onEvent, audioElement, identity = {}) {
       iceServers = provisioning.ice_servers || []
       diagnosticsEnabled = provisioning.diagnostics_enabled === true
       diagnose('ua.starting', { provisioning })
-      const socket = new JsSIP.WebSocketInterface(provisioning.websocket_url)
+      const baseSocket = new JsSIP.WebSocketInterface(provisioning.websocket_url)
+      let socketOwner = null
+      const socket = baseSocket
       ua = new JsSIP.UA({ sockets: [socket], uri: `sip:${provisioning.username}@${provisioning.domain}`, password: provisioning.password, display_name: clientName, user_agent: `Viti Operator · ${clientName}`, register: true, session_timers: false })
+      socketOwner = ua
       ua.on('connecting', (event) => diagnose('ua.connecting', { attempts: event?.attempts }))
-      ua.on('connected', () => { diagnose('ua.connected'); emit('connected') })
-      ua.on('registered', (event) => { diagnose('ua.registered', { response: event?.response?.toString?.() }); emit('registered') })
-      ua.on('unregistered', (event) => {
-        diagnose('ua.unregistered', { cause: event?.cause })
-        emit('unregistered', { cause: event?.cause || '' })
+      ua.on('connected', () => { if (ua !== socketOwner) return; diagnose('ua.connected'); emit('connected', { leg_token: '' }) })
+      ua.on('registered', (event) => {
+        if (ua !== socketOwner) return
+        diagnose('ua.registered', { response: event?.response?.toString?.() })
+        emit('registered', { leg_token: '' })
       })
-      ua.on('disconnected', (event) => { diagnose('ua.disconnected', { code: event?.code, reason: event?.reason }); emit('disconnected') })
-      ua.on('registrationFailed', (event) => { diagnose('ua.registration-failed', { cause: event?.cause, response: event?.response?.toString?.() }); emit('registration-failed', { cause: event?.cause || '' }) })
-      ua.on('newRTCSession', ({ session: next, request }) => { diagnose('ua.new-session', { request: request?.toString?.() }, next); bindSession(next) })
+      ua.on('unregistered', (event) => {
+        if (ua !== socketOwner) return
+        diagnose('ua.unregistered', { cause: event?.cause })
+        emit('unregistered', { cause: event?.cause || '', leg_token: '' })
+      })
+      ua.on('disconnected', (event) => { if (ua !== socketOwner) return; diagnose('ua.disconnected', { code: event?.code, reason: event?.reason }); emit('disconnected', { leg_token: '' }) })
+      ua.on('registrationFailed', (event) => { if (ua !== socketOwner) return; diagnose('ua.registration-failed', { cause: event?.cause, response: event?.response?.toString?.() }); emit('registration-failed', { cause: event?.cause || '', leg_token: '' }) })
+      ua.on('newRTCSession', ({ session: next, request }) => { if (ua !== socketOwner) return; diagnose('ua.new-session', { request: request?.toString?.() }, next); bindSession(next) })
       ua.start()
     },
 	call(number, suppliedTraceID = '', suppliedLegToken = '', preserveState = false) {

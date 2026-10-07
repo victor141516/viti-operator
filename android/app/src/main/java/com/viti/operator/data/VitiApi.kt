@@ -124,7 +124,7 @@ class VitiApi(private val settings: ServerSettings) {
         .mapObjects(::callFromJson)
 
 	suspend fun isCarrierCallActive(traceId: String): Boolean =
-		calls().any { it.traceId == traceId && it.endedAt.isBlank() && it.state == "active" }
+		request("/api/v1/calls/active?trace_id=${urlSegment(traceId)}").optBoolean("active")
 
 	suspend fun leaveCallParticipant(traceId: String, identity: ClientIdentity, connectionId: String, previousConnectionId: String, operationId: String) {
 		rawRequest(
@@ -382,7 +382,7 @@ class VitiApi(private val settings: ServerSettings) {
         }
     }
 
-    private fun messageFromJson(body: JSONObject) = Message(
+    internal fun messageFromJson(body: JSONObject) = Message(
         id = body.optString("id"),
         direction = body.optString("direction"),
         from = body.optString("from"),
@@ -410,7 +410,7 @@ class VitiApi(private val settings: ServerSettings) {
         contactName = body.optString("contact_name"),
     )
 
-    private fun callFromJson(body: JSONObject) = Call(
+    internal fun callFromJson(body: JSONObject) = Call(
         id = body.optString("id"),
 		traceId = body.optString("trace_id"),
         direction = body.optString("direction"),

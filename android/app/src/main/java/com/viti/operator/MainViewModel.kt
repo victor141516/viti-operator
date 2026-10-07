@@ -20,16 +20,15 @@ import com.viti.operator.data.IMSRegistrationState
 import com.viti.operator.data.PhoneRoutingSettings
 import com.viti.operator.data.RecordingSettings
 import com.viti.operator.data.VitiApi
+import com.viti.operator.data.HistoryRepository
 import com.viti.operator.data.VoiceUiState
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
@@ -61,10 +60,11 @@ internal fun shouldReloadContacts(
 class MainViewModel(
     private val settingsStore: SettingsStore,
     private val countryDetector: SessionCountryDetector,
+    private val history: HistoryRepository,
 ) : ViewModel() {
     val settings: StateFlow<ServerSettings> = settingsStore.settings.stateIn(
         viewModelScope,
-        SharingStarted.WhileSubscribed(5_000),
+        SharingStarted.Eagerly,
         ServerSettings(),
     )
     val authService = RemoteAuthService.state
@@ -76,8 +76,8 @@ class MainViewModel(
 
     private val _uiState = MutableStateFlow(AppUiState())
     val uiState = _uiState.asStateFlow()
-    private val _incomingMessages = MutableSharedFlow<Message>(extraBufferCapacity = 16)
-    val incomingMessages = _incomingMessages.asSharedFlow()
+    private var visible = false
+    private var refreshJob: Job? = null
     private var clientIdentity: ClientIdentity? = null
     private var unversionedContactSnapshot: DeviceContactsSnapshot? = null
     private var latestContactSnapshot: DeviceContactsSnapshot? = null
@@ -87,7 +87,6 @@ class MainViewModel(
     private var contactSyncSettings: ServerSettings? = null
     private var contactsCacheSettings: ServerSettings? = null
     private var contactsCacheVersion: Long? = null
-    private val incomingMessageTracker = IncomingMessageTracker()
     private val sessionGeneration = UUID.randomUUID().toString()
     private val sessionCountry = viewModelScope.async { countryDetector.detect(sessionGeneration) }
 
@@ -98,51 +97,71 @@ class MainViewModel(
                     latestContactSnapshot?.let { pendingContactSnapshot = it }
                     startContactSync()
                 }
-                refresh()
+                _uiState.value = _uiState.value.copy(messages = emptyList(), calls = emptyList())
+                applyCachedHistory()
+                if (visible) refresh()
             }
         }
         viewModelScope.launch {
-            while (true) {
-                delay(5_000)
-                refresh(silent = true)
+            history.state.collect { snapshot ->
+                applyCachedHistory()
+                if (visible && snapshot.loaded && snapshot.source == HistoryRepository.sourceKey(settings.value) && snapshot.contactsVersion != contactsCacheVersion) refresh(silent = true)
             }
+        }
+        viewModelScope.launch {
+            history.metadataChanges.collect { if (visible) refresh(silent = true) }
         }
     }
 
-    fun refresh(silent: Boolean = false) = viewModelScope.launch {
-        if (!silent) _uiState.value = _uiState.value.copy(refreshing = true)
-        val refreshSettings = settings.value
-        val api = VitiApi(refreshSettings)
-        runCatching {
-            clientIdentity?.let { api.heartbeat(it) }
-            val status = api.status()
-            val contacts = if (shouldReloadContacts(contactsCacheSettings, contactsCacheVersion, refreshSettings, status.contactsVersion)) api.contacts() else null
-            RefreshData(status, api.messages(), api.calls(), contacts, api.imsRegistration(), api.recordingSettings(), api.topology())
-        }.onSuccess { data ->
-            val currentMessageSource = settings.value.serverUrl.trim().trimEnd('/')
-            val newIncomingMessages = incomingMessageTracker.update(currentMessageSource, data.messages)
-            data.contacts?.let {
-                contactsCacheSettings = refreshSettings
-                contactsCacheVersion = it.version
-            }
-            _uiState.value = _uiState.value.copy(
-                status = data.status,
-                messages = data.messages,
-                calls = data.calls,
-                contacts = data.contacts?.contacts ?: _uiState.value.contacts,
-				serverIMS = data.serverIMS,
-                recording = data.recording,
-                topology = data.topology,
-                refreshing = false,
-                notice = "",
-            )
-            newIncomingMessages.forEach(_incomingMessages::tryEmit)
-        }.onFailure { error ->
-            _uiState.value = _uiState.value.copy(
-                refreshing = false,
-                notice = error.message ?: "Could not contact the server",
-            )
+    fun setVisible(value: Boolean) {
+        visible = value
+        if (value) { applyCachedHistory(); refresh(silent = true) }
+        else refreshJob?.cancel()
+    }
+
+    private fun applyCachedHistory() {
+        val snapshot = history.state.value
+        if (snapshot.source == HistoryRepository.sourceKey(settings.value)) {
+            _uiState.value = _uiState.value.copy(messages = snapshot.messages, calls = snapshot.calls)
         }
+    }
+
+    fun refresh(silent: Boolean = false): Job {
+        history.requestCheck()
+        refreshJob?.takeIf { it.isActive }?.let { return it }
+        if (!visible) return viewModelScope.launch { }
+        return viewModelScope.launch {
+            if (!silent) _uiState.value = _uiState.value.copy(refreshing = true)
+            val refreshSettings = settings.value
+            val api = VitiApi(refreshSettings)
+            runCatching {
+                val status = api.status()
+                val contacts = if (shouldReloadContacts(contactsCacheSettings, contactsCacheVersion, refreshSettings, status.contactsVersion)) api.contacts() else null
+                RefreshData(status, contacts, api.imsRegistration(), api.recordingSettings(), api.topology())
+            }.onSuccess { data ->
+                if (settings.value != refreshSettings) return@onSuccess
+                data.contacts?.let {
+                    contactsCacheSettings = refreshSettings
+                    contactsCacheVersion = it.version
+                }
+                _uiState.value = _uiState.value.copy(
+                    status = data.status,
+                    contacts = data.contacts?.contacts ?: _uiState.value.contacts,
+                    serverIMS = data.serverIMS,
+                    recording = data.recording,
+                    topology = data.topology,
+                    refreshing = false,
+                    notice = "",
+                )
+            }.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                if (settings.value != refreshSettings) return@onFailure
+                _uiState.value = _uiState.value.copy(
+                    refreshing = false,
+                    notice = error.message ?: "Could not contact the server",
+                )
+            }
+        }.also { refreshJob = it }
     }
 
     fun setClientIdentity(identity: ClientIdentity) {
@@ -313,15 +332,14 @@ class MainViewModel(
     class Factory(
         private val store: SettingsStore,
         private val countryDetector: SessionCountryDetector,
+        private val history: HistoryRepository,
     ) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
-        override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(store, countryDetector) as T
+        override fun <T : ViewModel> create(modelClass: Class<T>): T = MainViewModel(store, countryDetector, history) as T
     }
 
     private data class RefreshData(
         val status: RuntimeStatus,
-        val messages: List<Message>,
-        val calls: List<Call>,
         val contacts: ServerContactsSnapshot?,
 		val serverIMS: IMSRegistrationState,
         val recording: RecordingSettings,

@@ -17,6 +17,13 @@ integrity, version, and license are recorded in `web-src/package-lock.json`.
 The Gradle wrapper and Android dependencies retain their upstream licenses and
 notices.
 
+Android voice uses OkHttp 4.12.0 (Apache 2.0) and the pinned
+`io.github.webrtc-sdk:android:150.7871.01` native WebRTC distribution from
+https://github.com/webrtc-sdk/android (MIT packaging project). Its native WebRTC
+implementation originates at https://webrtc.googlesource.com/src and retains
+the upstream BSD-style license, patent grant and bundled component notices.
+The Android client no longer packages JsSIP; the web client still does.
+
 The default per-session country fallback calls the external `api.country.is`
 service directly from the client. It is a runtime service dependency rather than
 vendored software; operators must separately assess its privacy, availability,

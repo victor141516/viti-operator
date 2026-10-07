@@ -99,10 +99,6 @@ func (d *DiagnosticRecorder) RecordPacket(port int, direction, source, destinati
 }
 
 func (a *App) diagnosticEvent(w http.ResponseWriter, r *http.Request) {
-	if a.diag == nil {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
 	var payload any
 	if err := readJSON(r, &payload, 4<<20); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -119,6 +115,18 @@ func (a *App) diagnosticEvent(w http.ResponseWriter, r *http.Request) {
 		if value, ok := object["kind"].(string); ok && strings.TrimSpace(value) != "" {
 			kind = value
 		}
+		if source == "android-signaling" && kind == "signaling.snapshot" {
+			if !a.voiceDiagnostics.add(object["data"]) {
+				writeError(w, http.StatusBadRequest, "Invalid signaling snapshot")
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+	}
+	if a.diag == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
 	}
 	a.diag.RecordTrace(source, kind, traceID, map[string]any{
 		"remote_address": r.RemoteAddr,

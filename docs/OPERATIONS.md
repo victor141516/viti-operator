@@ -150,8 +150,8 @@ Output:
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The Android build copies the same generated JsSIP bundle into application
-assets before compilation.
+Android uses native SIP/WebRTC and does not package the browser's JsSIP bundle.
+Its connection-graph WebView is presentation only.
 
 ## Service responsibilities and ports
 
@@ -318,12 +318,14 @@ Bluetooth route discovery or control is required. The application declares
 `MANAGE_OWN_CALLS`, foreground-service `specialUse`/`phoneCall`, audio-settings,
 and microphone permissions; it does not declare or request the dialer role.
 
-Open **Connection → Incoming call alerts** to inspect three separate Android
+Open **Connection → Incoming call alerts** to inspect separate Android
 capabilities:
 
 - global notification access;
 - the current importance of the **Incoming calls** notification channel;
-- the full-screen call-alert grant exposed by Android 14 and later.
+- the full-screen call-alert grant exposed by Android 14 and later;
+- ringtone availability (ringer mode, ring volume, and call-channel sound);
+- whether Android battery optimization is disabled for Viti.
 
 The foreground voice service separately monitors whether this device is
 registered with Viti Server. Native authenticated probes check voice provisioning
@@ -332,6 +334,22 @@ WebView throttling cannot leave a stale connected notification behind. Readiness
 requires local registration, a reachable API, and an operational carrier tunnel
 and IMS registration. SIM availability alone is not sufficient; conversely, a
 temporarily missing SIM does not invalidate an established carrier connection.
+
+A native SIP supervisor runs every second without a WebView. Registration
+refreshes at most once per minute, sooner for short leases; timed-out transactions
+are cleared before retrying. Readiness follows the matching Contact and transaction,
+not an arbitrary confirmation age or another client's lease. Connection loss or
+lease expiry starts the existing outage alert. Active media interruption follows
+logical-participant rejoin, not explicit carrier hangup. A separate 30-second
+service probe uses a renewable, bounded
+partial wake-lock lease while voice is enabled and requests sticky restart after
+system process removal; this restores signaling for future calls, not an old leg.
+Force-stop is different: reopen the app after force-stopping it.
+
+Use **Manage background call access** to allow background activity and
+unrestricted battery use for Viti, and give Tailscale equivalent background
+access. A foreground service or wake lock alone does not bypass Android Doze,
+OEM battery restrictions, a disconnected VPN, or a DNS failure.
 
 Local voice/API connection loss receives a 30-second initial grace period, or
 15 seconds after a previously established connection. Android then shows an
@@ -353,7 +371,15 @@ presentation; it does not force Android or the device manufacturer to launch
 the Activity in every foreground or unlocked state. When full-screen use is
 not permitted, Android normally presents the same call as an expanded heads-up
 notification. The service-owned ringtone is independent of notification sound
-and continues only while the local leg is ringing.
+and continues only while the local leg is ringing, even if no call Activity
+opens. Incoming CallStyle notifications use a separate high-importance soundless
+visual channel and are not explicitly silent: `setSilent(true)` suppresses
+heads-up/FSI as well as notification audio. **Manage floating call alerts** opens
+the visual channel settings; enable high priority/pop-on-screen there if Android
+or the OEM has reduced prominence. **Manage call ringtone** opens the retained
+ringtone preferences. Ongoing call notifications remain explicitly silent.
+Silent mode, ring volume, channel sound/disable settings,
+and Do Not Disturb remain respected.
 
 Use **Test incoming call** on the same card to schedule a local-only call after
 two seconds. Leave the app or lock the phone during that interval to verify the
@@ -856,6 +882,92 @@ unanswered initial IKE request occurs before SIM authentication and before SMS
 exchange. Check the host's effective route, including any VPN exit node, rather
 than assuming a missing SMS ACK caused the tunnel failure. A VPN bypass test
 changes the traffic's privacy/routing boundary and must be explicitly approved.
+
+## Android background voice registration
+
+### History bandwidth and cache recovery
+
+Current Android builds use `/api/v1/history/ws` for push history updates and an
+atomic app-private cache. They must not fetch `/messages` and `/calls` every
+five seconds while idle or minimized. Updating the server alone does not remove
+an older APK's polling: install the matching APK over the existing app and open
+it once to resume its foreground service. This does not reset its settings.
+
+The first connection downloads a baseline. Later app openings and reconnects
+check the saved cursor and download only changed IDs. Server restart, replay
+eviction, account changes, or detected cache divergence can cause one full
+replacement. SMS receipts and call endings must update existing cached rows;
+they are not limited to newly inserted IDs. SMS alerts originate from the
+service even when the Activity is absent, without re-alerting the initial
+historical baseline.
+
+Verify using the focused Go history tests, `HistoryLedgerTest`, and the
+instrumented `HistoryRepositoryTest` before deployment. The latter exercises
+idle traffic, live push, older call updates, an explicit empty check, durable
+restart/resume, corruption/gap recovery and account isolation with local mock
+servers; it sends no carrier calls, SMS or paid API traffic. Inspect only
+response byte sizes/counts or sanitized counters during real-instance checks,
+not history bodies, phone numbers or credentials. Idle history should have no
+application-data batches apart from deliberate checks; WebSocket ping/pong,
+SIP renewals, native presence, diagnostics and small call-readiness probes still
+generate modest traffic. Audio during an actual call is separate.
+
+### Signaling diagnostics
+
+An API heartbeat or a healthy carrier tunnel does not prove that Android's
+local SIP contact is registered. For a background-only failure, compare the
+phone's Asterisk contact expiry with the restricted signaling snapshots from
+`GET /api/v1/diagnostics/voice` (normal API key required). Leave full diagnostic
+capture disabled. The probe APK reports every native 30-second service tick
+and registration transitions without recording SIP, phone numbers, or audio.
+
+The build marker confirms which APK is actually running. For the old diagnostic
+APK, compare native `tick_count` and WebView `dispatch_count` with `js_status_age_ms`:
+advancing native counters with increasing acknowledgement age indicates that
+the JavaScript bridge is no longer answering; it does not by itself identify
+the Android/OEM cause. Fresh acknowledgements without a renewed server contact
+require investigation of SIP renewal/transport instead. A gap in server receipt
+times can mean native suspension, process death, or API/network loss; correlate
+the runtime session and uptime before assigning a cause.
+
+Reproduce by opening the updated app once, returning to the launcher, and
+leaving it in the background until the warning appears. Do not reopen it before
+retrieving evidence: returning to the foreground can restore registration and
+hide the failed state. Stock-emulator tests are not proof of OnePlus/ColorOS
+background behavior. The probe is bounded and volatile, not a call-readiness
+signal or a persistent telemetry archive. See [API.md](API.md) for retention.
+
+The fully native build (`native-voice-20261007`) reports `socket_sent`,
+`socket_received`, `socket_state` (`open`, `connecting`, `closed`), and
+`webview_owned: false`. Its dispatch counter is native SIP maintenance, not
+JavaScript execution. JavaScript age/attachment fields apply only to the old
+diagnostic APK. The counters are not packet captures. Component tests run without
+UI and cover registration, encrypted two-way media and DTMF; they are not proof
+that a particular remote phone/OEM passed user acceptance testing.
+
+### Isolated native Android/Asterisk laboratory
+
+The fixtures in `test/native-voice-lab` use the existing engine image but override
+its entrypoint with Asterisk only. They have no SIM, SWu, IMS, carrier, manager
+webhook or external dial route. Only loopback WebSocket/HTTP and ten loopback RTP
+ports are published. `10.0.2.2` below is the stock Android emulator's host-loopback
+alias, not a deployment address.
+
+```powershell
+$labPath = Join-Path (Get-Location) 'test/native-voice-lab'
+docker run -d --rm --name viti-native-voice-lab --label org.viti.test=native-voice-lab --entrypoint python3 -e NATIVE_LAB_ADVERTISE=10.0.2.2 -p 127.0.0.1:18789:8088/tcp -p 127.0.0.1:14600-14609:14600-14609/udp --mount "type=bind,source=$labPath,target=/lab,readonly" viti-operator-engine /lab/start.py
+adb -s <emulator-serial> install -r android/app/build/outputs/apk/debug/app-debug.apk
+adb -s <emulator-serial> install -r android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
+adb -s <emulator-serial> shell am instrument -w -e native_lab_url ws://10.0.2.2:18789/ws -e class com.viti.operator.voice.NativeAsteriskInteropTest com.viti.operator.test/androidx.test.runner.AndroidJUnitRunner
+docker stop viti-native-voice-lab
+```
+
+Verify the named container's `org.viti.test=native-voice-lab` label before stopping
+it. The `--rm` container is disposable and mounts fixtures read-only. The opt-in
+test validates digest registration, local echo/RTP, DTMF, an ARI-originated inbound
+call, native answer and remote BYE. Normal instrumented tests skip this fixture
+unless an explicit loopback lab URL is supplied. Never substitute production
+credentials, a carrier destination or a public port.
 
 ## Backup and retention
 

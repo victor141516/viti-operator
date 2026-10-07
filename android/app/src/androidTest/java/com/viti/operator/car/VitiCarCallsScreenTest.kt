@@ -2,9 +2,11 @@ package com.viti.operator.car
 
 import androidx.car.app.model.ListTemplate
 import androidx.car.app.model.MessageTemplate
+import androidx.car.app.model.Row
 import androidx.car.app.testing.TestCarContext
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.viti.operator.voice.VoiceCallSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -16,7 +18,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class VitiCarCallsScreenTest {
     @Test
-    fun directoryTemplateShowsBoundedSafeTargets() {
+    fun directoryTemplateShowsBoundedSafeTargets() = onMain {
         val controller = FakeController(
             CarCallState(
                 coreTelecomAvailable = true,
@@ -27,15 +29,15 @@ class VitiCarCallsScreenTest {
         )
 
         val template = screen(controller).onGetTemplate() as ListTemplate
-        val row = template.singleList!!.items.single()
+        val row = template.singleList!!.items.single() as Row
 
         assertEquals("Viti Operator", template.header!!.title.toString())
-        assertTrue(row.toString().contains("Alice"))
-        assertTrue(row.toString().contains("+34600000001"))
+        assertEquals("Alice", row.title.toString())
+        assertTrue(row.texts.any { it.toString().contains("+34600000001") })
     }
 
     @Test
-    fun activeCallDefersControlsToTheAndroidAutoSystemSurface() {
+    fun activeCallDefersControlsToTheAndroidAutoSystemSurface() = onMain {
         val controller = FakeController(
             CarCallState(
                 coreTelecomAvailable = true,
@@ -51,7 +53,7 @@ class VitiCarCallsScreenTest {
     }
 
     @Test
-    fun unsupportedTelecomIsReportedWithoutPretendingCallsWillWork() {
+    fun unsupportedTelecomIsReportedWithoutPretendingCallsWillWork() = onMain {
         val template = screen(FakeController(CarCallState())).onGetTemplate() as MessageTemplate
 
         assertTrue(template.message.toString().contains("Core-Telecom is unavailable"))
@@ -61,6 +63,8 @@ class VitiCarCallsScreenTest {
         val context = TestCarContext.createCarContext(ApplicationProvider.getApplicationContext())
         return VitiCarCallsScreen(context, controller)
     }
+
+    private fun onMain(action: () -> Unit) = InstrumentationRegistry.getInstrumentation().runOnMainSync { action() }
 
     private class FakeController(initial: CarCallState) : CarCallController {
         override val state: StateFlow<CarCallState> = MutableStateFlow(initial)

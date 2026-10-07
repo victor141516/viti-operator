@@ -126,15 +126,37 @@ duration matches the press, so a long press does not become repeated digits.
 
 The native application uses Kotlin, Jetpack Compose, Material 3, coroutines,
 DataStore, and AndroidX WebKit. It targets API 36 and supports API 24 and later.
-The voice layer reuses the same bundled JsSIP implementation inside a controlled
-WebView, which keeps call signaling behavior aligned with the web client.
+`VoiceCallService` owns a fully native `VoiceEngineControl` implementation:
+`NativeVoiceClient` supervises Kotlin SIP signaling over an OkHttp WebSocket,
+and `NativeWebRtcMedia` owns native WebRTC audio, ICE, DTLS/SRTP, mute and RFC 4733
+DTMF. The WebRTC SDK is pinned to `io.github.webrtc-sdk:android:150.7871.01`.
+It is loaded only when preparing call media; idle registration opens no microphone.
+The APK no longer includes the JsSIP voice bundle or a hidden voice WebView.
+Only the visual connection graph uses WebView and may stop while the UI is absent.
+The browser client continues using its own JsSIP/WebRTC implementation.
 
-`VoiceCallService` owns that hidden WebView, the SIP/WebRTC runtime, and the
-current Android call leg. Compose activities only attach to the process-owned
-state, so ordinary activity recreation, navigation, or detachment does not end
-a call. This is not durable call restoration: if Android kills the application
-process, the local SIP leg and its in-memory Telecom scope are lost and normal
-server-side stale-call reconciliation applies.
+Registration, signaling, media, reconnection, ringing, notifications, SMS and
+background monitoring operate without creating an Activity or WebView. Compose
+activities subscribe to process-owned snapshots; recreation and backgrounding
+do not own or end a call. Process death still loses the volatile SIP leg and
+Telecom scope. Sticky foreground-service restart restores future signaling, not
+that lost leg. Native SIP maintenance runs once per second. A separate 30-second
+service probe renews a bounded partial wake-lock and emits restricted diagnostics.
+Registration renews at most once per minute, sooner for short server-granted
+leases. Responses must match Call-ID, CSeq and Via branch and include this
+device's own Contact. Timed-out registration transactions are cleared before retry.
+
+The WebSocket uses 25-second pings and fences replaced generations. Default TLS
+validation remains intact. This SIP actor serves only the trusted Asterisk
+client leg, not carrier IMS or SWu. Native media gathers complete non-trickle SDP,
+including candidates from JNI callbacks, and uses provisioned TURN when present.
+Statistics report interval loss, selected ICE route and media-path RTT without
+retaining addresses or packets. SDP setup is asynchronous and cannot block
+Telecom's bounded answer callback. Late answers after local hangup are ACKed and
+released, not revived. Network/media loss follows logical-participant rejoin;
+a valid remote BYE is terminal. OEM background settings remain relevant; there
+is no FCM push service. Isolated tests cover native signaling, audio and Asterisk
+interoperability without any UI; remote-device acceptance is a separate check.
 
 On API 26 and later, when the device exposes `FEATURE_TELECOM`, the client
 registers with AndroidX Core-Telecom as a self-managed VoIP application. It
@@ -146,7 +168,7 @@ requires microphone permission, and a system or accessory answer without that
 permission rejects only the matching Viti leg.
 
 Every local leg has an immutable token shared by native callbacks, notification
-actions, and the JavaScript bridge. Delayed actions and events for an older leg
+actions, and the native voice engine. Delayed actions and events for an older leg
 are ignored. The leg remains in an explicit `ENDING` state until the
 Core-Telecom call scope has actually finished; a failed disconnect remains
 visible and retryable rather than freeing the slot prematurely. Provisioning
@@ -204,6 +226,14 @@ global notification access and the actual `Incoming calls` channel importance
 are independent capabilities. The Connection screen reports these observed
 values without promising a particular OEM presentation. The Viti ringtone is
 owned separately by the service and stops when that local leg leaves `RINGING`.
+The incoming CallStyle notification uses a high-importance soundless visual
+channel, not `setSilent(true)`, which also suppresses heads-up/FSI presentation.
+The existing ringtone channel retains the user's sound and mute preferences;
+the visual channel initially inherits its importance and vibration choice.
+Only ongoing call notifications are explicitly silent. The service
+starts its ringtone after a short token-fenced notification handoff, regardless
+of whether an Activity opens, and cancels pending sound if the leg ends first.
+It respects silent mode, ring volume, channel sound/disable settings, and DND.
 
 The manager and conference remain authoritative across devices. All eligible
 clients ring until the backend selects an answer or ends their fork. Losing
@@ -247,6 +277,37 @@ The connection topology is also rendered from one shared server-owned web view.
 Native Compose owns navigation, settings, notifications, and accessibility;
 the embedded topology surface owns pan, pinch-to-zoom, hit testing, and detail
 popovers.
+
+Android history synchronization is owned by `VoiceCallService` through a native
+`HistoryRepository`, independently of the Activity and topology WebView. A
+separate authenticated application-data WebSocket carries versioned history
+batches; it does not grant bot permissions or carry SIP/media. `MainViewModel`
+observes cached calls/messages and no longer downloads both lists every five
+seconds. Opening the Activity requests an explicit checkpoint check, and
+visible metadata refreshes are coalesced. The embedded graph refreshes only
+when configured by the visible native UI, not on an independent background
+five-second interval.
+
+The existing store lock serializes the baseline, volatile replay journal and
+durable mutations. After successful store writes, canonical public row diffs
+capture updates to old SMS/call IDs, contact names, screening summaries and
+recording metadata. The journal is bounded by 256 changes and 4 MiB of replay
+data. Each process generation has distinct checkpoints: a stale or evicted
+checkpoint receives an authoritative full baseline. The journal does not
+introduce a second durable database or change volatile call recovery.
+
+Android stores rows and checkpoint atomically in app-private, backup-excluded
+storage with a payload checksum and server/API-key scope fingerprint. Corruption
+or account changes invalidate the cache. Cursor gaps request a full replacement;
+disk-write failures retain coherent in-memory state instead of causing repeated
+full downloads. Native service-owned SMS notifications compare incoming IDs
+against the committed baseline, so initial history does not generate old-message
+alerts. The first response after reconnect also invalidates visible metadata.
+
+Presence heartbeats remain native and compact (20 seconds). SIP renewal, the
+existing ten-second voice/API/carrier availability checks, connection alerts,
+and call audio are independent of history synchronization. Removing history
+polling must not suspend any of these call-readiness mechanisms.
 
 Shizuku is optional but required for the remote-SIM routing controls that change
 the allowed radio technologies and native IMS state. It does not turn an
@@ -955,7 +1016,7 @@ protected after testing.
 | Go singleton manager | Small static binary, simple concurrency, reliable embedded assets | Horizontal scaling needs an external store/event bus |
 | Asterisk carrier engine | Mature SIP, IMS patches, media translation, and conferencing | Engine image is specialized and privileged |
 | strongSwan userspace IPsec | Mature IKEv2/rekey state machine while keeping ESP on a TUN device | Engine requires `NET_ADMIN` and `/dev/net/tun` |
-| Shared JsSIP voice layer | Web and Android follow the same SIP/WebRTC behavior | Android voice depends on a controlled WebView |
+| Native Android SIP/WebRTC engine | Voice continues without an Activity or WebView | Interoperability is checked against the isolated Asterisk lab |
 | Self-managed Android Telecom | Native concurrency, endpoints and headset actions without becoming the default dialer | API 24-25 and devices without Telecom use a vendor-dependent legacy audio path |
 | Process-owned Android call service | Activity recreation does not destroy a call | Android process death still loses the local SIP leg |
 | Token-validated incoming-call projection | Lock-screen and heads-up actions cannot revive or mutate a stale leg | Final full-screen behavior remains Android/OEM policy |

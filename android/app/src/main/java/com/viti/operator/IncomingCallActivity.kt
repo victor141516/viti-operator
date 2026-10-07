@@ -104,7 +104,6 @@ class IncomingCallActivity : ComponentActivity() {
                 return
             }
             serviceValidated = true
-            connected.takeOverIncomingRingtone(expectedToken)
             snapshotJob?.cancel()
             snapshotJob = lifecycleScope.launch {
                 connected.snapshot.collect { current ->
